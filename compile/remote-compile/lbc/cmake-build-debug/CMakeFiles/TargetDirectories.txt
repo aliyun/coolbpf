@@ -1,0 +1,3 @@
+/Users/liaozhaoyan/work/sh/c/lbc/cmake-build-debug/CMakeFiles/rebuild_cache.dir
+/Users/liaozhaoyan/work/sh/c/lbc/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/liaozhaoyan/work/sh/c/lbc/cmake-build-debug/CMakeFiles/lbc.dir

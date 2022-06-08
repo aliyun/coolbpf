@@ -1,0 +1,2 @@
+/Library/Developer/CommandLineTools/usr/bin/ar qc liblbc.a CMakeFiles/lbc.dir/src/bpf_init.c.o CMakeFiles/lbc.dir/bpf/hello.bpf.c.o
+/Library/Developer/CommandLineTools/usr/bin/ranlib liblbc.a

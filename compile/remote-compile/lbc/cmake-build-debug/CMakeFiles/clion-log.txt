@@ -1,0 +1,16 @@
+/Applications/CLion.app/Contents/bin/cmake/mac/bin/cmake -DCMAKE_BUILD_TYPE=Debug -G "CodeBlocks - Unix Makefiles" /Users/liaozhaoyan/work/sh/c/lbc
+-- Configuring done
+CMake Error at CMakeLists.txt:6 (add_library):
+  Cannot find source file:
+
+    bpf/hello.bpf.c
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .m .M .mm .h .hh .h++ .hm
+  .hpp .hxx .in .txx .f .F .for .f77 .f90 .f95 .f03 .ispc
+
+
+CMake Error at CMakeLists.txt:6 (add_library):
+  No SOURCES given to target: lbc
+
+
+CMake Generate step failed.  Build files cannot be regenerated correctly.
