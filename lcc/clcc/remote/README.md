@@ -9,11 +9,11 @@
 - 编译要求：本地已安装gcc/make
 
 ## 1.2 验证过程
-&emsp;参考6.3的例程，先clone 代码 make：
+&emsp;参考pylcc 6.3的例程，先clone 代码 make：
 
 ```bash
-git clone git@gitee.com:anolis/surftrace.git
-cd clcc
+git clone git@github.com:aliyun/coolbpf.git
+cd lcc/clcc/remote/
 make
 ```
 
