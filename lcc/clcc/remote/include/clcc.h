@@ -23,6 +23,7 @@ static const char * clcc_funcs[] = {
     "lbc_set_event_cb",
     "lbc_event_loop",
     "lbc_map_lookup_elem",
+    "lbc_map_update_elem",
     "lbc_map_lookup_and_delete_elem",
     "lbc_map_delete_elem",
     "lbc_map_get_next_key",
@@ -89,6 +90,17 @@ struct clcc_struct{
      * return: 0 if success.
      */
     int  (*map_lookup_elem)(int id, const void *key, void *value);
+    /*
+     * member: map_update_elem
+     * description: update map in user.
+     * arg1: event id, get from get_maps_id.
+     * arg2: key point.
+     * arg3: value point.
+     * arg4: flag.
+     * return: 0 if success.
+     */
+    int  (*map_update_elem)(int id, const void *key, const void *value, unsigned long int flag);
+
     /*
      * member: map_lookup_and_delete_elem
      * description: lookup element by key then delete key.
