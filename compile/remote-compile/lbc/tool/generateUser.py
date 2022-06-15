@@ -134,6 +134,20 @@ int lbc_map_lookup_elem(int id, const void *key, void *value)
     return bpf_map_lookup_elem(fd, key, value);
 }
 
+int lbc_map_update_elem(int id, const void *key, const void *value, unsigned long int flag)
+{
+    int fd;
+    struct bpf_object_skeleton *s;
+
+    s = lbc_skel->skeleton;
+    if (id >= s->map_cnt) {
+        return -1;
+    }
+
+    fd = lbc_maps[id].mapFd;
+    return bpf_map_update_elem(fd, key, value, flag);
+}
+
 int lbc_map_lookup_and_delete_elem(int id, const void *key, void *value)
 {
     int fd;
