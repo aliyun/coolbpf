@@ -1,14 +1,43 @@
 # 1 clcc
 &emsp;clcc与pylcc原理基本一致，不同的是开发语言为C语言，属于静态语言版本，适用于bpf.c程序比较固定的场景
+
 ## 1.1 准备工作
 
 基本要求
+
 - 能力要求：熟悉c，libpf开发特性，
-- python2.7 或者python3，pylcc >=0.2.7，可以执行pip install -U pylcc
+- python2.7 或者python3，coolbpf >=0.1.1，可以执行pip install -U coolbpf
 - 环境要求：可以访问pylcc.openanolis.cn或自己建远程编译服务
 - 编译要求：本地已安装gcc/make
 
-## 1.2 验证过程
+## 1.2 coolbpf 命令说明
+
+```bash
+optional arguments:
+  -h, --help            show this help message and exit
+  -f FILE, --file FILE  set file to compile.
+  -e ENV, --env ENV     set compile env.
+  -a ARCH, --arch ARCH  set architecture.
+  -v VER, --version VER
+                        set kernel version.
+  -i INC, --include INC
+                        set include path.
+  -o, --obj             compile object file only.
+```
+&emsp;如要将hello.bpf.c 编译成hello.so，执行：
+
+```bash
+coolbpf -f hello.bpf.c
+```
+
+&emsp;编译成 hello.bpf.o，执行：
+
+```bash
+coolbpf -f hello.bpf.c -o
+```
+
+
+## 1.3 验证过程
 &emsp;参考pylcc 6.3的例程，先clone 代码 make：
 
 ```bash
