@@ -10,7 +10,7 @@ int main(int argc,char *argv[]) {
         printf("open so file failed.\n");
         exit(-1);
     }
-    pclcc->init(-1);
+    pclcc->init(-1, 1);
     pause();
     pclcc->exit();
     clcc_deinit(pclcc);
