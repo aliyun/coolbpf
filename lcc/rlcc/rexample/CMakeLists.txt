@@ -2,7 +2,7 @@
 
 
 add_custom_command(
-    OUTPUT .output
+    OUTPUT output
     COMMAND mkdir -p .output
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf/
     COMMENT "Create .output directory"
@@ -17,8 +17,8 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT example.skel.rs
-    COMMAND ${PROJECT_SOURCE_DIR}/tools/cargo-libbpf libbpf gen --object ../example.bpf.o > example.skel.rs
-    DEPENDS .output example.bpf.o
+    COMMAND ${PROJECT_SOURCE_DIR}/lcc/rlcc/tools/cargo-libbpf libbpf gen --object ../example.bpf.o > example.skel.rs
+    DEPENDS output example.bpf.o
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf/.output
     COMMENT "Local Compile: Generate example.skel.rs"
 )
