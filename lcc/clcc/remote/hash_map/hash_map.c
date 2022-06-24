@@ -54,7 +54,7 @@ static void stop(int signo){
 }
 
 int main(int argc,char *argv[]) {
-    struct clcc_struct* pclcc = clcc_init("./hash_map.so");
+    struct clcc_struct* pclcc = clcc_init("./"SO_NAME);
 
     if (pclcc == NULL) {
         printf("open so file failed.\n");
@@ -62,7 +62,7 @@ int main(int argc,char *argv[]) {
     }
 
     signal(SIGINT, stop);
-    pclcc->init(-1);
+    pclcc->init(-1, 1);
     printf("The program starts executing and will exit after 10 seconds.\n");
     event_run(pclcc);
 

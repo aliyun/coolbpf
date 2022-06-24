@@ -15,29 +15,28 @@ __author__ = 'liaozhaoyan'
 
 import sys
 import os
-import base64
 import ctypes as ct
 import _ctypes as _ct
-import time
 import json
-import socket
 import hashlib
 from pylcc.lbcMaps import CmapsEvent, CmapsHash, CmapsArray, \
     CmapsLruHash, CmapsPerHash, CmapsPerArray, CmapsLruPerHash, CmapsStack
-from pylcc.lbcMaps import CtypeData
 from surftrace.execCmd import CexecCmd
-from surftrace.surfException import InvalidArgsException, RootRequiredException, FileNotExistException
+from surftrace.surfException import InvalidArgsException, RootRequiredException, FileNotExistException, DbException
+from surftrace.lbcClient import ClbcClient, segDecode
+from pylcc.lbcInclude import ClbcInclude
 
-LBC_COMPILE_PORT = 7654
-buffSize = 80 * 1024 * 1024
+LBC_COMPILE_PORT = 7655
 
 
-class ClbcBase(object):
+class ClbcLoad(object):
     def __init__(self, bpf, bpf_str="",
                  server="pylcc.openanolis.cn",
                  arch="", ver="", env="",
-                 workPath=None, logLevel=-1):
-
+                 workPath=None, incPath=None,
+                 logLevel=-1, btf=True,
+                 opt="so",
+                 ):
         if "LBC_SERVER" in os.environ:
             server = os.environ["LBC_SERVER"]
         if "LBC_LOGLEVEL" in os.environ:
@@ -46,72 +45,85 @@ class ClbcBase(object):
             self._wPath = workPath
         else:
             self._wPath = os.getcwd()
-        super(ClbcBase, self).__init__()
-        self.__need_del = False
+        self._incPath = incPath
+        super(ClbcLoad, self).__init__()
+        self._so = None
+        self._need_deinit = False
         self._server = server
-        c = CexecCmd()
-        self.__checkRoot(c)
+        self._c = CexecCmd()
+        if btf:
+            self._checkRoot()
         self._env = env
         self._logLevel = logLevel
 
         if ver == "":
-            ver = c.cmd('uname -r')
+            ver = self._c.cmd('uname -r')
         if arch == "":
-            arch = self._getArchitecture(c)
-        self.__checkBtf(ver, arch)
-        bpf_so = self.__getSo(bpf, bpf_str, ver, arch)
+            arch = self._c.cmd('uname -m')
 
-        self.__loadSo(bpf_so)
-        self.maps = {}
-        self._loadMaps()
+        if btf:
+            self._checkBtf(ver, arch)
+        if bpf.endswith(".bpf.c"):
+            bpf = bpf[:-6]
+        if opt == "so":
+            self._getSo(bpf, bpf_str, ver, arch)
+        elif opt == "obj":
+            self._compileObj(bpf, bpf_str, ver, arch)
+        elif opt == "combine":
+            pass
 
     def __del__(self):
-        if self.__need_del:
-            self.__so.lbc_bpf_exit()
+        if self._so:
+            self._closeSo()
 
-    def __checkBtf(self, ver, arch):
+    def _deinitSo(self):
+        self._checkSo()
+        self._so.lbc_bpf_exit()
+        self._need_deinit = False
+
+    def _closeSo(self):
+        if self._need_deinit:
+            self._deinitSo()
+        _ct.dlclose(self._so._handle)
+        self._so = None
+
+    def _checkBtf(self, ver, arch):
         if os.path.exists('/sys/kernel/btf/vmlinux'):
             return
         name = "/boot/vmlinux-%s" % ver
         if not os.path.exists(name):
-            dSend = {"cmd": 'btf', 'ver': ver, 'arch': arch}
-            send = json.dumps(dSend)
-            addr = (self._server, LBC_COMPILE_PORT)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect(addr)
-            self._send_lbc(s, send)
-            dRecv = self._recv_lbc(s)
-            s.close()
+            cli = ClbcClient(server=self._server, ver=ver, arch=arch)
+            dRecv = cli.getBtf()
             if dRecv['btf'] is None:
                 print("get btf failed, log is:\n%s" % dRecv['log'])
                 raise InvalidArgsException("get btf failed.")
             print("get btf from remote success.")
             with open(name, 'wb') as f:
-                f.write(base64.b64decode(dRecv['btf']))
+                f.write(segDecode(dRecv['btf']))
 
-    @staticmethod
-    def _closeSo(so):
-        _ct.dlclose(so._handle)
+    def _setupSoName(self, bpf):
+        return self._wPath + '/' + bpf + ".so"
 
-    def _getArchitecture(self, c):
-        return c.cmd('uname -m')
-
-    def __getSo(self, bpf, s, ver, arch):
-        bpf_so = self._wPath + '/' + bpf + ".so"
-        need = False
+    def _setUpCode(self, bpf, s):
         if s == "":
             bpf_c = self._wPath + '/' + bpf + ".bpf.c"
-            if self.__checkCCompile(bpf_c, bpf_so, ver, arch):
-                with open(bpf_c, 'r') as f:
+            if os.path.exists(bpf_c):
+                with open(bpf_c, "r") as f:
                     s = f.read()
-                need = True
-        else:
-            need = self.__checkStrCompile(s, bpf_so, ver, arch)
+
+    def _getSo(self, bpf, s, ver, arch):
+        bpf_so = self._setupSoName(bpf)
+
+        if s == "":
+            bpf_c = self._wPath + '/' + bpf + ".bpf.c"
+            if os.path.exists(bpf_c):
+                with open(bpf_c, "r") as f:
+                    s = f.read()
+        need = self._checkStrCompile(s, bpf_so, ver, arch)
         if need:
             self._compileSo(s, bpf_so, ver, arch)
-        return bpf_so
 
-    def __checkCCompile(self, bpf_c, bpf_so, ver, arch):
+    def _checkCCompile(self, bpf_c, bpf_so, ver, arch):
         cFlag = os.path.exists(bpf_c)
         oFlag = os.path.exists(bpf_so)
         if not (cFlag or oFlag):  # is not exist
@@ -119,124 +131,180 @@ class ClbcBase(object):
         elif not oFlag and cFlag:  # only bpf.c
             return True
         elif oFlag and not cFlag:  # only so, should check version
-            if self.__checkVer(bpf_so, ver, arch):
+            if self._checkVer(bpf_so, ver, arch):
                 raise FileNotExistException("bad bpf.so and not bpf.c")
             return False
         else:  # both bpf.c and bo, check hash and version
             with open(bpf_c, "r") as f:
                 s = f.read()
+            s += self._env
             if sys.version_info.major >= 3:
                 cHash = hashlib.sha256(s.encode()).hexdigest()
             else:
                 cHash = hashlib.sha256(s).hexdigest()
-            if self.__checkHash(bpf_so, cHash):
+            if self._checkHash(bpf_so, cHash):
                 return True
-            return self.__checkVer(bpf_so, ver, arch)
+            return self._checkVer(bpf_so, ver, arch)
 
-    def __checkStrCompile(self, s, bpf_so, ver, arch):
+    def _checkStrCompile(self, s, bpf_so, ver, arch):
         oFlag = os.path.exists(bpf_so)
         if not oFlag:  # only string
             return True
+        elif s == "":  # only so, no string.
+            return False
         else:  # both bpf.c and bo, check hash and version
+            s = self._combineSource(s)
+            s += self._env
             if sys.version_info.major >= 3:
                 cHash = hashlib.sha256(s.encode()).hexdigest()
             else:
                 cHash = hashlib.sha256(s).hexdigest()
-            if self.__checkHash(bpf_so, cHash):
+            if self._checkHash(bpf_so, cHash):
                 return True
-            return self.__checkVer(bpf_so, ver, arch)
+            return self._checkVer(bpf_so, ver, arch)
 
-    def __parseVer(self, ver):
+    def _parseVer(self, ver):
         major, minor, _ = ver.split(".", 2)
         return major
 
-    def __checkVer(self, bpf_so, ver, arch):
+    def _checkVer(self, bpf_so, ver, arch):
         """if should compile return ture, else return false"""
         try:
-            so = ct.CDLL(bpf_so)
-        except:
+            self._so = ct.CDLL(bpf_so)
+        except (OSError, FileNotFoundError):
             return True
-        so.lbc_get_map_types.restype = ct.c_char_p
-        so.lbc_get_map_types.argtypes = []
-        s = so.lbc_get_map_types()
-        uname = json.loads(s)['kern_version']
-        self._closeSo(so)
-        return not self.__parseVer(uname) == self.__parseVer(ver)
+        soVer = self._loadDesc()['kern_version']
+        self._closeSo()
 
-    def __checkHash(self, bpf_so, cHash):
+        soMajor = self._parseVer(soVer)
+        hMajor = self._parseVer(ver)
+        return (int(soMajor) > 3) ^ (int(hMajor) > 3)
+
+    def _checkHash(self, bpf_so, cHash):
         """if should compile return ture, else return false"""
         try:
-            so = ct.CDLL(bpf_so)
-        except:
+            self._so = ct.CDLL(bpf_so)
+        except (OSError, FileNotFoundError):
             return True
-        so.lbc_get_map_types.restype = ct.c_char_p
-        so.lbc_get_map_types.argtypes = []
-        s = so.lbc_get_map_types()
-        soHash = json.loads(s)['hash']
-        self._closeSo(so)
+        soHash = self._loadDesc()['hash']
+        self._closeSo()
         return not cHash == soHash
 
-    def __checkRoot(self, c):
+    def _checkRoot(self):
         cmd = 'whoami'
-        line = c.cmd(cmd).strip()
+        line = self._c.cmd(cmd).strip()
         if line != "root":
             raise RootRequiredException('this app need run as root')
 
-    @staticmethod
-    def _recv_lbc(s):
-        d = s.recv(buffSize).decode()
-        if d[:3] != "LBC":
-            print("not lbc")
-            return None
-        size = d[3:11]
-        try:
-            size = int(size, 16) + 11
-        except ValueError:
-            print("bad size", size)
-            return None
-        while len(d) < size:
-            d += s.recv(buffSize).decode()
-        return json.loads(d[11:])
-
-    @staticmethod
-    def _send_lbc(s, send):
-        send = "LBC%08x" % (len(send)) + send
-        s.send(send.encode())
+    def _combineSource(self, s):
+        inc = ClbcInclude(self._wPath, self._incPath)
+        return inc.parse(s)
 
     def _compileSo(self, s, bpf_so, ver, arch):
-        # ver = coreDs[self.__parseVer(ver)]
-        dSend = {"cmd": "c", 'code': s, 'ver': ver, 'arch': arch, 'env': self._env}
-        send = json.dumps(dSend)
-        addr = (self._server, LBC_COMPILE_PORT)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(addr)
-        self._send_lbc(s, send)
-        dRecv = self._recv_lbc(s)
-        s.close()
+        cli = ClbcClient(server=self._server, ver=ver, arch=arch, port=LBC_COMPILE_PORT)
+        dRecv = cli.getC(s, self._env)
         if dRecv is None:
             raise Exception("receive error")
         if dRecv['so'] is None:
-            print("compile failed, log is:\n%s" % dRecv['log'])
+            print("compile failed, log is:\n%s" % dRecv['clog'])
             raise InvalidArgsException("compile failed.")
         print("remote server compile success.")
         with open(bpf_so, 'wb') as f:
-            f.write(base64.b64decode(dRecv['so']))
+            f.write(segDecode(dRecv['so']))
 
-    def __loadSo(self, bpf_so):
-        self.__need_del = True
-        self.__so = ct.CDLL(bpf_so)
-        self.__so.lbc_bpf_init.restype = ct.c_int
-        self.__so.lbc_bpf_init.argtypes = [ct.c_int]
-        r = self.__so.lbc_bpf_init(self._logLevel)
+    def _compileObj(self, bpf, bpf_str, ver, arch):
+        if bpf_str == "":
+            cName = bpf + ".bpf.c"
+            if not os.path.exists(cName):
+                raise InvalidArgsException("file %s is not exist." % cName)
+            with open(cName, 'r') as f:
+                bpf_str = f.read()
+
+        objName = bpf + ".bpf.o"
+        cli = ClbcClient(server=self._server, ver=ver, arch=arch, port=LBC_COMPILE_PORT)
+        s = self._combineSource(bpf_str)
+        dRecv = cli.getObj(s, self._env)
+        if dRecv is None:
+            raise Exception("receive error")
+        if dRecv['obj'] is None:
+            print("compile failed, log is:\n%s" % dRecv['clog'])
+            raise InvalidArgsException("compile failed.")
+        print("remote server compile success.")
+        with open(objName, 'wb') as f:
+            f.write(segDecode(dRecv['obj']))
+
+    def _loadSo(self, bpf_so):
+        self._so = ct.CDLL(bpf_so)
+
+    def _checkSo(self):
+        if not self._so:
+            raise InvalidArgsException("so not setup.")
+
+    def _loadDesc(self):
+        self._checkSo()
+        self._so.lbc_get_map_types.restype = ct.c_char_p
+        self._so.lbc_get_map_types.argtypes = []
+        desc = self._so.lbc_get_map_types()
+        return json.loads(desc)
+
+    def _initSo(self, attach=1):
+        self._checkSo()
+        self._so.lbc_bpf_init.restype = ct.c_int
+        self._so.lbc_bpf_init.argtypes = [ct.c_int, ct.c_int]
+        r = self._so.lbc_bpf_init(self._logLevel, attach)
         if r != 0:
-            self.__need_del = False
             raise InvalidArgsException("so init failed")
+        self._need_deinit = True
+
+
+class ClbcBase(ClbcLoad):
+    def __init__(self, bpf, bpf_str="",
+                 server="pylcc.openanolis.cn",
+                 arch="", ver="", env="",
+                 attach=1,
+                 ):
+        super(ClbcBase, self).__init__(bpf, bpf_str, server, arch, ver,
+                                       env)
+        bpf_so = self._setupSoName(bpf)
+        self._loadSo(bpf_so)
+        self._initSo(attach)
+        self.maps = {}
+        self._loadMaps()
+
+    def _setupAttatchs(self):
+        #   int lbc_attach_perf_event(const char* func, int pfd)
+        self._so.lbc_attach_perf_event.restype = ct.c_int
+        self._so.lbc_attach_perf_event.argtypes = [ct.c_char_p, ct.c_int]
+        #   int lbc_attach_kprobe(const char* func, const char* sym)
+        self._so.lbc_attach_kprobe.restype = ct.c_int
+        self._so.lbc_attach_kprobe.argtypes = [ct.c_char_p, ct.c_char_p]
+        #   int lbc_attach_kretprobe(const char* func, const char* sym)
+        self._so.lbc_attach_kretprobe.restype = ct.c_int
+        self._so.lbc_attach_kretprobe.argtypes = [ct.c_char_p, ct.c_char_p]
+        #    int lbc_attach_uprobe(const char* func, int pid, const char *binary_path, unsigned long func_offset)
+        self._so.lbc_attach_uprobe.restype = ct.c_int
+        self._so.lbc_attach_uprobe.argtypes = [ct.c_char_p, ct.c_int, ct.c_char_p, ct.c_ulong]
+        #    int lbc_attach_uretprobe(const char* func, int pid, const char *binary_path, unsigned long func_offset)
+        self._so.lbc_attach_uretprobe.restype = ct.c_int
+        self._so.lbc_attach_uretprobe.argtypes = [ct.c_char_p, ct.c_int, ct.c_char_p, ct.c_ulong]
+        #   int lbc_attach_tracepoint(const char* func, const char *tp_category, const char *tp_name)
+        self._so.lbc_attach_tracepoint.restype = ct.c_int
+        self._so.lbc_attach_tracepoint.argtypes = [ct.c_char_p, ct.c_char_p, ct.c_char_p]
+        #   int lbc_attach_raw_tracepoint(const char* func, const char *tp_name)
+        self._so.lbc_attach_raw_tracepoint.restype = ct.c_int
+        self._so.lbc_attach_raw_tracepoint.argtypes = [ct.c_char_p, ct.c_char_p]
+        #   int lbc_attach_cgroup(const char* func, int cgroup_fd)
+        self._so.lbc_attach_cgroup.restype = ct.c_int
+        self._so.lbc_attach_cgroup.argtypes = [ct.c_char_p, ct.c_int]
+        #   int lbc_attach_netns(const char* func, int netns_fd)
+        self._so.lbc_attach_netns.restype = ct.c_int
+        self._so.lbc_attach_netns.argtypes = [ct.c_char_p, ct.c_int]
+        #   int lbc_attach_xdp(const char* func, int ifindex)
+        self._so.lbc_attach_xdp.restype = ct.c_int
+        self._so.lbc_attach_xdp.argtypes = [ct.c_char_p, ct.c_int]
 
     def _loadMaps(self):
-        self.__so.lbc_get_map_types.restype = ct.c_char_p
-        self.__so.lbc_get_map_types.argtypes = []
-        s = self.__so.lbc_get_map_types()
-        d = json.loads(s)['maps']
+        d = self._loadDesc()['maps']
         tDict = {'event': CmapsEvent,
                  'hash': CmapsHash,
                  'array': CmapsArray,
@@ -248,33 +316,62 @@ class ClbcBase(object):
         for k in d.keys():
             t = d[k]['type']
             if t in tDict:
-                self.maps[k] = tDict[t](self.__so, k, d[k])
+                self.maps[k] = tDict[t](self._so, k, d[k])
             else:
                 raise InvalidArgsException("bad type: %s, key: %s" % (t, k))
 
-
-class ClbcApp(ClbcBase):
-    def __init__(self, soPath):
-        super(ClbcApp, self).__init__(soPath)
-
-    def _callback(self, cpu, data, size):
+    def getMap(self, name, data, size):
         stream = ct.string_at(data, size)
-        e = self.maps['my_map'].event(stream)
-        print("%d, %s, 0x%x" % (e.pid, e.comm, e.cookie))
-        tbl = self.maps['pids'].get()
-        if len(tbl) > 20:
-            self.maps['pids'].clear()
-        print(self.maps['callStack'].getStacks(e.stack_id, 2))
-
-    def loop(self):
-        self.maps['my_map'].open_perf_buffer(self._callback)
         try:
-            self.maps['my_map'].perf_buffer_poll()
-        except KeyboardInterrupt:
-            print("key interrupt.")
-            exit()
+            return self.maps[name].event(stream)
+        except IndexError:
+            return None
+
+    def attachKprobe(self, function, symbol):
+        res = self._so.lbc_attach_kprobe(function, symbol)
+        if res != 0:
+            raise InvalidArgsException("attach %s to kprobe %s failed." % (function, symbol))
+
+    def attachKretprobe(self, function, symbol):
+        res = self._so.lbc_attach_kretprobe(function, symbol)
+        if res != 0:
+            raise InvalidArgsException("attach %s to kretprobe %s failed." % (function, symbol))
+
+    def attachUprobe(self, function, pid, binaryPath, offset=0):
+        res = self._so.lbc_attach_uprobe(function, pid, binaryPath, offset)
+        if res != 0:
+            raise InvalidArgsException("attach %s to uprobe %s failed." % (function, binaryPath))
+
+    def attachUretprobe(self, function, pid, binaryPath, offset=0):
+        res = self._so.lbc_attach_uretprobe(function, pid, binaryPath, offset)
+        if res != 0:
+            raise InvalidArgsException("attach %s to uretprobe %s failed." % (function, binaryPath))
+
+    def attachTracepoint(self, function, category, name):
+        res = self._so.lbc_attach_tracepoint(function, category, name)
+        if res != 0:
+            raise InvalidArgsException("attach %s to trace point %s failed." % (function, name))
+
+    def attachRawTracepoint(self, function, name):
+        res = self._so.lbc_attach_raw_tracepoint(function, name)
+        if res != 0:
+            raise InvalidArgsException("attach %s to raw trace point %s failed." % (function, name))
+
+    def attachCgroup(self, function, fd):
+        res = self._so.lbc_attach_cgroup(function, fd)
+        if res != 0:
+            raise InvalidArgsException("attach %s to cgroup %d failed." % (function, fd))
+
+    def attachNetns(self, function, fd):
+        res = self._so.lbc_attach_netns(function, fd)
+        if res != 0:
+            raise InvalidArgsException("attach %s to netns %d failed." % (function, fd))
+
+    def attachXdp(self, function, ifindex):
+        res = self._so.lbc_attach_xdp(function, ifindex)
+        if res != 0:
+            raise InvalidArgsException("attach %s to xdp %d failed." % (function, ifindex))
 
 
 if __name__ == "__main__":
-    a = ClbcApp('lbc')
-    a.loop()
+    pass

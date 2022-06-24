@@ -8,10 +8,10 @@ LCC=coolbpf
 CC=gcc
 CC_FLAG=-Wall -g
 
-PRG=call_stack
-OBJ=$(PRG).o
+PRG=config_map
 BPF_FILE=$(PRG).bpf.c
 BFP_SO=$(PRG).so
+OBJ=$(PRG).o
 
 $(PRG): $(BFP_SO) $(OBJ)
 	$(CC) $(LIB) -o $@ $(OBJ)
