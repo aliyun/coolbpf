@@ -25,15 +25,15 @@ int load_allsyms(void)
     trace_printk_init_buffers_p = (trace_printk_init_buffers_t)kallsyms_lookup_name("trace_printk_init_buffers");
     if (trace_printk_init_buffers_p == NULL)
         goto err;
-	
+
 	perf_prepare_sample_p = (perf_prepare_sample_t)kallsyms_lookup_name("perf_prepare_sample");
 	if (perf_prepare_sample_p == NULL)
 		goto err;
-	
+
 	perf_output_begin_p = (perf_output_begin_t)kallsyms_lookup_name("perf_output_begin");
 	if (perf_output_begin_p == NULL)
 		goto err;
-	
+
 	perf_output_sample_p = (perf_output_sample_t)kallsyms_lookup_name("perf_output_sample");
 	if (perf_output_sample_p == NULL)
 		goto err;
@@ -53,23 +53,23 @@ int load_allsyms(void)
 	get_callchain_buffers_p = (get_callchain_buffers_t)kallsyms_lookup_name("get_callchain_buffers");
 	if (get_callchain_buffers_p == NULL)
 		goto err;
-	
+
 	sha_init_p = (sha_init_t)kallsyms_lookup_name("sha_init");
     if (sha_init_p == NULL)
         goto err;
-	
+
 	sha_transform_p = (sha_transform_t)kallsyms_lookup_name("sha_transform");
     if (sha_transform_p == NULL)
         goto err;
-	
+
 	module_alloc_p = (module_alloc_t)kallsyms_lookup_name("module_alloc");
 	if (module_alloc_p == NULL)
         goto err;
-	
+
 	module_free_p = (module_free_t)kallsyms_lookup_name("module_free");
 	if (module_free_p == NULL)
         goto err;
-	
+
 	// perf_fops_p = (struct file_operations *)kallsyms_lookup_name("perf_fops");
 	// if (perf_fops_p == NULL)
 	// 	goto err;
@@ -77,7 +77,7 @@ int load_allsyms(void)
 	ftrace_find_event_p = (ftrace_find_event_t)kallsyms_lookup_name("ftrace_find_event");
 	if (ftrace_find_event_p == NULL)
         goto err;
-	
+
 	perf_callchain_kernel_p = (perf_callchain_kernel_t)kallsyms_lookup_name("perf_callchain_kernel");
 	if (perf_callchain_kernel_p == NULL)
 		goto err;

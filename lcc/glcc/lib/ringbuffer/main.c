@@ -31,15 +31,15 @@ static int ringbuffer_init(void)
     unregister_module_helper_p = (register_module_helper_t)kallsyms_lookup_name("unregister_module_helper");
     if (unregister_module_helper_p == NULL)
         goto fail_find;
-    
+
     register_module_map_p = (register_module_map_t)kallsyms_lookup_name("register_module_map");
     if (register_module_map_p == NULL)
         goto fail_find;
-    
+
     unregister_module_map_p = (register_module_map_t)kallsyms_lookup_name("unregister_module_map");
     if (unregister_module_map_p == NULL)
         goto fail_find;
-    
+
 
     register_module_map_p(&ringbuf_map_ops);
     register_module_helper_p(&bpf_ringbuf_reserve_proto);

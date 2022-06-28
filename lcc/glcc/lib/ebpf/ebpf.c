@@ -1355,7 +1355,7 @@ static int bpf_prog_attach(u32 prog_fd, char *funcname)
 
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
-	
+
 	printk("prog name(struct bpf_prog) is %s\n", prog->aux->name);
 	switch(prog->type)
 	{
@@ -1454,7 +1454,7 @@ static long ebpf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		mark_tech_preview("eBPF syscall", NULL);
 		marked = true;
 	}
-	
+
 	if (cmd == IOCTL_BPF_PROG_ATTACH)
 	{
 		printk("IOCTL_BPF_PROG_ATTACH\n");
