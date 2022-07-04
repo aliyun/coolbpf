@@ -6,7 +6,7 @@ CONT_NAME="${CONT_NAME:-libbpf-debian-$DEBIAN_RELEASE}"
 ENV_VARS="${ENV_VARS:-}"
 DOCKER_RUN="${DOCKER_RUN:-docker run}"
 REPO_ROOT="${REPO_ROOT:-$PWD}"
-ADDITIONAL_DEPS=(clang pkg-config gcc-10)
+ADDITIONAL_DEPS=(clang pkg-config gcc-8)
 CFLAGS="-g -O2 -Werror -Wall"
 
 function info() {
@@ -18,10 +18,10 @@ function error() {
 }
 
 function docker_exec() {
-    docker exec $ENV_VARS $CONT_NAME "$@"
+    docker exec $ENV_VARS -it $CONT_NAME "$@"
 }
 
-set -eu
+set -e
 
 source "$(dirname $0)/travis_wait.bash"
 
@@ -31,6 +31,7 @@ for phase in "${PHASES[@]}"; do
             info "Setup phase"
             info "Using Debian $DEBIAN_RELEASE"
 
+            sudo apt-get -y -o Dpkg::Options::="--force-confnew" install docker-ce
             docker --version
 
             docker pull debian:$DEBIAN_RELEASE
@@ -38,24 +39,19 @@ for phase in "${PHASES[@]}"; do
             $DOCKER_RUN -v $REPO_ROOT:/build:rw \
                         -w /build --privileged=true --name $CONT_NAME \
                         -dit --net=host debian:$DEBIAN_RELEASE /bin/bash
-            echo -e "::group::Build Env Setup"
             docker_exec bash -c "echo deb-src http://deb.debian.org/debian $DEBIAN_RELEASE main >>/etc/apt/sources.list"
             docker_exec apt-get -y update
-            docker_exec apt-get -y install aptitude
-            docker_exec aptitude -y build-dep libelf-dev
-            docker_exec aptitude -y install libelf-dev
-            docker_exec aptitude -y install "${ADDITIONAL_DEPS[@]}"
-            echo -e "::endgroup::"
+            docker_exec apt-get -y build-dep libelf-dev
+            docker_exec apt-get -y install libelf-dev
+            docker_exec apt-get -y install "${ADDITIONAL_DEPS[@]}"
             ;;
-        RUN|RUN_CLANG|RUN_GCC10|RUN_ASAN|RUN_CLANG_ASAN|RUN_GCC10_ASAN)
-            CC="cc"
+        RUN|RUN_CLANG|RUN_GCC8|RUN_ASAN|RUN_CLANG_ASAN|RUN_GCC8_ASAN)
             if [[ "$phase" = *"CLANG"* ]]; then
                 ENV_VARS="-e CC=clang -e CXX=clang++"
                 CC="clang"
-            elif [[ "$phase" = *"GCC10"* ]]; then
-                ENV_VARS="-e CC=gcc-10 -e CXX=g++-10"
-                CC="gcc-10"
-                CFLAGS="${CFLAGS} -Wno-stringop-truncation"
+            elif [[ "$phase" = *"GCC8"* ]]; then
+                ENV_VARS="-e CC=gcc-8 -e CXX=g++-8"
+                CC="gcc-8"
             else
                 CFLAGS="${CFLAGS} -Wno-stringop-truncation"
             fi
@@ -63,9 +59,9 @@ for phase in "${PHASES[@]}"; do
                 CFLAGS="${CFLAGS} -fsanitize=address,undefined"
             fi
             docker_exec mkdir build install
-            docker_exec ${CC} --version
+            docker_exec ${CC:-cc} --version
             info "build"
-            docker_exec make -j$((4*$(nproc))) CFLAGS="${CFLAGS}" -C ./src -B OBJDIR=../build
+	    docker_exec make -j$((4*$(nproc))) CFLAGS="${CFLAGS}" -C ./src -B OBJDIR=../build
             info "ldd build/libbpf.so:"
             docker_exec ldd build/libbpf.so
             if ! docker_exec ldd build/libbpf.so | grep -q libelf; then
@@ -74,8 +70,7 @@ for phase in "${PHASES[@]}"; do
             fi
             info "install"
             docker_exec make -j$((4*$(nproc))) -C src OBJDIR=../build DESTDIR=../install install
-            info "link binary"
-            docker_exec bash -c "CFLAGS=\"${CFLAGS}\" ./travis-ci/managers/test_compile.sh"
+            docker_exec rm -rf build install
             ;;
         CLEANUP)
             info "Cleanup phase"

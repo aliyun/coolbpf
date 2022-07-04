@@ -50,6 +50,7 @@ class CexecCmd(object):
         cmds = cmds.replace('\0', '').strip()
         return os.system(cmds)
 
+
 class ClocalTcpServer(Process):
     def __init__(self, port):
         self._c = CexecCmd()
@@ -144,7 +145,8 @@ class ClocalTcpServer(Process):
         func = dRecv["func"]
         if "ret" in dRecv:
             r = self._dbCheckArg("ret", dRecv["ret"])
-            if r: return r
+            if r:
+                return r
             try:
                 dSend['res'] = i.getFuncFilterRet(dRecv["ret"], func=dRecv["func"])
                 return dSend

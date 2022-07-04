@@ -17,7 +17,7 @@ BPF_BRANCH=${3-""}
 BASELINE_COMMIT=${BPF_NEXT_BASELINE:-$(cat ${LIBBPF_REPO}/CHECKPOINT-COMMIT)}
 BPF_BASELINE_COMMIT=${BPF_BASELINE:-$(cat ${LIBBPF_REPO}/BPF-CHECKPOINT-COMMIT)}
 
-if [ -z "${LIBBPF_REPO}" ] || [ -z "${LINUX_REPO}" ]; then
+if [ -z "${LIBBPF_REPO}" ] || [ -z "${LINUX_REPO}" ] || [ -z "${BPF_BRANCH}" ]; then
 	echo "Error: libbpf or linux repos are not specified"
 	usage
 fi
@@ -45,14 +45,11 @@ PATH_MAP=(									\
 	[tools/include/uapi/linux/if_link.h]=include/uapi/linux/if_link.h	\
 	[tools/include/uapi/linux/if_xdp.h]=include/uapi/linux/if_xdp.h		\
 	[tools/include/uapi/linux/netlink.h]=include/uapi/linux/netlink.h	\
-	[tools/include/uapi/linux/pkt_cls.h]=include/uapi/linux/pkt_cls.h	\
-	[tools/include/uapi/linux/pkt_sched.h]=include/uapi/linux/pkt_sched.h	\
-	[Documentation/bpf/libbpf]=docs						\
 )
 
 LIBBPF_PATHS="${!PATH_MAP[@]} :^tools/lib/bpf/Makefile :^tools/lib/bpf/Build :^tools/lib/bpf/.gitignore :^tools/include/tools/libc_compat.h"
 LIBBPF_VIEW_PATHS="${PATH_MAP[@]}"
-LIBBPF_VIEW_EXCLUDE_REGEX='^src/(Makefile|Build|test_libbpf\.c|bpf_helper_defs\.h|\.gitignore)$|^docs/(\.gitignore|api\.rst|conf\.py)$|^docs/sphinx/.*'
+LIBBPF_VIEW_EXCLUDE_REGEX='^src/(Makefile|Build|test_libbpf\.c|bpf_helper_defs\.h|\.gitignore)$'
 LINUX_VIEW_EXCLUDE_REGEX='^include/tools/libc_compat.h$'
 
 LIBBPF_TREE_FILTER="mkdir -p __libbpf/include/uapi/linux __libbpf/include/tools && "$'\\\n'
@@ -74,7 +71,7 @@ commit_desc()
 }
 
 # Create commit single-line signature, which consists of:
-# - full commit subject
+# - full commit hash
 # - author date in ISO8601 format
 # - full commit body with newlines replaced with vertical bars (|)
 # - shortstat appended at the end
@@ -263,21 +260,18 @@ cd_to ${LIBBPF_REPO}
 git checkout -b ${LIBBPF_SYNC_TAG}
 
 for patch in $(ls -1 ${TMP_DIR}/patches | tail -n +2); do
-	if ! git am -3 --committer-date-is-author-date "${TMP_DIR}/patches/${patch}"; then
-		if ! git apply -3 "${TMP_DIR}/patches/${patch}"; then
-			read -p "Applying ${TMP_DIR}/patches/${patch} failed, please resolve manually and press <return> to proceed..."
-		fi
-		git am --continue
+	if ! git am --3way --committer-date-is-author-date "${TMP_DIR}/patches/${patch}"; then
+		read -p "Applying ${TMP_DIR}/patches/${patch} failed, please resolve manually and press <return> to proceed..."
 	fi
 done
 
 # Generate bpf_helper_defs.h and commit, if anything changed
-# restore Linux tip to use bpf_doc.py
+# restore Linux tip to use bpf_helpers_doc.py
 cd_to ${LINUX_REPO}
 git checkout ${TIP_TAG}
 # re-generate bpf_helper_defs.h
 cd_to ${LIBBPF_REPO}
-"${LINUX_ABS_DIR}/scripts/bpf_doc.py" --header					      \
+"${LINUX_ABS_DIR}/scripts/bpf_helpers_doc.py" --header			    \
 	--file include/uapi/linux/bpf.h > src/bpf_helper_defs.h
 # if anything changed, commit it
 helpers_changes=$(git status --porcelain src/bpf_helper_defs.h | wc -l)

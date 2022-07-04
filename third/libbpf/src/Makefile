@@ -5,7 +5,7 @@ ifeq ($(V),1)
 	msg =
 else
 	Q = @
-	msg = @printf '  %-8s %s%s\n' "$(1)" "$(2)" "$(if $(3), $(3))";
+	msg = @printf '  %-8s %s%s\n' "$(1)" "$(notdir $(2))" "$(if $(3), $(3))";
 endif
 
 LIBBPF_VERSION := $(shell \
@@ -20,7 +20,7 @@ ALL_CFLAGS := $(INCLUDES)
 
 SHARED_CFLAGS += -fPIC -fvisibility=hidden -DSHARED
 
-CFLAGS ?= -g -O2 -Werror -Wall -std=gnu89
+CFLAGS ?= -g -O2 -Werror -Wall -fPIC
 ALL_CFLAGS += $(CFLAGS) -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
 ALL_LDFLAGS += $(LDFLAGS)
 ifdef NO_PKG_CONFIG
@@ -36,8 +36,7 @@ SHARED_OBJDIR := $(OBJDIR)/sharedobjs
 STATIC_OBJDIR := $(OBJDIR)/staticobjs
 OBJS := bpf.o btf.o libbpf.o libbpf_errno.o netlink.o \
 	nlattr.o str_error.o libbpf_probes.o bpf_prog_linfo.o xsk.o \
-	btf_dump.o hashmap.o ringbuf.o strset.o linker.o gen_loader.o \
-	relo_core.o
+	btf_dump.o hashmap.o ringbuf.o
 SHARED_OBJS := $(addprefix $(SHARED_OBJDIR)/,$(OBJS))
 STATIC_OBJS := $(addprefix $(STATIC_OBJDIR)/,$(OBJS))
 
@@ -49,9 +48,9 @@ ifndef BUILD_STATIC_ONLY
 	VERSION_SCRIPT := libbpf.map
 endif
 
-HEADERS := bpf.h libbpf.h btf.h libbpf_common.h libbpf_legacy.h xsk.h \
+HEADERS := bpf.h libbpf.h btf.h xsk.h libbpf_util.h \
 	   bpf_helpers.h bpf_helper_defs.h bpf_tracing.h \
-	   bpf_endian.h bpf_core_read.h skel_internal.h libbpf_version.h
+	   bpf_endian.h bpf_core_read.h libbpf_common.h
 UAPI_HEADERS := $(addprefix $(TOPDIR)/include/uapi/linux/,\
 			    bpf.h bpf_common.h btf.h)
 
@@ -61,7 +60,7 @@ INSTALL = install
 
 DESTDIR ?=
 
-ifeq ($(filter-out %64 %64be %64eb %64le %64el s390x, $(shell uname -m)),)
+ifeq ($(shell uname -m),x86_64)
 	LIBSUBDIR := lib64
 else
 	LIBSUBDIR := lib
@@ -122,7 +121,7 @@ define do_install
 	$(Q)if [ ! -d '$(DESTDIR)$2' ]; then		\
 		$(INSTALL) -d -m 755 '$(DESTDIR)$2';	\
 	fi;
-	$(Q)$(INSTALL) $(if $3,-m $3,) $1 '$(DESTDIR)$2'
+	$(Q)$(INSTALL) $1 $(if $3,-m $3,) '$(DESTDIR)$2'
 endef
 
 # Preserve symlinks at installation.

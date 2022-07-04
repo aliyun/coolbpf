@@ -29,35 +29,10 @@
 #include <stdint.h>
 
 #include "libbpf_common.h"
-#include "libbpf_legacy.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-struct bpf_map_create_opts {
-	size_t sz; /* size of this struct for forward/backward compatibility */
-
-	__u32 btf_fd;
-	__u32 btf_key_type_id;
-	__u32 btf_value_type_id;
-	__u32 btf_vmlinux_value_type_id;
-
-	int inner_map_fd;
-	int map_flags;
-	__u64 map_extra;
-
-	int numa_node;
-	int map_ifindex;
-};
-#define bpf_map_create_opts__last_field map_ifindex
-
-LIBBPF_API int bpf_map_create(enum bpf_map_type map_type,
-			      const char *map_name,
-			      __u32 key_size,
-			      __u32 value_size,
-			      __u32 max_entries,
-			      const struct bpf_map_create_opts *opts);
 
 struct bpf_create_map_attr {
 	const char *name;
@@ -77,94 +52,24 @@ struct bpf_create_map_attr {
 	};
 };
 
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
-LIBBPF_API int bpf_create_map_xattr(const struct bpf_create_map_attr *create_attr);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
+LIBBPF_API int
+bpf_create_map_xattr(const struct bpf_create_map_attr *create_attr);
 LIBBPF_API int bpf_create_map_node(enum bpf_map_type map_type, const char *name,
 				   int key_size, int value_size,
 				   int max_entries, __u32 map_flags, int node);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
 LIBBPF_API int bpf_create_map_name(enum bpf_map_type map_type, const char *name,
 				   int key_size, int value_size,
 				   int max_entries, __u32 map_flags);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
 LIBBPF_API int bpf_create_map(enum bpf_map_type map_type, int key_size,
 			      int value_size, int max_entries, __u32 map_flags);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
 LIBBPF_API int bpf_create_map_in_map_node(enum bpf_map_type map_type,
 					  const char *name, int key_size,
 					  int inner_map_fd, int max_entries,
 					  __u32 map_flags, int node);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_map_create() instead")
 LIBBPF_API int bpf_create_map_in_map(enum bpf_map_type map_type,
 				     const char *name, int key_size,
 				     int inner_map_fd, int max_entries,
 				     __u32 map_flags);
-
-struct bpf_prog_load_opts {
-	size_t sz; /* size of this struct for forward/backward compatibility */
-
-	/* libbpf can retry BPF_PROG_LOAD command if bpf() syscall returns
-	 * -EAGAIN. This field determines how many attempts libbpf has to
-	 *  make. If not specified, libbpf will use default value of 5.
-	 */
-	int attempts;
-
-	enum bpf_attach_type expected_attach_type;
-	__u32 prog_btf_fd;
-	__u32 prog_flags;
-	__u32 prog_ifindex;
-	__u32 kern_version;
-
-	__u32 attach_btf_id;
-	__u32 attach_prog_fd;
-	__u32 attach_btf_obj_fd;
-
-	const int *fd_array;
-
-	/* .BTF.ext func info data */
-	const void *func_info;
-	__u32 func_info_cnt;
-	__u32 func_info_rec_size;
-
-	/* .BTF.ext line info data */
-	const void *line_info;
-	__u32 line_info_cnt;
-	__u32 line_info_rec_size;
-
-	/* verifier log options */
-	__u32 log_level;
-	__u32 log_size;
-	char *log_buf;
-};
-#define bpf_prog_load_opts__last_field log_buf
-
-LIBBPF_API int bpf_prog_load(enum bpf_prog_type prog_type,
-			     const char *prog_name, const char *license,
-			     const struct bpf_insn *insns, size_t insn_cnt,
-			     const struct bpf_prog_load_opts *opts);
-/* this "specialization" should go away in libbpf 1.0 */
-LIBBPF_API int bpf_prog_load_v0_6_0(enum bpf_prog_type prog_type,
-				    const char *prog_name, const char *license,
-				    const struct bpf_insn *insns, size_t insn_cnt,
-				    const struct bpf_prog_load_opts *opts);
-
-/* This is an elaborate way to not conflict with deprecated bpf_prog_load()
- * API, defined in libbpf.h. Once we hit libbpf 1.0, all this will be gone.
- * With this approach, if someone is calling bpf_prog_load() with
- * 4 arguments, they will use the deprecated API, which keeps backwards
- * compatibility (both source code and binary). If bpf_prog_load() is called
- * with 6 arguments, though, it gets redirected to __bpf_prog_load.
- * So looking forward to libbpf 1.0 when this hack will be gone and
- * __bpf_prog_load() will be called just bpf_prog_load().
- */
-#ifndef bpf_prog_load
-#define bpf_prog_load(...) ___libbpf_overload(___bpf_prog_load, __VA_ARGS__)
-#define ___bpf_prog_load4(file, type, pobj, prog_fd) \
-	bpf_prog_load_deprecated(file, type, pobj, prog_fd)
-#define ___bpf_prog_load6(prog_type, prog_name, license, insns, insn_cnt, opts) \
-	bpf_prog_load(prog_type, prog_name, license, insns, insn_cnt, opts)
-#endif /* bpf_prog_load */
 
 struct bpf_load_program_attr {
 	enum bpf_prog_type prog_type;
@@ -197,15 +102,13 @@ struct bpf_load_program_attr {
 
 /* Recommend log buffer size */
 #define BPF_LOG_BUF_SIZE (UINT32_MAX >> 8) /* verifier maximum in kernels <= 5.1 */
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_prog_load() instead")
-LIBBPF_API int bpf_load_program_xattr(const struct bpf_load_program_attr *load_attr,
-				      char *log_buf, size_t log_buf_sz);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_prog_load() instead")
+LIBBPF_API int
+bpf_load_program_xattr(const struct bpf_load_program_attr *load_attr,
+		       char *log_buf, size_t log_buf_sz);
 LIBBPF_API int bpf_load_program(enum bpf_prog_type type,
 				const struct bpf_insn *insns, size_t insns_cnt,
 				const char *license, __u32 kern_version,
 				char *log_buf, size_t log_buf_sz);
-LIBBPF_DEPRECATED_SINCE(0, 7, "use bpf_prog_load() instead")
 LIBBPF_API int bpf_verify_program(enum bpf_prog_type type,
 				  const struct bpf_insn *insns,
 				  size_t insns_cnt, __u32 prog_flags,
@@ -221,8 +124,6 @@ LIBBPF_API int bpf_map_lookup_elem_flags(int fd, const void *key, void *value,
 					 __u64 flags);
 LIBBPF_API int bpf_map_lookup_and_delete_elem(int fd, const void *key,
 					      void *value);
-LIBBPF_API int bpf_map_lookup_and_delete_elem_flags(int fd, const void *key,
-						    void *value, __u64 flags);
 LIBBPF_API int bpf_map_delete_elem(int fd, const void *key);
 LIBBPF_API int bpf_map_get_next_key(int fd, const void *key, void *next_key);
 LIBBPF_API int bpf_map_freeze(int fd);
@@ -274,14 +175,8 @@ struct bpf_link_create_opts {
 	union bpf_iter_link_info *iter_info;
 	__u32 iter_info_len;
 	__u32 target_btf_id;
-	union {
-		struct {
-			__u64 bpf_cookie;
-		} perf_event;
-	};
-	size_t :0;
 };
-#define bpf_link_create_opts__last_field perf_event
+#define bpf_link_create_opts__last_field target_btf_id
 
 LIBBPF_API int bpf_link_create(int prog_fd, int target_fd,
 			       enum bpf_attach_type attach_type,

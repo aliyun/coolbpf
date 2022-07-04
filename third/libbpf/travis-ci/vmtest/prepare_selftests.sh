@@ -4,18 +4,17 @@ set -eu
 
 source $(cd $(dirname $0) && pwd)/helpers.sh
 
-REPO_PATH=${1:-}
+REPO_PATH=$1
 
-if [[ ! -z "$REPO_PATH" ]]; then
-	${VMTEST_ROOT}/checkout_latest_kernel.sh ${REPO_PATH}
-	cd ${REPO_PATH}
-fi
+${VMTEST_ROOT}/checkout_latest_kernel.sh ${REPO_PATH}
+cd ${REPO_PATH}
 
 if [[ "${KERNEL}" = 'LATEST' ]]; then
 	travis_fold start build_kernel "Kernel build"
 
-	cp "$VMTEST_ROOT"/configs/config-latest."$ARCH" .config
-	make -j $((4*$(nproc))) olddefconfig all >/dev/null
+	cp ${VMTEST_ROOT}/configs/latest.config .config
+	make -j $((4*$(nproc))) olddefconfig all
+
 	travis_fold end build_kernel
 fi
 

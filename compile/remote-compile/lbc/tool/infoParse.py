@@ -99,7 +99,8 @@ class CinfoParse(object):
         sql = f"SELECT id, name, members, bytes FROM structs WHERE name = '{struct}'"
         res = cur.execute(sql)
         r = res.fetchone()
-        if r is None: return None
+        if r is None:
+            return None
         fid = r[0]
         rD = {"name": r[1], "members": r[2], "size": r[3]}
         sql = f"SELECT types, offset, bytes, bits, name FROM members WHERE fid = {fid}"
@@ -128,7 +129,8 @@ class CinfoParse(object):
                 AND (name = '{memeber}' OR name LIKE '{memeber}[%]')"
         res = cur.execute(sql)
         r = res.fetchone()
-        if r is None: return None
+        if r is None:
+            return None
         rD = {"type": r[0], "offset": r[1], "size": r[2], "bits": r[3], "name": r[4]}
         return rD
 
@@ -140,10 +142,14 @@ class CinfoParse(object):
 
     def getType(self, t):
         cur = self._db.cursor()
-        sql = f"SELECT name, alias, bytes FROM types WHERE name = '{t}'"
+        if t != '_':
+            sql = "SELECT name, alias, bytes FROM types WHERE name = '%s'" % t
+        else:
+            sql = "SELECT name, alias, bytes FROM types WHERE id = 1"
         res = cur.execute(sql)
         r = res.fetchone()
-        if r is None: return None
+        if r is None:
+            return None
         return {"name": r[0], "type": r[1], "size": r[2]}
 
 

@@ -1,15 +1,3 @@
-This is a mirror of [bpf-next Linux source
-tree](https://kernel.googlesource.com/pub/scm/linux/kernel/git/bpf/bpf-next)'s
-`tools/lib/bpf` directory plus its supporting header files.
-
-All the gory details of syncing can be found in `scripts/sync-kernel.sh`
-script.
-
-Some header files in this repo (`include/linux/*.h`) are reduced versions of
-their counterpart files at
-[bpf-next](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/)'s
-`tools/include/linux/*.h` to make compilation successful.
-
 BPF/libbpf usage and questions
 ==============================
 
@@ -18,11 +6,6 @@ and [the companion blog post](https://nakryiko.com/posts/libbpf-bootstrap/) for
 the examples of building BPF applications with libbpf.
 [libbpf-tools](https://github.com/iovisor/bcc/tree/master/libbpf-tools) are also
 a good source of the real-world libbpf-based tracing tools.
-
-See also ["BPF CO-RE reference guide"](https://nakryiko.com/posts/bpf-core-reference-guide/)
-for the coverage of practical aspects of building BPF CO-RE applications and
-["BPF CO-RE"](https://nakryiko.com/posts/bpf-portability-and-co-re/) for
-general introduction into BPF portability issues and BPF CO-RE origins.
 
 All general BPF questions, including kernel functionality, libbpf APIs and
 their application, should be sent to bpf@vger.kernel.org mailing list. You can
@@ -37,10 +20,9 @@ should be opened only for dealing with issues pertaining to specific way this
 libbpf mirror repo is set up and organized.
 
 Build
-[![Github Actions Builds & Tests](https://github.com/libbpf/libbpf/actions/workflows/test.yml/badge.svg)](https://github.com/libbpf/libbpf/actions/workflows/test.yml)
+[![Build Status](https://travis-ci.com/libbpf/libbpf.svg?branch=master)](https://travis-ci.com/github/libbpf/libbpf)
 [![Total alerts](https://img.shields.io/lgtm/alerts/g/libbpf/libbpf.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/libbpf/libbpf/alerts/)
 [![Coverity](https://img.shields.io/coverity/scan/18195.svg)](https://scan.coverity.com/projects/libbpf)
-[![OSS-Fuzz Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/libbpf.svg)](https://oss-fuzz-build-logs.storage.googleapis.com/index.html#libbpf)
 =====
 libelf is an internal dependency of libbpf and thus it is required to link
 against and must be installed on the system for applications to work.
@@ -82,7 +64,6 @@ Distributions packaging libbpf from this mirror:
   - [Debian](https://packages.debian.org/source/sid/libbpf)
   - [Arch](https://www.archlinux.org/packages/extra/x86_64/libbpf/)
   - [Ubuntu](https://packages.ubuntu.com/source/groovy/libbpf)
-  - [Alpine](https://pkgs.alpinelinux.org/packages?name=libbpf)
 
 Benefits of packaging from the mirror over packaging from kernel sources:
   - Consistent versioning across distributions.
@@ -116,7 +97,6 @@ Some major Linux distributions come with kernel BTF already built in:
   - RHEL 8.2+
   - OpenSUSE Tumbleweed (in the next release, as of 2020-06-04)
   - Arch Linux (from kernel 5.7.1.arch1-1)
-  - Manjaro (from kernel 5.4 if compiled after 2021-06-18)
   - Ubuntu 20.10
   - Debian 11 (amd64/arm64)
 
@@ -140,19 +120,31 @@ distributions have Clang/LLVM 10+ packaged by default:
   - Arch Linux
   - Ubuntu 20.10 (LLVM 11)
   - Debian 11 (LLVM 11)
-  - Alpine 3.13+
 
 Otherwise, please make sure to update it on your system.
 
 The following resources are useful to understand what BPF CO-RE is and how to
 use it:
-- [BPF CO-RE reference guide](https://nakryiko.com/posts/bpf-core-reference-guide/)
-- [BPF Portability and CO-RE](https://nakryiko.com/posts/bpf-portability-and-co-re/)
-- [HOWTO: BCC to libbpf conversion](https://nakryiko.com/posts/bcc-to-libbpf-howto-guide/)
+- [BPF Portability and CO-RE](https://facebookmicrosites.github.io/bpf/blog/2020/02/19/bpf-portability-and-co-re.html)
+- [HOWTO: BCC to libbpf conversion](https://facebookmicrosites.github.io/bpf/blog/2020/02/20/bcc-to-libbpf-howto-guide.html)
 - [libbpf-tools in BCC repo](https://github.com/iovisor/bcc/tree/master/libbpf-tools)
   contain lots of real-world tools converted from BCC to BPF CO-RE. Consider
   converting some more to both contribute to the BPF community and gain some
   more experience with it.
+  
+Details
+=======
+This is a mirror of [bpf-next Linux source
+tree](https://kernel.googlesource.com/pub/scm/linux/kernel/git/bpf/bpf-next)'s
+`tools/lib/bpf` directory plus its supporting header files.
+
+All the gory details of syncing can be found in `scripts/sync-kernel.sh`
+script.
+
+Some header files in this repo (`include/linux/*.h`) are reduced versions of
+their counterpart files at
+[bpf-next](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/)'s
+`tools/include/linux/*.h` to make compilation successful.
 
 License
 =======
