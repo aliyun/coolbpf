@@ -48,11 +48,11 @@ static int env_init()
         return -ENOTSUP;
 
     fopen_p = (fopen_t)dlsym(RTLD_NEXT, "fopen");
-    if (fopen_p == NULL) 
+    if (fopen_p == NULL)
         return -ENOTSUP;
-    
+
     fopen64_p = (fopen64_t)dlsym(RTLD_NEXT, "fopen64");
-    if (fopen64_p == NULL) 
+    if (fopen64_p == NULL)
         return -ENOTSUP;
 
     syscall_p = (syscall_t)dlsym(RTLD_NEXT, "syscall");

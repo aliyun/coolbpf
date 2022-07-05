@@ -112,7 +112,7 @@ struct tracepoints_table {
     void *func;
 };
 
-static struct tracepoints_table table[] = 
+static struct tracepoints_table table[] =
 {
     {.name = "net_dev_queue", .func = ebpf_net_dev_queue},
     {.name = "softirq_raise", .func = ebpf_softirq_raise},

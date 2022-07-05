@@ -109,7 +109,7 @@ BPF_CALL_0(bpf_ktime_get_ns)
 {
 	/* NMI safe access to clock monotonic */
 	// return ktime_get_mono_fast_ns();
-	
+
 	return ktime_to_ns(ktime_get_boottime());
 }
 
