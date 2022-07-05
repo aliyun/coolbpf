@@ -40,7 +40,7 @@ enum bpf_enum_value_kind {
 #define __CORE_RELO(src, field, info)					      \
 	__builtin_preserve_field_info((src)->field, BPF_FIELD_##info)
 
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#if __BYTE_ORDER == __LITTLE_ENDIAN
 #define __CORE_BITFIELD_PROBE_READ(dst, src, fld)			      \
 	bpf_probe_read_kernel(						      \
 			(void *)dst,				      \
@@ -88,19 +88,11 @@ enum bpf_enum_value_kind {
 	const void *p = (const void *)s + __CORE_RELO(s, field, BYTE_OFFSET); \
 	unsigned long long val;						      \
 									      \
-	/* This is a so-called barrier_var() operation that makes specified   \
-	 * variable "a black box" for optimizing compiler.		      \
-	 * It forces compiler to perform BYTE_OFFSET relocation on p and use  \
-	 * its calculated value in the switch below, instead of applying      \
-	 * the same relocation 4 times for each individual memory load.       \
-	 */								      \
-	asm volatile("" : "=r"(p) : "0"(p));				      \
-									      \
 	switch (__CORE_RELO(s, field, BYTE_SIZE)) {			      \
-	case 1: val = *(const unsigned char *)p; break;			      \
-	case 2: val = *(const unsigned short *)p; break;		      \
-	case 4: val = *(const unsigned int *)p; break;			      \
-	case 8: val = *(const unsigned long long *)p; break;		      \
+	case 1: val = *(const unsigned char *)p;			      \
+	case 2: val = *(const unsigned short *)p;			      \
+	case 4: val = *(const unsigned int *)p;				      \
+	case 8: val = *(const unsigned long long *)p;			      \
 	}								      \
 	val <<= __CORE_RELO(s, field, LSHIFT_U64);			      \
 	if (__CORE_RELO(s, field, SIGNED))				      \

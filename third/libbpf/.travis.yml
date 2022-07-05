@@ -1,6 +1,6 @@
 sudo: required
 language: bash
-dist: focal
+dist: bionic
 services:
     - docker
 
@@ -36,12 +36,7 @@ stages:
 jobs:
     include:
         - stage: Builds & Tests
-          name: Kernel 5.5.0 + selftests
-          language: bash
-          env: KERNEL=5.5.0
-          script:  $CI_ROOT/vmtest/run_vmtest.sh || travis_terminate 1
-
-        - name: Kernel LATEST + selftests
+          name: Kernel LATEST + selftests
           language: bash
           env: KERNEL=LATEST
           script:  $CI_ROOT/vmtest/run_vmtest.sh || travis_terminate 1
@@ -49,6 +44,11 @@ jobs:
         - name: Kernel 4.9.0 + selftests
           language: bash
           env: KERNEL=4.9.0
+          script:  $CI_ROOT/vmtest/run_vmtest.sh || travis_terminate 1
+
+        - name: Kernel 5.5.0 + selftests
+          language: bash
+          env: KERNEL=5.5.0
           script:  $CI_ROOT/vmtest/run_vmtest.sh || travis_terminate 1
 
         - name: Debian Build
@@ -75,33 +75,33 @@ jobs:
           script:         $CI_ROOT/managers/debian.sh RUN_CLANG_ASAN || travis_terminate 1
           after_script:   $CI_ROOT/managers/debian.sh CLEANUP
 
-        - name: Debian Build (gcc-10)
+        - name: Debian Build (gcc-8)
           language: bash
           install:        $CI_ROOT/managers/debian.sh SETUP
-          script:         $CI_ROOT/managers/debian.sh RUN_GCC10 || travis_terminate 1
+          script:         $CI_ROOT/managers/debian.sh RUN_GCC8 || travis_terminate 1
           after_script:   $CI_ROOT/managers/debian.sh CLEANUP
 
-        - name: Debian Build (gcc-10 ASan+UBSan)
+        - name: Debian Build (gcc-8 ASan+UBSan)
           language: bash
           install:        $CI_ROOT/managers/debian.sh SETUP
-          script:         $CI_ROOT/managers/debian.sh RUN_GCC10_ASAN || travis_terminate 1
+          script:         $CI_ROOT/managers/debian.sh RUN_GCC8_ASAN || travis_terminate 1
           after_script:   $CI_ROOT/managers/debian.sh CLEANUP
 
-        - name: Ubuntu Focal Build
+        - name: Ubuntu Bionic Build
           language: bash
           script: sudo $CI_ROOT/managers/ubuntu.sh || travis_terminate 1
 
-        - name: Ubuntu Focal Build (arm)
+        - name: Ubuntu Bionic Build (arm)
           arch: arm64
           language: bash
           script: sudo $CI_ROOT/managers/ubuntu.sh || travis_terminate 1
 
-        - name: Ubuntu Focal Build (s390x)
+        - name: Ubuntu Bionic Build (s390x)
           arch: s390x
           language: bash
           script: sudo $CI_ROOT/managers/ubuntu.sh || travis_terminate 1
 
-        - name: Ubuntu Focal Build (ppc64le)
+        - name: Ubuntu Bionic Build (ppc64le)
           arch: ppc64le
           language: bash
           script: sudo $CI_ROOT/managers/ubuntu.sh || travis_terminate 1
@@ -120,7 +120,7 @@ jobs:
               - COVERITY_SCAN_BUILD_COMMAND_PREPEND="cd src/"
               - COVERITY_SCAN_BUILD_COMMAND="make"
           install:
-              - sudo echo 'deb-src http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse' >>/etc/apt/sources.list
+              - sudo echo 'deb-src http://archive.ubuntu.com/ubuntu/ bionic main restricted universe multiverse' >>/etc/apt/sources.list
               - sudo apt-get update
               - sudo apt-get -y build-dep libelf-dev
               - sudo apt-get install -y libelf-dev pkg-config

@@ -1,16 +1,20 @@
 #!/bin/bash
-set -eux
+set -e
+set -x
 
-RELEASE="focal"
+RELEASE="bionic"
+
+echo "deb-src http://archive.ubuntu.com/ubuntu/ $RELEASE main restricted universe multiverse" >>/etc/apt/sources.list
 
 apt-get update
-apt-get install -y pkg-config
+apt-get -y build-dep libelf-dev
+apt-get install -y libelf-dev pkg-config
 
 source "$(dirname $0)/travis_wait.bash"
 
 cd $REPO_ROOT
 
-CFLAGS="-g -O2 -Werror -Wall -fsanitize=address,undefined -Wno-stringop-truncation"
+CFLAGS="-g -O2 -Werror -Wall -fsanitize=address,undefined"
 mkdir build install
 cc --version
 make -j$((4*$(nproc))) CFLAGS="${CFLAGS}" -C ./src -B OBJDIR=../build
@@ -20,4 +24,4 @@ if ! ldd build/libbpf.so | grep -q libelf; then
     exit 1
 fi
 make -j$((4*$(nproc))) -C src OBJDIR=../build DESTDIR=../install install
-CFLAGS=${CFLAGS} $(dirname $0)/test_compile.sh
+rm -rf build install

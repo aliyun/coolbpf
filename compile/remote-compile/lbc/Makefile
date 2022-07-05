@@ -42,6 +42,7 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPU
 
 bpf/vmlinux.h: $(wildcard vmlinux/*.h)
 	ln -sf ../../hive/header/$(ARCH)/vmlinux-$(VMLINUX_VERSION).h bpf/vmlinux.h
+	python tool/replaceHead.py bpf/lbc.org.h bpf/vmlinux.h bpf/lbc.h
 
 .PRECIOUS: $(OUTPUT)/%.bpf.o
 

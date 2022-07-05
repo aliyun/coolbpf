@@ -27,6 +27,7 @@ btfDir = os.path.join(rootDir, "hive/btf")
 compileDir = os.path.join(rootDir, "lbc")
 koBuildDir = os.path.join(rootDir, "lbc/ko")
 soFile = "bpf.so"
+objFile = ".output/lbc.bpf.o"
 dfFile = "pre.db"
 
 SEG_UNIT = 4096
@@ -77,6 +78,7 @@ class CsurfServer(object):
             "struct": self._getStruct,
             "type": self._getType,
             "c": self._compileSo,
+            "obj": self._compileObj,
             "ko": self._koBuild,
         }
         self._reSql = re.compile(r"[^a-zA-Z0-9_% ]")
@@ -189,7 +191,10 @@ class CsurfServer(object):
         self._c.cmd(f"rm -rf {path}")
 
     def _koBuild(self, dRecv):
-        kos = dRecv.pop("kos")
+        try:
+            kos = dRecv.pop("kos")
+        except KeyError:
+            return {"log": "kos not in request."}
         res = self._changeKoDir()
         if res['log'] != "ok.":
             return res
@@ -208,10 +213,11 @@ class CsurfServer(object):
             self._setupWorkEnd(path)
         return dSend
 
-    def _compileSo(self, dRecv):
-        dSend = {"log": "not start", "so": None}
-        cStr = dRecv.pop("code")
-        if "code" not in dRecv:
+    def _make(self, dRecv, filePath, k):
+        dSend = {"log": "not start", k: None}
+        try:
+            cStr = dRecv.pop("code")
+        except KeyError:
             return {"log": "no code."}
         if 'env' not in dRecv:
             dRecv['env'] = ""
@@ -220,24 +226,30 @@ class CsurfServer(object):
             os.chdir(compileDir)
             with open("bpf/lbc.bpf.c", 'w') as f:
                 f.write(cStr)
-            if os.path.exists(soFile):
-                os.remove(soFile)
+            if os.path.exists(filePath):
+                os.remove(filePath)
             ver = dRecv['ver']
             arch = self._setupArch(dRecv)
             self._c.cmd("rm -f bpf/vmlinux.h")
             dSend['clog'] = self._c.cmd('make VMLINUX_VERSION=%s ARCH=%s CARCH=%s CLFLAG="%s"' % (ver,
-                                                                                        arch,
-                                                                                        self._transArch(arch),
-                                                                                        dRecv['env']))
+                                                                                                  arch,
+                                                                                                  self._transArch(arch),
+                                                                                                  dRecv['env']))
             print(dSend['clog'])
             try:
-                with open(soFile, 'rb') as f:
-                    dSend['so'] = base64.b64encode(f.read()).decode()
+                with open(filePath, 'rb') as f:
+                    dSend[k] = base64.b64encode(f.read()).decode()
                 dSend['log'] = "ok."
             except (OSError, IOError) as e:
-                dSend['log'] = f"setup so report: {e}."
+                dSend['log'] = f"setup {k} report: {e}."
                 print(dSend)
         return dSend
+
+    def _compileSo(self, dRecv):
+        return self._make(dRecv, soFile, 'so')
+
+    def _compileObj(self, dRecv):
+        return self._make(dRecv, objFile, 'obj')
 
     def proc(self, dRecv):
         if "cmd" not in dRecv:

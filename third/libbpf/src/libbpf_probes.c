@@ -33,7 +33,7 @@ static int get_vendor_id(int ifindex)
 
 	snprintf(path, sizeof(path), "/sys/class/net/%s/device/vendor", ifname);
 
-	fd = open(path, O_RDONLY | O_CLOEXEC);
+	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return -1;
 
@@ -68,21 +68,18 @@ static void
 probe_load(enum bpf_prog_type prog_type, const struct bpf_insn *insns,
 	   size_t insns_cnt, char *buf, size_t buf_len, __u32 ifindex)
 {
-	LIBBPF_OPTS(bpf_prog_load_opts, opts);
+	struct bpf_load_program_attr xattr = {};
 	int fd;
 
 	switch (prog_type) {
 	case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
-		opts.expected_attach_type = BPF_CGROUP_INET4_CONNECT;
-		break;
-	case BPF_PROG_TYPE_CGROUP_SOCKOPT:
-		opts.expected_attach_type = BPF_CGROUP_GETSOCKOPT;
+		xattr.expected_attach_type = BPF_CGROUP_INET4_CONNECT;
 		break;
 	case BPF_PROG_TYPE_SK_LOOKUP:
-		opts.expected_attach_type = BPF_SK_LOOKUP;
+		xattr.expected_attach_type = BPF_SK_LOOKUP;
 		break;
 	case BPF_PROG_TYPE_KPROBE:
-		opts.kern_version = get_kernel_version();
+		xattr.kern_version = get_kernel_version();
 		break;
 	case BPF_PROG_TYPE_UNSPEC:
 	case BPF_PROG_TYPE_SOCKET_FILTER:
@@ -107,6 +104,7 @@ probe_load(enum bpf_prog_type prog_type, const struct bpf_insn *insns,
 	case BPF_PROG_TYPE_SK_REUSEPORT:
 	case BPF_PROG_TYPE_FLOW_DISSECTOR:
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
+	case BPF_PROG_TYPE_CGROUP_SOCKOPT:
 	case BPF_PROG_TYPE_TRACING:
 	case BPF_PROG_TYPE_STRUCT_OPS:
 	case BPF_PROG_TYPE_EXT:
@@ -115,11 +113,13 @@ probe_load(enum bpf_prog_type prog_type, const struct bpf_insn *insns,
 		break;
 	}
 
-	opts.prog_ifindex = ifindex;
-	opts.log_buf = buf;
-	opts.log_size = buf_len;
+	xattr.prog_type = prog_type;
+	xattr.insns = insns;
+	xattr.insns_cnt = insns_cnt;
+	xattr.license = "GPL";
+	xattr.prog_ifindex = ifindex;
 
-	fd = bpf_prog_load(prog_type, NULL, "GPL", insns, insns_cnt, NULL);
+	fd = bpf_load_program_xattr(&xattr, buf, buf_len);
 	if (fd >= 0)
 		close(fd);
 }
@@ -201,6 +201,7 @@ bool bpf_probe_map_type(enum bpf_map_type map_type, __u32 ifindex)
 {
 	int key_size, value_size, max_entries, map_flags;
 	__u32 btf_key_type_id = 0, btf_value_type_id = 0;
+	struct bpf_create_map_attr attr = {};
 	int fd = -1, btf_fd = -1, fd_inner;
 
 	key_size	= sizeof(__u32);
@@ -270,35 +271,34 @@ bool bpf_probe_map_type(enum bpf_map_type map_type, __u32 ifindex)
 
 	if (map_type == BPF_MAP_TYPE_ARRAY_OF_MAPS ||
 	    map_type == BPF_MAP_TYPE_HASH_OF_MAPS) {
-		LIBBPF_OPTS(bpf_map_create_opts, opts);
-
 		/* TODO: probe for device, once libbpf has a function to create
 		 * map-in-map for offload
 		 */
 		if (ifindex)
 			return false;
 
-		fd_inner = bpf_map_create(BPF_MAP_TYPE_HASH, NULL,
-					  sizeof(__u32), sizeof(__u32), 1, NULL);
+		fd_inner = bpf_create_map(BPF_MAP_TYPE_HASH,
+					  sizeof(__u32), sizeof(__u32), 1, 0);
 		if (fd_inner < 0)
 			return false;
-
-		opts.inner_map_fd = fd_inner;
-		fd = bpf_map_create(map_type, NULL, sizeof(__u32), sizeof(__u32), 1, &opts);
+		fd = bpf_create_map_in_map(map_type, NULL, sizeof(__u32),
+					   fd_inner, 1, 0);
 		close(fd_inner);
 	} else {
-		LIBBPF_OPTS(bpf_map_create_opts, opts);
-
 		/* Note: No other restriction on map type probes for offload */
-		opts.map_flags = map_flags;
-		opts.map_ifindex = ifindex;
+		attr.map_type = map_type;
+		attr.key_size = key_size;
+		attr.value_size = value_size;
+		attr.max_entries = max_entries;
+		attr.map_flags = map_flags;
+		attr.map_ifindex = ifindex;
 		if (btf_fd >= 0) {
-			opts.btf_fd = btf_fd;
-			opts.btf_key_type_id = btf_key_type_id;
-			opts.btf_value_type_id = btf_value_type_id;
+			attr.btf_fd = btf_fd;
+			attr.btf_key_type_id = btf_key_type_id;
+			attr.btf_value_type_id = btf_value_type_id;
 		}
 
-		fd = bpf_map_create(map_type, NULL, key_size, value_size, max_entries, &opts);
+		fd = bpf_create_map_xattr(&attr);
 	}
 	if (fd >= 0)
 		close(fd);

@@ -134,18 +134,32 @@ int lbc_map_lookup_elem(int id, const void *key, void *value)
     return bpf_map_lookup_elem(fd, key, value);
 }
 
-int lbc_map_update_elem(int id, const void *key, const void *value, unsigned long int flag)
+int lbc_map_lookup_elem_flags(int id, const void *key, void *value, unsigned long int flags)
 {
     int fd;
     struct bpf_object_skeleton *s;
-
+    
     s = lbc_skel->skeleton;
     if (id >= s->map_cnt) {
         return -1;
     }
-
+    
     fd = lbc_maps[id].mapFd;
-    return bpf_map_update_elem(fd, key, value, flag);
+    return bpf_map_lookup_elem_flags(fd, key, value, flags);
+}
+
+int lbc_map_update_elem(int id, const void *key, void *value, unsigned long int flags)
+{
+    int fd;
+    struct bpf_object_skeleton *s;
+    
+    s = lbc_skel->skeleton;
+    if (id >= s->map_cnt) {
+        return -1;
+    }
+    
+    fd = lbc_maps[id].mapFd;
+    return bpf_map_update_elem(fd, key, value, flags);
 }
 
 int lbc_map_lookup_and_delete_elem(int id, const void *key, void *value)
@@ -189,24 +203,214 @@ int lbc_map_get_next_key(int id, const void *key, void *next_key)
     fd = lbc_maps[id].mapFd;
     return bpf_map_get_next_key(fd, key, next_key);
 }
-        """
+
+static struct bpf_prog_skeleton *lbc_search_progs(const char* func) {
+    struct bpf_object_skeleton *s;
+    int i;
+    
+    s = lbc_skel->skeleton;
+    for (i = 0; i < s->prog_cnt; i ++) {
+        if (strcmp(s->progs[i].name, func) == 0) {
+            return &(s->progs[i]);
+        }
+    }
+    return NULL;
+}
+
+static int lbc_prog_link(struct bpf_prog_skeleton *progs, struct bpf_link *link){
+    int ret = 0;
+    if (link) {
+        *(progs->link) = link;
+    }
+    else {
+        fprintf(stderr, "%s: link %s error.\\n", __func__, progs->name);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_perf_event(const char* func, int pfd) {
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_perf_event(*(progs->prog), pfd);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_kprobe(const char* func, const char* sym)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_kprobe(*(progs->prog), false, sym);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_kretprobe(const char* func, const char* sym)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_kprobe(*(progs->prog), true, sym);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_uprobe(const char* func, int pid, const char *binary_path, unsigned long func_offset)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_uprobe(*(progs->prog), false, pid, binary_path, func_offset);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_uretprobe(const char* func, int pid, const char *binary_path, unsigned long func_offset)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_uprobe(*(progs->prog), true, pid, binary_path, func_offset);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_tracepoint(const char* func, const char *tp_category, const char *tp_name)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_tracepoint(*(progs->prog), tp_category, tp_name);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_raw_tracepoint(const char* func, const char *tp_name)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_raw_tracepoint(*(progs->prog), tp_name);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_cgroup(const char* func, int cgroup_fd)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_cgroup(*(progs->prog), cgroup_fd);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_netns(const char* func, int netns_fd)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_netns(*(progs->prog), netns_fd);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+
+int lbc_attach_xdp(const char* func, int ifindex)
+{
+    struct bpf_prog_skeleton *progs = lbc_search_progs(func);
+    struct bpf_link *link;
+    int ret;
+    
+    if (progs) {
+        link = bpf_program__attach_xdp(*(progs->prog), ifindex);
+        ret = lbc_prog_link(progs, link);
+    }
+    else {
+        fprintf(stderr, "%s: search %s error.\\n", __func__, func);
+        ret = -1;
+    }
+    return ret;
+}
+"""
 
     def genModelMaps(self):
         return """
-#define MAPS_NAME_MAX 32
-#define MAPS_CELL_MAX 256
-struct lbc_maps_struct {
-    char name[MAPS_NAME_MAX];
-    int type;
-    int mapFd;
-    void *pb;
-};
-static struct lbc_maps_struct lbc_maps[MAPS_CELL_MAX];
 int lbc_bpf_mmap_maps(void)
 {
     int i;
     struct bpf_object_skeleton *s;
     s = lbc_skel->skeleton;
+    lbc_maps = malloc(sizeof(struct lbc_maps_struct) * s->map_cnt);
+    if (lbc_maps == NULL) {
+        fprintf(stderr, "Failed to alloc memory for lbc_bpf_mmap_maps.\\n");
+        return -12;
+    }
     for (i = 0; i < s->map_cnt; i ++) {
         strncpy(lbc_maps[i].name, s->maps[i].name, MAPS_NAME_MAX);
         lbc_maps[i].mapFd = bpf_map__fd(*(s->maps[i].map));
@@ -251,7 +455,17 @@ struct ksym {
     char *name;
 };
 
+#define MAPS_NAME_MAX 32
+#define MAPS_CELL_MAX 256
+struct lbc_maps_struct {
+    char name[MAPS_NAME_MAX];
+    int type;
+    int mapFd;
+    void *pb;
+};
+
 static struct ksym* syms = NULL;
+static struct lbc_maps_struct* lbc_maps = NULL;
 static int sym_cnt;
 
 static int ksym_cmp(const void *p1, const void *p2)
@@ -371,7 +585,7 @@ static void bump_memlock_rlimit(void)
 
 static struct lbc_bpf *lbc_skel = NULL;
 int lbc_bpf_mmap_maps(void);
-int lbc_bpf_init(int level)
+int lbc_bpf_init(int level, int attach)
 {
     int err;
     int map_my_map_fd;
@@ -386,22 +600,24 @@ int lbc_bpf_init(int level)
     /* Open BPF application */
     lbc_skel = lbc_bpf__open();
     if (!lbc_skel) {
-        fprintf(stderr, "Failed to open BPF skeleton\\n");
+        fprintf(stderr, "Failed to open BPF skeleton\n");
         return 1;
     }
 
     /* Load & verify BPF programs */
     err = lbc_bpf__load(lbc_skel);
     if (err) {
-        fprintf(stderr, "Failed to load and verify BPF skeleton\\n");
+        fprintf(stderr, "Failed to load and verify BPF skeleton\n");
         goto cleanup;
     }
 
     /* Attach tracepoint handler */
-    err = lbc_bpf__attach(lbc_skel);
-    if (err) {
-        fprintf(stderr, "Failed to attach BPF skeleton\\n");
-        goto cleanup;
+    if (attach) {
+        err = lbc_bpf__attach(lbc_skel);
+        if (err) {
+            fprintf(stderr, "Failed to attach BPF skeleton\n");
+            goto cleanup;
+        }
     }
     
     err = lbc_bpf_mmap_maps();
@@ -411,12 +627,22 @@ int lbc_bpf_init(int level)
 
     return 0;
     cleanup:
+    if (lbc_maps != NULL) {
+        free(lbc_maps);
+    }
     lbc_bpf__destroy(lbc_skel);
     return -err;
 }
 
 void lbc_bpf_exit(void)
 {
+    if (syms != NULL) {
+        free(syms);
+        syms = NULL;
+    }
+    if (lbc_maps != NULL) {
+        free(lbc_maps);
+    }
     lbc_bpf__destroy(lbc_skel);
 }
 
