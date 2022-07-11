@@ -17,4 +17,4 @@
 
     5）Variety kernel version testing for new BPF functions and tools.
 
-    6）Support for many languags, python/go/c/rust.
+    6）Support for many languages, python/go/c/rust.
