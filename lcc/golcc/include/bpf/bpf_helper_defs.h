@@ -961,8 +961,8 @@ static long (*bpf_probe_write_user)(void *dst, const void *src, __u32 len) = (vo
  * Returns
  * 	The return value depends on the result of the test, and can be:
  *
- * 	* 0, if current task belongs to the cgroup2.
- * 	* 1, if current task does not belong to the cgroup2.
+ * 	* 1, if current task belongs to the cgroup2.
+ * 	* 0, if current task does not belong to the cgroup2.
  * 	* A negative error code, if an error occurred.
  */
 static long (*bpf_current_task_under_cgroup)(void *map, __u32 index) = (void *) 37;
@@ -1752,8 +1752,8 @@ static long (*bpf_skb_get_xfrm_state)(struct __sk_buff *skb, __u32 index, struct
  * 		# sysctl kernel.perf_event_max_stack=<new value>
  *
  * Returns
- * 	A non-negative value equal to or less than *size* on success,
- * 	or a negative error in case of failure.
+ * 	The non-negative copied *buf* length equal to or less than
+ * 	*size* on success, or a negative error in case of failure.
  */
 static long (*bpf_get_stack)(void *ctx, void *buf, __u32 size, __u64 flags) = (void *) 67;
 
@@ -3305,8 +3305,8 @@ static struct udp6_sock *(*bpf_skc_to_udp6_sock)(void *sk) = (void *) 140;
  * 		# sysctl kernel.perf_event_max_stack=<new value>
  *
  * Returns
- * 	A non-negative value equal to or less than *size* on success,
- * 	or a negative error in case of failure.
+ * 	The non-negative copied *buf* length equal to or less than
+ * 	*size* on success, or a negative error in case of failure.
  */
 static long (*bpf_get_task_stack)(struct task_struct *task, void *buf, __u32 size, __u64 flags) = (void *) 141;
 
@@ -4294,5 +4294,80 @@ static long (*bpf_xdp_store_bytes)(struct xdp_md *xdp_md, __u32 offset, void *bu
  * 	*dst* buffer is zeroed out.
  */
 static long (*bpf_copy_from_user_task)(void *dst, __u32 size, const void *user_ptr, struct task_struct *tsk, __u64 flags) = (void *) 191;
+
+/*
+ * bpf_skb_set_tstamp
+ *
+ * 	Change the __sk_buff->tstamp_type to *tstamp_type*
+ * 	and set *tstamp* to the __sk_buff->tstamp together.
+ *
+ * 	If there is no need to change the __sk_buff->tstamp_type,
+ * 	the tstamp value can be directly written to __sk_buff->tstamp
+ * 	instead.
+ *
+ * 	BPF_SKB_TSTAMP_DELIVERY_MONO is the only tstamp that
+ * 	will be kept during bpf_redirect_*().  A non zero
+ * 	*tstamp* must be used with the BPF_SKB_TSTAMP_DELIVERY_MONO
+ * 	*tstamp_type*.
+ *
+ * 	A BPF_SKB_TSTAMP_UNSPEC *tstamp_type* can only be used
+ * 	with a zero *tstamp*.
+ *
+ * 	Only IPv4 and IPv6 skb->protocol are supported.
+ *
+ * 	This function is most useful when it needs to set a
+ * 	mono delivery time to __sk_buff->tstamp and then
+ * 	bpf_redirect_*() to the egress of an iface.  For example,
+ * 	changing the (rcv) timestamp in __sk_buff->tstamp at
+ * 	ingress to a mono delivery time and then bpf_redirect_*()
+ * 	to sch_fq@phy-dev.
+ *
+ * Returns
+ * 	0 on success.
+ * 	**-EINVAL** for invalid input
+ * 	**-EOPNOTSUPP** for unsupported protocol
+ */
+static long (*bpf_skb_set_tstamp)(struct __sk_buff *skb, __u64 tstamp, __u32 tstamp_type) = (void *) 192;
+
+/*
+ * bpf_ima_file_hash
+ *
+ * 	Returns a calculated IMA hash of the *file*.
+ * 	If the hash is larger than *size*, then only *size*
+ * 	bytes will be copied to *dst*
+ *
+ * Returns
+ * 	The **hash_algo** is returned on success,
+ * 	**-EOPNOTSUP** if the hash calculation failed or **-EINVAL** if
+ * 	invalid arguments are passed.
+ */
+static long (*bpf_ima_file_hash)(struct file *file, void *dst, __u32 size) = (void *) 193;
+
+/*
+ * bpf_kptr_xchg
+ *
+ * 	Exchange kptr at pointer *map_value* with *ptr*, and return the
+ * 	old value. *ptr* can be NULL, otherwise it must be a referenced
+ * 	pointer which will be released when this helper is called.
+ *
+ * Returns
+ * 	The old value of kptr (which can be NULL). The returned pointer
+ * 	if not NULL, is a reference which must be released using its
+ * 	corresponding release function, or moved into a BPF map before
+ * 	program exit.
+ */
+static void *(*bpf_kptr_xchg)(void *map_value, void *ptr) = (void *) 194;
+
+/*
+ * bpf_map_lookup_percpu_elem
+ *
+ * 	Perform a lookup in *percpu map* for an entry associated to
+ * 	*key* on *cpu*.
+ *
+ * Returns
+ * 	Map value associated to *key* on *cpu*, or **NULL** if no entry
+ * 	was found or *cpu* is invalid.
+ */
+static void *(*bpf_map_lookup_percpu_elem)(void *map, const void *key, __u32 cpu) = (void *) 195;
 
 

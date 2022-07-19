@@ -24,7 +24,6 @@ func main() {
 		os.Exit(-1)
 	}
 
-	bpfModule.ListProgramNames()
 	prog1, err := bpfModule.GetProgram("j_wake_up_new_task")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

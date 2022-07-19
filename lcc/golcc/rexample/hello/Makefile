@@ -11,10 +11,8 @@ GO_LDFLAGS="$(PWD)/../../lib/libbpf.a"
 
 $(PRG): $(BPF_O)
 	CGO_CFLAGS=$(GO_CFLAGS) CGO_LDFLAGS=$(GO_LDFLAGS) go build -o $(PRG)
-	#go build -o $(PRG)
 
 $(BPF_O): $(BPF_ORIFILE)
-	#$(shell echo "$(BPF_ORIFILE)")
 	cp $(PWD)/$(BPF_ORIFILE) $(PWD)
 	$(LCC) -f $(BPF_FILE) -o
 	rm -f $(PWD)/$(BPF_FILE)
