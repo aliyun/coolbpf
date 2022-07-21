@@ -119,12 +119,12 @@ class CgenfuncsDb(object):
             os.remove(dbName)
         self._db = sqlite3.connect(dbName)
         cur = self._db.cursor()
-        sql = """CREATE TABLE files ( 
+        sql = """CREATE TABLE files (
                           id INTEGER PRIMARY KEY autoincrement,
                           file TEXT
                 );"""
         cur.execute(sql)
-        sql = """CREATE TABLE funs ( 
+        sql = """CREATE TABLE funs (
                   id INTEGER PRIMARY KEY autoincrement,
                   func VARCHAR (128),
                   args JSON,
@@ -133,14 +133,14 @@ class CgenfuncsDb(object):
                   fid INTEGER
         );"""
         cur.execute(sql)
-        sql = """CREATE TABLE structs ( 
+        sql = """CREATE TABLE structs (
                           id INTEGER PRIMARY KEY autoincrement,
                           name VARCHAR (64),
                           members INTEGER,
                           bytes INTEGER
                 );"""
         cur.execute(sql)
-        sql = """CREATE TABLE members ( 
+        sql = """CREATE TABLE members (
                                   id INTEGER PRIMARY KEY autoincrement,
                                   fid INTEGER,
                                   types VARCHAR (128),
@@ -150,7 +150,7 @@ class CgenfuncsDb(object):
                                   bits VARCHAR (16) DEFAULT ""
                         );"""
         cur.execute(sql)
-        sql = """CREATE TABLE types ( 
+        sql = """CREATE TABLE types (
                                   id INTEGER PRIMARY KEY autoincrement,
                                   name VARCHAR (64),
                                   alias VARCHAR (64),
