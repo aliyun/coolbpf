@@ -1883,7 +1883,7 @@ static int btf_add_composite(struct btf *btf, int kind, const char *name, __u32 
  *   - *byte_sz* - size of the struct, in bytes;
  *
  * Struct initially has no fields in it. Fields can be added by
- * btf__add_field() right after btf__add_struct() succeeds. 
+ * btf__add_field() right after btf__add_struct() succeeds.
  *
  * Returns:
  *   - >0, type ID of newly added BTF type;
@@ -4127,7 +4127,7 @@ static void btf_dedup_merge_hypot_map(struct btf_dedup *d)
 		 */
 		if (d->hypot_adjust_canon)
 			continue;
-		
+
 		if (t_kind == BTF_KIND_FWD && c_kind != BTF_KIND_FWD)
 			d->map[t_id] = c_id;
 

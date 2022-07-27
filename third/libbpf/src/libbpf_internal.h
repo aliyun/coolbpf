@@ -324,7 +324,7 @@ enum bpf_core_relo_kind {
  *
  *   struct sample *s = ...;
  *   int x = &s->a;     // encoded as "0:0" (a is field #0)
- *   int y = &s->b[5];  // encoded as "0:1:0:5" (anon struct is field #1, 
+ *   int y = &s->b[5];  // encoded as "0:1:0:5" (anon struct is field #1,
  *                      // b is field #0 inside anon struct, accessing elem #5)
  *   int z = &s[10]->b; // encoded as "10:1" (ptr is used as an array)
  *
