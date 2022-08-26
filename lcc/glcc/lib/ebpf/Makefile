@@ -1,3 +1,7 @@
+ifeq ($(KERNEL_VERSION),)
+KERNEL_VERSION = $(shell uname -r)
+endif
+
 ifneq ($(KERNELRELEASE),)
 	obj-m := ebpfdrv.o
 	EXTRA_CFLAGS += -I$(src)
@@ -6,7 +10,7 @@ ifneq ($(KERNELRELEASE),)
 					stackmap.o \
 					ebpf_kprobe.o ebpf_tracepoint.o
 else
-	KERN_DIR ?= /usr/src/kernels/3.10.0-327.ali2017.alios7.x86_64/
+	KERN_DIR ?= /usr/src/kernels/$(KERNEL_VERSION)/
 	PWD := $(shell pwd)
 default:
 	$(MAKE) -C $(KERN_DIR) M=$(PWD) modules
