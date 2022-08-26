@@ -46,7 +46,7 @@ static int env_init()
     ioctl_p = (ioctl_t)dlsym(RTLD_NEXT, "ioctl");
     if (ioctl_p == NULL)
         return -ENOTSUP;
-
+#if 0
     fopen_p = (fopen_t)dlsym(RTLD_NEXT, "fopen");
     if (fopen_p == NULL) 
         return -ENOTSUP;
@@ -54,7 +54,7 @@ static int env_init()
     fopen64_p = (fopen64_t)dlsym(RTLD_NEXT, "fopen64");
     if (fopen64_p == NULL) 
         return -ENOTSUP;
-
+#endif
     syscall_p = (syscall_t)dlsym(RTLD_NEXT, "syscall");
     if (syscall_p == NULL)
         return -ENOTSUP;
@@ -407,6 +407,7 @@ int ioctl(int __fd, unsigned long int __request, ...)
 }
 
 // Just let sucessfully open file but not used.
+#if 0
 FILE *fopen(const char *__filename, const char *__modes)
 {
     int err;
@@ -445,8 +446,11 @@ FILE *fopen64(const char *__filename, const char *__modes)
     int err;
     char subsys[128];
     char eventname[128];
+#if 0
+// libbpf support legacy kprobe now.
 #define REAL_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/kprobe/type"
 #define FAKE_KPROBE_TYPE_FILE "./kprobe_type"
+#endif
 #define TRACEPOINT_TYPE_FILE_PREFIX "/sys/kernel/debug/tracing/events"
 
     err = env_init();
@@ -457,11 +461,12 @@ FILE *fopen64(const char *__filename, const char *__modes)
     }
 
     pr_dbg("fopen64 in\n");
-
+#if 0
     if (strncmp(__filename, REAL_KPROBE_TYPE_FILE, sizeof(REAL_KPROBE_TYPE_FILE) - 1) == 0)
     {
         return fopen64_p(FAKE_KPROBE_TYPE_FILE, __modes);
     }
+#endif
 
     if (strncmp(TRACEPOINT_TYPE_FILE_PREFIX, __filename, sizeof(TRACEPOINT_TYPE_FILE_PREFIX) - 1) == 0)
     {
@@ -471,3 +476,5 @@ FILE *fopen64(const char *__filename, const char *__modes)
     }
     return fopen64_p(__filename, __modes);
 }
+
+#endif 
