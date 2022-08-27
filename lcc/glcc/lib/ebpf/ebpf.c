@@ -1392,8 +1392,7 @@ static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
 {
 	struct bpf_kprobe *bpf_kp;
 	struct bpf_prog *prog;
-	int kp_fd, err;
-
+	int kp_fd, err = 0;
 	bpf_kp = kzalloc(sizeof(*bpf_kp), GFP_USER);
 	if (!bpf_kp)
 		return -ENOMEM;
@@ -1411,12 +1410,15 @@ static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
 	}
 	
 	err = bpf_kprobe_register(bpf_kp->bke);
-	if (err)
+	if (err) {
+		printk(KERN_ERR "Failed to register kprobe\n");
 		goto put_prog;
+	}
+
 	bpf_kp->prog = prog;
 	kp_fd = anon_inode_getfd("bpf-kprobe", &bpf_kprobe_fops, bpf_kp, O_CLOEXEC);
-	
 	if (kp_fd < 0) {
+		printk(KERN_ERR "Failed to get anon inode for bpf-kprobe\n");
 		bpf_kprobe_unregister(bpf_kp->bke);
 		err = kp_fd;
 		goto put_prog;
@@ -1426,7 +1428,7 @@ static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
 put_prog:
 	bpf_prog_put(prog);
 free_bke:
-	kfree(bpf_kp->bke);
+	free_bpf_kprobe_event(bpf_kp->bke);
 free_bpf_kp:
 	kfree(bpf_kp);
 	return err;
@@ -1437,7 +1439,7 @@ static int bpf_prog_attach_tracepoint(u32 prog_fd, char *name)
 	struct bpf_tracepoint *bpf_tp;
 	struct bpf_tracepoint_event *bte;
 	struct bpf_prog *prog;
-	int tp_fd, err;
+	int tp_fd, err = 0;
 
 	bte = bpf_find_tracepoint(name);
 	if (!bte)

@@ -37,20 +37,24 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
     // todo: alloc nhit
 
     if (symbol) {
-        bke->symbol = kstrdup(symbol, GFP_KERNEL);
+        bke->symbol = kstrdup(symbol, GFP_USER);
         if (!bke->symbol) {
             err = -ENOMEM;
             goto free_bke;
         }
     } else {
+        printk(KERN_ERR "BUG: no symbol exists\n");
         err = -EINVAL;
         goto free_bke;
     }
 
     if (is_return)
         bke->rp.handler = bpf_kretprobe_dispatcher;
-    else 
+    else {
+        bke->kp.symbol_name = bke->symbol;
+        bke->kp.offset = 0;
         bke->kp.pre_handler = bpf_kprobe_dispatcher;
+    }
     
     bke->prog = prog;
     return bke;
@@ -62,6 +66,12 @@ free_bke:
     return ERR_PTR(err);
 }
 
+void free_bpf_kprobe_event(struct bpf_kprobe_event *bke)
+{
+    kfree(bke->symbol);
+    kfree(bke);
+}
+
 int bpf_kprobe_register(struct bpf_kprobe_event *bke)
 {
     return register_kprobe(&bke->kp);
@@ -71,3 +81,4 @@ void bpf_kprobe_unregister(struct bpf_kprobe_event *bke)
 {
     unregister_kprobe(&bke->kp);
 }
+

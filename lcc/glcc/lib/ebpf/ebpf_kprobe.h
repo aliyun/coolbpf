@@ -13,6 +13,7 @@ struct bpf_kprobe_event
 };
 
 struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *symbol, bool is_return);
+void free_bpf_kprobe_event(struct bpf_kprobe_event *bke);
 
 int bpf_kprobe_register(struct bpf_kprobe_event *bke);
 void bpf_kprobe_unregister(struct bpf_kprobe_event *bke);
