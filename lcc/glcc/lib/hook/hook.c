@@ -28,9 +28,11 @@ static fopen64_t fopen64_p = NULL;
 static struct hook_env
 {
     bool init_done;
+    bool init_failed;
     int ebpfdrv_fd;
 } env = {
     .init_done = false,
+    .init_failed = false;
 };
 
 #define __NR_perf_event_open 298
@@ -38,41 +40,46 @@ static struct hook_env
 
 static int env_init()
 {
-    int err;
-    err = 0;
+    int err = 0;
+
     if (env.init_done)
         return 0;
+
+    if (env.init_failed)
+    {
+        pr_dbg("ebpfdrv has init failed, we don't try again.\n");
+        return -EACCES;
+    }
 
     ioctl_p = (ioctl_t)dlsym(RTLD_NEXT, "ioctl");
     if (ioctl_p == NULL)
         return -ENOTSUP;
-#if 0
+#if 1 // we need this to avoid libbpf create perf event by kprobe_events
     fopen_p = (fopen_t)dlsym(RTLD_NEXT, "fopen");
-    if (fopen_p == NULL) 
+    if (fopen_p == NULL)
         return -ENOTSUP;
-    
+
     fopen64_p = (fopen64_t)dlsym(RTLD_NEXT, "fopen64");
-    if (fopen64_p == NULL) 
+    if (fopen64_p == NULL)
         return -ENOTSUP;
 #endif
     syscall_p = (syscall_t)dlsym(RTLD_NEXT, "syscall");
     if (syscall_p == NULL)
         return -ENOTSUP;
 
-    env.init_done = true;
-
 #define EBPFDRV_PATH "/dev/ebpfdrv"
 #define F_OK 0 /* Test for existence.  */
     env.ebpfdrv_fd = open(EBPFDRV_PATH, O_RDWR);
     if (env.ebpfdrv_fd < 0)
     {
+        env.init_failed = true;
         err = -errno;
-        pr_err("Open %s error.\n", EBPFDRV_PATH);
+        pr_err("failed to open: %s, error message: %s\n", EBPFDRV_PATH, strerror(errno));
+        return err;
     }
-    else
-    {
-        pr_dbg("Open %s, fd is %d\n", EBPFDRV_PATH, env.ebpfdrv_fd);
-    }
+
+    pr_dbg("init ebpfdrv sucessfully.\n");
+    env.init_done = true;
     return err;
 }
 
@@ -145,89 +152,7 @@ long int handle_bpf_call(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int si
     return err;
 }
 
-static int poke_kprobe_events(bool add, const char *name, bool retprobe, uint64_t offset)
-{
-    int fd, ret = 0;
-    char cmd[192] = {}, probename[128] = {}, probefunc[128] = {};
-    const char *file = "/sys/kernel/debug/tracing/kprobe_events";
-    pid_t p = getpid();
 
-    if (retprobe)
-        snprintf(probename, sizeof(probename), "kretprobes/%s_lcc_%u", name, p);
-    else
-        snprintf(probename, sizeof(probename), "kprobes/%s_lcc_%u", name, p);
-
-    if (offset)
-        snprintf(probefunc, sizeof(probefunc), "%s+%lu", name, offset);
-
-    if (add)
-    {
-        snprintf(cmd, sizeof(cmd), "%c:%s %s",
-                 retprobe ? 'r' : 'p',
-                 probename,
-                 offset ? probefunc : name);
-    }
-    else
-    {
-        snprintf(cmd, sizeof(cmd), "-:%s", probename);
-    }
-
-    fd = open(file, O_WRONLY | O_APPEND, 0);
-    if (!fd)
-        return -errno;
-    ret = write(fd, cmd, strlen(cmd));
-    if (ret < 0)
-        ret = -errno;
-    close(fd);
-
-    return ret;
-}
-
-static inline int add_kprobe_event(const char *name, bool retprobe, uint64_t offset)
-{
-    return poke_kprobe_events(true, name, retprobe, offset);
-}
-
-/*
- * this function is expected to parse integer in the range of [0, 2^31-1] from
- * given file using scanf format string fmt. If actual parsed value is
- * negative, the result might be indistinguishable from error
- */
-static int parse_uint_from_file(const char *file, const char *fmt)
-{
-    int err, ret;
-    FILE *f;
-
-    f = fopen_p(file, "r");
-    if (!f)
-    {
-        err = -errno;
-        pr_err("failed to open '%s': %s\n", file, strerror(err));
-        return err;
-    }
-    err = fscanf(f, fmt, &ret);
-    if (err != 1)
-    {
-        err = err == EOF ? -EIO : -errno;
-        pr_err("failed to parse '%s': %s\n", file, strerror(err));
-        fclose(f);
-        return err;
-    }
-    fclose(f);
-    return ret;
-}
-
-static int determine_kprobe_perf_type(const char *func_name, bool is_retprobe)
-{
-    char file[192];
-    const char *fname = "/sys/kernel/debug/tracing/events/%s/%s_lcc_%d/id";
-
-    snprintf(file, sizeof(file), fname,
-             is_retprobe ? "kretprobes" : "kprobes",
-             func_name, getpid());
-
-    return parse_uint_from_file(file, "%d\n");
-}
 
 int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int group_fd, unsigned long flags)
 {
@@ -249,57 +174,28 @@ int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int g
             return err;
         }
     }
-    else
+    else // kprobe or tracepoint
     {
-        pr_dbg("perf_event_open create perf event\n");
+       
+        // config1 is function name
         if (old_attr->config1 == 0)
         {
-            pfd = syscall_p(__NR_perf_event_open, old_attr, pid, /* pid */ cpu, /* cpu */ group_fd /* group_fd */, flags);
-            if (pfd < 0)
-            {
-                err = -errno;
-                pr_err("tracepoint perf_event_open() failed: %s\n", strerror(err));
-                return err;
-            }
+            // tracepoint
+            pr_dbg("perf_event_open create perf event, type is tracepoint\n");
         }
         else
         {
-            err = add_kprobe_event(name, false, old_attr->config2);
-            if (err < 0)
-            {
-                pr_err("add kprobe events failed for %s:%d\n", old_attr->config1, old_attr->config2);
-                return err;
-            }
-
-            type = determine_kprobe_perf_type(name, false);
-            if (type < 0)
-            {
-                pr_err("failed to determine legacy kprobe event id: %s\n", strerror(type));
-                return type;
-            }
-            attr.size = sizeof(attr);
-            attr.config = type;
-            attr.type = PERF_TYPE_TRACEPOINT;
-
+            pr_dbg("perf_event_open create perf event, type is kprobe\n");
+            // kprobe
             err = ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_FUNCNAME, old_attr->config1);
             if (err < 0)
             {
                 pr_err("IOCTL_BPF_PROG_FUNCNAME set func name error %d\n", err);
                 return err;
             }
-            else
-            {
-                pfd = syscall_p(__NR_perf_event_open, &attr, pid, /* pid */ cpu, /* cpu */ group_fd /* group_fd */, flags);
-                if (pfd < 0)
-                {
-                    err = -errno;
-                    pr_err("legacy kprobe perf_event_open() failed: %s\n", strerror(err));
-                    return err;
-                }
-            }
+            pfd = 0xbeef; // fake perf event fd
         }
     }
-    pr_dbg("perf event sys call return %d\n", pfd);
     return pfd;
 }
 
@@ -390,8 +286,6 @@ int ioctl(int __fd, unsigned long int __request, ...)
     // attach and enable
     case PERF_EVENT_IOC_ENABLE:
     {
-        pr_dbg("PERF_EVENT_IOC_ENABLE\n");
-        // err = ioctl_p(__fd, PERF_EVENT_IOC_ENABLE, 0);
         err = 0;
         pr_dbg("PERF_EVENT_IOC_ENABLE result %d\n", err);
         break;
@@ -406,17 +300,18 @@ int ioctl(int __fd, unsigned long int __request, ...)
     return err;
 }
 
-// Just let sucessfully open file but not used.
-#if 0
-FILE *fopen(const char *__filename, const char *__modes)
+FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64)
 {
     int err;
     char subsys[128];
     char eventname[128];
 #define REAL_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/kprobe/type"
-#define FAKE_KPROBE_TYPE_FILE "./kprobe_type"
+// It does not matter let libbpf read tracepoint type.
+#define FAKE_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/tracepoint/type"
 #define TRACEPOINT_TYPE_FILE_PREFIX "/sys/kernel/debug/tracing/events"
 
+    pr_dbg("fopen%s :filename: %s\n", is64 ? "64" : "", __filename);
+   
     err = env_init();
     if (err < 0)
     {
@@ -424,11 +319,12 @@ FILE *fopen(const char *__filename, const char *__modes)
         return NULL;
     }
 
-    pr_dbg("fopen in\n");
-
     if (strncmp(__filename, REAL_KPROBE_TYPE_FILE, sizeof(REAL_KPROBE_TYPE_FILE) - 1) == 0)
     {
-        return fopen_p(FAKE_KPROBE_TYPE_FILE, __modes);
+        if (!is64)
+            return fopen_p(FAKE_KPROBE_TYPE_FILE, __modes);
+        else
+            return fopen64_p(FAKE_KPROBE_TYPE_FILE, __modes);
     }
 
     if (strncmp(TRACEPOINT_TYPE_FILE_PREFIX, __filename, sizeof(TRACEPOINT_TYPE_FILE_PREFIX) - 1) == 0)
@@ -437,44 +333,23 @@ FILE *fopen(const char *__filename, const char *__modes)
         pr_dbg("subsys:%s, eventname:%s\n", subsys, eventname);
         ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_FUNCNAME, eventname);
     }
-    return fopen_p(__filename, __modes);
+    if (!is64)
+        return fopen_p(__filename, __modes);
+    else
+        return fopen64_p(__filename, __modes);
+}
+
+// Just let sucessfully open file but not used.
+#if 1
+FILE *fopen(const char *__filename, const char *__modes)
+{
+    return fopen_common_handle(__filename, __modes, false);
 }
 
 // Just let sucessfully open file but not used.
 FILE *fopen64(const char *__filename, const char *__modes)
 {
-    int err;
-    char subsys[128];
-    char eventname[128];
-#if 0
-// libbpf support legacy kprobe now.
-#define REAL_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/kprobe/type"
-#define FAKE_KPROBE_TYPE_FILE "./kprobe_type"
-#endif
-#define TRACEPOINT_TYPE_FILE_PREFIX "/sys/kernel/debug/tracing/events"
-
-    err = env_init();
-    if (err < 0)
-    {
-        pr_err("env init error, error %d, error string %s\n", err, strerror(err));
-        return NULL;
-    }
-
-    pr_dbg("fopen64 in\n");
-#if 0
-    if (strncmp(__filename, REAL_KPROBE_TYPE_FILE, sizeof(REAL_KPROBE_TYPE_FILE) - 1) == 0)
-    {
-        return fopen64_p(FAKE_KPROBE_TYPE_FILE, __modes);
-    }
-#endif
-
-    if (strncmp(TRACEPOINT_TYPE_FILE_PREFIX, __filename, sizeof(TRACEPOINT_TYPE_FILE_PREFIX) - 1) == 0)
-    {
-        sscanf(__filename, "/sys/kernel/debug/tracing/events/%[^/]/%[^/]/id", subsys, eventname);
-        pr_dbg("subsys:%s, eventname:%s\n", subsys, eventname);
-        ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_FUNCNAME, eventname);
-    }
-    return fopen64_p(__filename, __modes);
+    return fopen_common_handle(__filename, __modes, true);
 }
 
-#endif 
+#endif
