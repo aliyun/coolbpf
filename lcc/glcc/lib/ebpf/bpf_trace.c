@@ -24,6 +24,64 @@
 // u64 bpf_get_stack(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5);
 
 /**
+ * trace_call_bpf - invoke BPF program
+ * @call: tracepoint event
+ * @ctx: opaque context pointer
+ *
+ * kprobe handlers execute BPF programs via this helper.
+ * Can be used from static tracepoints in the future.
+ *
+ * Return: BPF programs always return an integer which is interpreted by
+ * kprobe handler as:
+ * 0 - return from kprobe (event is filtered out)
+ * 1 - store kprobe event into ring buffer
+ * Other values are reserved and currently alias to 1
+ */
+// unsigned int trace_call_bpf(struct ftrace_event_call *call, void *ctx)
+// {
+// 	unsigned int ret;
+
+// 	if (in_nmi()) /* not supported yet */
+// 		return 1;
+
+// 	preempt_disable();
+
+// 	if (unlikely(__this_cpu_inc_return(bpf_prog_active) != 1)) {
+// 		/*
+// 		 * since some bpf program is already running on this cpu,
+// 		 * don't call into another bpf program (same or different)
+// 		 * and don't send kprobe event into ring-buffer,
+// 		 * so return zero here
+// 		 */
+// 		ret = 0;
+// 		goto out;
+// 	}
+
+// 	/*
+// 	 * Instead of moving rcu_read_lock/rcu_dereference/rcu_read_unlock
+// 	 * to all call sites, we did a bpf_prog_array_valid() there to check
+// 	 * whether call->prog_array is empty or not, which is
+// 	 * a heurisitc to speed up execution.
+// 	 *
+// 	 * If bpf_prog_array_valid() fetched prog_array was
+// 	 * non-NULL, we go into trace_call_bpf() and do the actual
+// 	 * proper rcu_dereference() under RCU lock.
+// 	 * If it turns out that prog_array is NULL then, we bail out.
+// 	 * For the opposite, if the bpf_prog_array_valid() fetched pointer
+// 	 * was NULL, you'll skip the prog_array with the risk of missing
+// 	 * out of events when it was updated in between this and the
+// 	 * rcu_dereference() which is accepted risk.
+// 	 */
+// 	ret = BPF_PROG_RUN_ARRAY_CHECK(call->rh_data->prog_array, ctx, BPF_PROG_RUN);
+
+//  out:
+// 	__this_cpu_dec(bpf_prog_active);
+// 	preempt_enable();
+
+// 	return ret;
+// }
+
+/**
  * strncpy_from_unsafe: - Copy a NUL terminated string from unsafe address.
  * @dst:   Destination address, in kernel space.  This buffer must be at
  *         least @count bytes long.
@@ -265,7 +323,7 @@ const struct bpf_func_proto *bpf_get_trace_printk_proto(void)
 // 		return -ENOENT;
 
 //     return 0;
-// 	// return perf_event_read_local(ee->event, value, enabled, running);
+// 	// return perf_event_read_local_p(ee->event, value, enabled, running);
 // }
 
 // BPF_CALL_2(bpf_perf_event_read, struct bpf_map *, map, u64, flags)
@@ -661,7 +719,7 @@ const struct bpf_prog_ops tracepoint_prog_ops = {
 
 // 	if (unlikely(size != sizeof(struct bpf_perf_event_value)))
 // 		goto clear;
-// 	err = perf_event_read_local(ctx->event, &buf->counter, &buf->enabled,
+// 	err = perf_event_read_local_p(ctx->event, &buf->counter, &buf->enabled,
 // 				    &buf->running);
 // 	if (unlikely(err))
 // 		goto clear;
