@@ -1058,11 +1058,6 @@ static void __bpf_prog_put(struct bpf_prog *prog, bool do_idr_lock)
 		/* bpf_prog_free_id() must be called first */
 		bpf_prog_free_id(prog, do_idr_lock);
 		// bpf_prog_kallsyms_del_all(prog);
-		/* unregister kprobe or tracepoint */
-		if (prog->type == BPF_PROG_TYPE_KPROBE)
-			ebpf_unregister_kprobe(prog);
-		if (prog->type == BPF_PROG_TYPE_TRACEPOINT)
-			ebpf_unregister_tp(prog);
 		call_rcu(&prog->aux->rcu, __bpf_prog_put_rcu);
 	}
 }
@@ -1217,6 +1212,29 @@ bpf_prog_load_check_attach_type(enum bpf_prog_type prog_type,
 	return 0;
 }
 
+struct bpf_tracepoint {
+	struct bpf_tracepoint_event *bte;
+	struct bpf_prog *prog;
+};
+
+static int bpf_tracepoint_release(struct inode *inode, struct file *filp)
+{
+	struct bpf_tracepoint *bpf_tp = filp->private_data;
+	if (bpf_tp->prog) {
+		bpf_tracepoint_unregister(bpf_tp->bte, bpf_tp->prog);
+		bpf_prog_put(bpf_tp->prog);
+	}
+
+	kfree(bpf_tp);
+	return 0;
+}
+
+static const struct file_operations bpf_tracepoint_fops = {
+	.release = bpf_tracepoint_release,
+	.read = bpf_dummy_read,
+	.write = bpf_dummy_write,
+};
+
 /* last field in 'union bpf_attr' used by this command */
 #define	BPF_PROG_LOAD_LAST_FIELD expected_attach_type
 
@@ -1346,6 +1364,48 @@ free_prog_nouncharge:
 
 // #define BPF_PROG_ATTACH_LAST_FIELD attach_flags
 
+static int bpf_prog_attach_tracepoint(u32 prog_fd, char *name)
+{
+	struct bpf_tracepoint *bpf_tp;
+	struct bpf_tracepoint_event *bte;
+	struct bpf_prog *prog;
+	int tp_fd, err;
+
+	bte = bpf_find_tracepoint(name);
+	if (!bte)
+		return -ENOENT;
+	
+	bpf_tp = kzalloc(sizeof(*bpf_tp), GFP_USER);
+	if (!bpf_tp)
+		return -ENOMEM;
+
+	bpf_tp->bte = bte;
+	prog = bpf_prog_get(prog_fd);
+	if (IS_ERR(prog)) {
+		err = PTR_ERR(prog);
+		goto free_bpf_tp;
+	}
+
+	err = bpf_tracepoint_register(bte, prog);
+	if (err)
+		goto put_prog;
+	
+	bpf_tp->prog = prog;
+	tp_fd = anon_inode_getfd("bpf-tracepoint", &bpf_tracepoint_fops, bpf_tp, O_CLOEXEC);
+	if (tp_fd < 0) {
+		bpf_tracepoint_unregister(bpf_tp->bte, prog);
+		err = tp_fd;
+		goto put_prog;
+	}
+	return tp_fd;
+
+put_prog:
+	bpf_prog_put(prog);
+free_bpf_tp:
+	kfree(bpf_tp);
+	return err;
+}
+
 static int bpf_prog_attach(u32 prog_fd, char *funcname)
 {
 	struct bpf_prog *prog;
@@ -1366,7 +1426,7 @@ static int bpf_prog_attach(u32 prog_fd, char *funcname)
 		}
 		case BPF_PROG_TYPE_TRACEPOINT:
 		{
-			err = ebpf_register_tp(prog, funcname);
+			err = bpf_prog_attach_tracepoint(prog, funcname);
 			break;
 		}
 		default:

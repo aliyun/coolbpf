@@ -2,7 +2,15 @@
 #define __EBPF_TRACEPOINT_H_
 #include "linux/filter.h"
 
-int ebpf_register_tp(struct bpf_prog *bp, char *sym);
-void ebpf_unregister_tp(struct bpf_prog *bp);
+struct bpf_tracepoint_event
+{
+    void *name;
+    // void *tp;
+    void *bpf_func;
+};
+
+struct bpf_tracepoint_event *bpf_find_tracepoint(char *tp_name);
+int bpf_tracepoint_register(struct bpf_tracepoint_event *bte, struct bpf_prog *prog);
+void bpf_tracepoint_unregister(struct bpf_tracepoint_event *bte, struct bpf_prog *prog);
 
 #endif

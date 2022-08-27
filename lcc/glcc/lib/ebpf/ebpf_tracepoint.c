@@ -6,36 +6,34 @@
 
 #include <linux/skbuff.h>
 
-struct bpf_tp_list
+static __always_inline void __bpf_tracepoint_run(struct bpf_prog *prog, u64 *args)
 {
-    struct list_head lists;
-    struct bpf_prog *prog;
-    void *func;
-    char name[128];
-};
-
-static struct bpf_tp_list tp_list = {0};
-static int bpf_tp_list_init = 0;
-
+    rcu_read_lock();
+    preempt_disable();
+    (void)BPF_PROG_RUN(prog, args);
+    preempt_enable();
+    rcu_read_unlock();
+}
 
 static int ebpf_net_dev_xmit(void *data, void *skbaddr, int rc, void *dev, int len)
 {
-// trace_net_dev_xmit(skb, rc, dev, len);
+    // trace_net_dev_xmit(skb, rc, dev, len);
     unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
-    struct args{
+    struct args
+    {
         struct trace_entry entry;
         void *skbaddr;
         unsigned int len;
         int rc;
         u32 __data_loc_name;
-	    char __data[0];
+        char __data[0];
     } arg = {
         .skbaddr = skbaddr,
         .rc = rc,
         .len = len,
     };
-    ret = prog->bpf_func(&arg, prog->insnsi);
+    __bpf_tracepoint_run(prog, &arg);
     return ret;
 }
 
@@ -43,7 +41,8 @@ static int ebpf_netif_receive_skb(void *data, struct sk_buff *skb)
 {
     unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
-    struct args{
+    struct args
+    {
         struct trace_entry entry;
         struct sk_buff *skb;
         unsigned int len;
@@ -51,7 +50,7 @@ static int ebpf_netif_receive_skb(void *data, struct sk_buff *skb)
         .skb = skb,
         .len = skb->len,
     };
-    ret = prog->bpf_func(&arg, prog->insnsi);
+    __bpf_tracepoint_run(prog, &arg);
     return ret;
 }
 
@@ -59,7 +58,8 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
 {
     unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
-    struct args{
+    struct args
+    {
         struct trace_entry entry;
         char comm[TASK_COMM_LEN];
         pid_t pid;
@@ -73,7 +73,7 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
         .target_cpu = task_cpu(p),
     };
     memcpy(arg.comm, p->comm, TASK_COMM_LEN);
-    ret = prog->bpf_func(&arg, prog->insnsi);
+    __bpf_tracepoint_run(prog, &arg);
     return ret;
 }
 
@@ -81,13 +81,14 @@ static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
 {
     unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
-    struct args{
+    struct args
+    {
         struct trace_entry entry;
         unsigned int vec;
     } arg = {
         .vec = vec_nr,
     };
-    ret = prog->bpf_func(&arg, prog->insnsi);
+    __bpf_tracepoint_run(prog, &arg);
     return ret;
 }
 
@@ -95,7 +96,8 @@ static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
 {
     unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
-    struct args{
+    struct args
+    {
         struct trace_entry entry;
         struct sk_buff *skb;
         unsigned int len;
@@ -103,96 +105,38 @@ static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
         .skb = skb,
         .len = skb->len,
     };
-    ret = prog->bpf_func(&arg, prog->insnsi);
+    __bpf_tracepoint_run(prog, &arg);
     return ret;
 }
 
-struct tracepoints_table {
-    const char *name;
-    void *func;
+static struct bpf_tracepoint_event events_table[] =
+    {
+        {.name = "net_dev_queue", .bpf_func = ebpf_net_dev_queue},
+        {.name = "softirq_raise", .bpf_func = ebpf_softirq_raise},
+        {.name = "sched_wakeup", .bpf_func = ebpf_sched_wakeup},
+        {.name = "netif_receive_skb", .bpf_func = ebpf_netif_receive_skb},
+        {.name = "net_dev_xmit", .bpf_func = ebpf_net_dev_xmit},
 };
 
-static struct tracepoints_table table[] = 
-{
-    {.name = "net_dev_queue", .func = ebpf_net_dev_queue},
-    {.name = "softirq_raise", .func = ebpf_softirq_raise},
-    {.name = "sched_wakeup", .func = ebpf_sched_wakeup},
-    {.name = "netif_receive_skb", .func = ebpf_netif_receive_skb},
-    {.name = "net_dev_xmit", .func = ebpf_net_dev_xmit},
-};
-
-void *get_func(char *name)
+struct bpf_tracepoint_event *bpf_find_tracepoint(char *tp_name)
 {
     int i;
-    for (i=0;i<sizeof(table)/sizeof(struct tracepoints_table); i++)
+    for (i = 0; i < sizeof(events_table) / sizeof(struct bpf_tracepoint_event); i++)
     {
-        if (strcmp(table[i].name, name) == 0)
+        if (strcmp(events_table[i].name, tp_name) == 0)
         {
-            return table[i].func;
+            return &events_table[i];
         }
     }
     return NULL;
 }
 
-int ebpf_register_tp(struct bpf_prog *prog, char *name)
+int bpf_tracepoint_register(struct bpf_tracepoint_event *bte, struct bpf_prog *prog)
 {
-    int ret;
-    struct bpf_tp_list *entry;
-    void *func;
-
-    if (bpf_tp_list_init == 0)
-    {
-        INIT_LIST_HEAD(&tp_list.lists);
-        bpf_tp_list_init = 1;
-    }
-
-    entry = kzalloc(sizeof(struct bpf_tp_list), GFP_KERNEL);
-    if (!entry)
-        return -ENOMEM;
-
-    entry->prog = prog;
-    strcpy(entry->name, name);
-    printk("register tracepoint %s\n",name);
-
-    func = get_func(name);
-    if (!func)
-    {
-        printk("can not find tracepoint in tracepoint table.\n");
-        return -ENOTSUPP;
-    }
-    entry->func = func;
-    ret = tracepoint_probe_register(name, func, prog);
-    if (ret < 0)
-    {
-        printk("register tracepoint failed for %s, error %d\n", name, ret);
-        kfree(entry);
-    }
-    else
-    {
-        list_add(&entry->lists, &tp_list.lists);
-    }
-    return ret;
+    return tracepoint_probe_register(bte->name, bte->bpf_func, prog);
 }
 
-void ebpf_unregister_tp(struct bpf_prog *prog)
+void bpf_tracepoint_unregister(struct bpf_tracepoint_event *bte, struct bpf_prog *prog)
 {
-    struct bpf_tp_list *entry;
-
-    if (bpf_tp_list_init == 0)
-    {
-        INIT_LIST_HEAD(&tp_list.lists);
-        bpf_tp_list_init = 1;
-    }
-
-    list_for_each_entry(entry, &tp_list.lists, lists)
-    {
-        if (entry->prog == prog)
-        {
-            printk("unregister tracepoint\n");
-            tracepoint_probe_unregister(entry->name, entry->func, prog);
-            list_del(&entry->lists);
-            kfree(entry);
-            return;
-        }
-    }
+    tracepoint_probe_unregister(bte->name, bte->bpf_func, prog);
 }
