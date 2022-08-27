@@ -3,8 +3,18 @@
 #include <linux/kprobes.h>
 #include "linux/filter.h"
 
+struct bpf_kprobe_event
+{
+    unsigned long __percpu *nhit;
+    const char *symbol;
+    struct kretprobe rp;    // 3.10 kretprobe does not have kp
+    struct kprobe kp;
+    struct bpf_prog *prog;
+};
 
-int ebpf_register_kprobe(struct bpf_prog *bp, char *sym);
-void ebpf_unregister_kprobe(struct bpf_prog *bp);
+struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *symbol, bool is_return);
+
+int bpf_kprobe_register(struct bpf_kprobe_event *bke);
+void bpf_kprobe_unregister(struct bpf_kprobe_event *bke);
 
 #endif

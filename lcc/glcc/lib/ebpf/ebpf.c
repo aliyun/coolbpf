@@ -1235,6 +1235,30 @@ static const struct file_operations bpf_tracepoint_fops = {
 	.write = bpf_dummy_write,
 };
 
+
+struct bpf_kprobe {
+	struct bpf_kprobe_event *bke;
+	struct bpf_prog *prog;
+};
+
+static int bpf_kprobe_release(struct inode *inode, struct file *filp)
+{
+	struct bpf_kprobe *bpf_kp = filp->private_data;
+	if (bpf_kp->prog) {
+		bpf_kprobe_unregister(bpf_kp->bke);
+		bpf_prog_put(bpf_kp->prog);
+	}
+
+	kfree(bpf_kp);
+	return 0;
+}
+
+static const struct file_operations bpf_kprobe_fops = {
+	.release = bpf_kprobe_release,
+	.read = bpf_dummy_read,
+	.write = bpf_dummy_write,
+};
+
 /* last field in 'union bpf_attr' used by this command */
 #define	BPF_PROG_LOAD_LAST_FIELD expected_attach_type
 
@@ -1364,6 +1388,50 @@ free_prog_nouncharge:
 
 // #define BPF_PROG_ATTACH_LAST_FIELD attach_flags
 
+static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
+{
+	struct bpf_kprobe *bpf_kp;
+	struct bpf_prog *prog;
+	int kp_fd, err;
+
+	bpf_kp = kzalloc(sizeof(*bpf_kp), GFP_USER);
+	if (!bpf_kp)
+		return -ENOMEM;
+
+	prog = bpf_prog_get(prog_fd);
+	if (IS_ERR(prog)) {
+		err = PTR_ERR(prog);
+		goto free_bpf_kp;
+	}
+
+	bpf_kp->bke = alloc_bpf_kprobe_event(prog, name, false);
+	if (IS_ERR(bpf_kp->bke)) {
+		err = PTR_ERR(bpf_kp->bke);
+		goto free_bpf_kp;
+	}
+	
+	err = bpf_kprobe_register(bpf_kp->bke);
+	if (err)
+		goto put_prog;
+	bpf_kp->prog = prog;
+	kp_fd = anon_inode_getfd("bpf-kprobe", &bpf_kprobe_fops, bpf_kp, O_CLOEXEC);
+	
+	if (kp_fd < 0) {
+		bpf_kprobe_unregister(bpf_kp->bke);
+		err = kp_fd;
+		goto put_prog;
+	}
+	return kp_fd;
+
+put_prog:
+	bpf_prog_put(prog);
+free_bke:
+	kfree(bpf_kp->bke);
+free_bpf_kp:
+	kfree(bpf_kp);
+	return err;
+}
+
 static int bpf_prog_attach_tracepoint(u32 prog_fd, char *name)
 {
 	struct bpf_tracepoint *bpf_tp;
@@ -1421,12 +1489,12 @@ static int bpf_prog_attach(u32 prog_fd, char *funcname)
 	{
 		case BPF_PROG_TYPE_KPROBE:
 		{
-			err = ebpf_register_kprobe(prog, funcname);
+			err = bpf_prog_attach_kprobe(prog_fd, funcname);
 			break;
 		}
 		case BPF_PROG_TYPE_TRACEPOINT:
 		{
-			err = bpf_prog_attach_tracepoint(prog, funcname);
+			err = bpf_prog_attach_tracepoint(prog_fd, funcname);
 			break;
 		}
 		default:

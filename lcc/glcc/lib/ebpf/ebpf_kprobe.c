@@ -2,82 +2,72 @@
 
 #define KPROBE_MAGIC 0x22
 
-struct bpf_kprobe_list
+static __always_inline void __bpf_kprobe_run(struct bpf_prog *prog, u64 *args)
 {
-    struct list_head lists;
-    struct bpf_prog *prog;
-    struct kprobe kp;
-};
-
-static struct bpf_kprobe_list kprobe_list = {0};
-static int bpf_kprobe_list_init = 0;
-
-static int ebpf_handle_pre(struct kprobe *kp, struct pt_regs *regs)
-{
-    struct bpf_kprobe_list *entry = container_of(kp, struct bpf_kprobe_list, kp);
-    unsigned int ret;
-    ret = entry->prog->bpf_func(regs, entry->prog->insnsi);
-    return ret;
+    rcu_read_lock();
+    preempt_disable();
+    (void)BPF_PROG_RUN(prog, args);
+    preempt_enable();
+    rcu_read_unlock();
 }
 
-int ebpf_register_kprobe(struct bpf_prog *prog, char *sym)
+static int bpf_kprobe_dispatcher(struct kprobe *kp, struct pt_regs *regs)
 {
-    int ret;
-    struct bpf_kprobe_list *entry;
-
-    if (bpf_kprobe_list_init == 0)
-    {
-        INIT_LIST_HEAD(&kprobe_list.lists);
-        bpf_kprobe_list_init = 1;
-    }
-
-    entry = kzalloc(sizeof(struct bpf_kprobe_list), GFP_KERNEL);
-    if (!entry)
-        return -ENOMEM;
-
-    entry->prog = prog;
-    entry->kp.symbol_name = sym;
-    entry->kp.pre_handler = ebpf_handle_pre;
-
-    ret = register_kprobe(&entry->kp);
-    if (ret < 0)
-    {
-        printk("register kprobe failed for %s, error %d\n", sym, ret);
-        kfree(entry);
-    }
-    else
-    {
-        list_add(&entry->lists, &kprobe_list.lists);
-    }
-
-    return ret;
+    struct bpf_kprobe_event *bke = container_of(kp, struct bpf_kprobe_event, kp);
+    __bpf_kprobe_run(bke->prog, regs);
+    return 0;
 }
 
-void ebpf_unregister_kprobe(struct bpf_prog *prog)
+static int bpf_kretprobe_dispatcher(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    struct bpf_kprobe_list *entry;
-    // if (bp->probe && ek->magic == KPROBE_MAGIC)
-    // {
-    //     printk("unregister kprobe\n");
-    //     unregister_kprobe(&ek->kp);
-    //     kzfree(ek);
-    // }
+    struct bpf_kprobe_event *bke = container_of(ri->rp, struct bpf_kprobe_event, rp);
+    __bpf_kprobe_run(bke->prog, regs);
+    return 0;
+}
 
-    if (bpf_kprobe_list_init == 0)
-    {
-        INIT_LIST_HEAD(&kprobe_list.lists);
-        bpf_kprobe_list_init = 1;
-    }
+struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *symbol, bool is_return)
+{
+    struct bpf_kprobe_event *bke;
+    int err = 0;
 
-    list_for_each_entry(entry, &kprobe_list.lists, lists)
-    {
-        if (entry->prog == prog)
-        {
-            printk("unregister kprobe\n");
-            unregister_kprobe(&entry->kp);
-            list_del(&entry->lists);
-            kfree(entry);
-            return;
+    bke = kzalloc(sizeof(*bke), GFP_USER);
+	if (!bke)
+		return -ENOMEM;
+    
+    // todo: alloc nhit
+
+    if (symbol) {
+        bke->symbol = kstrdup(symbol, GFP_KERNEL);
+        if (!bke->symbol) {
+            err = -ENOMEM;
+            goto free_bke;
         }
+    } else {
+        err = -EINVAL;
+        goto free_bke;
     }
+
+    if (is_return)
+        bke->rp.handler = bpf_kretprobe_dispatcher;
+    else 
+        bke->kp.pre_handler = bpf_kprobe_dispatcher;
+    
+    bke->prog = prog;
+    return bke;
+
+// free_symbol:
+//     kfree(bke->symbol);
+free_bke:
+    kfree(bke);
+    return ERR_PTR(err);
+}
+
+int bpf_kprobe_register(struct bpf_kprobe_event *bke)
+{
+    return register_kprobe(&bke->kp);
+}
+
+void bpf_kprobe_unregister(struct bpf_kprobe_event *bke)
+{
+    unregister_kprobe(&bke->kp);
 }

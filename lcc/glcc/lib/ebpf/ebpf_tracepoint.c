@@ -18,7 +18,6 @@ static __always_inline void __bpf_tracepoint_run(struct bpf_prog *prog, u64 *arg
 static int ebpf_net_dev_xmit(void *data, void *skbaddr, int rc, void *dev, int len)
 {
     // trace_net_dev_xmit(skb, rc, dev, len);
-    unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
     struct args
     {
@@ -34,12 +33,11 @@ static int ebpf_net_dev_xmit(void *data, void *skbaddr, int rc, void *dev, int l
         .len = len,
     };
     __bpf_tracepoint_run(prog, &arg);
-    return ret;
+    return 0;
 }
 
 static int ebpf_netif_receive_skb(void *data, struct sk_buff *skb)
 {
-    unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
     struct args
     {
@@ -51,12 +49,11 @@ static int ebpf_netif_receive_skb(void *data, struct sk_buff *skb)
         .len = skb->len,
     };
     __bpf_tracepoint_run(prog, &arg);
-    return ret;
+    return 0;
 }
 
 static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
 {
-    unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
     struct args
     {
@@ -74,12 +71,11 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
     };
     memcpy(arg.comm, p->comm, TASK_COMM_LEN);
     __bpf_tracepoint_run(prog, &arg);
-    return ret;
+    return 0;
 }
 
 static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
 {
-    unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
     struct args
     {
@@ -89,12 +85,11 @@ static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
         .vec = vec_nr,
     };
     __bpf_tracepoint_run(prog, &arg);
-    return ret;
+    return 0;
 }
 
 static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
 {
-    unsigned int ret;
     struct bpf_prog *prog = (struct bpf_prog *)data;
     struct args
     {
@@ -106,7 +101,7 @@ static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
         .len = skb->len,
     };
     __bpf_tracepoint_run(prog, &arg);
-    return ret;
+    return 0;
 }
 
 static struct bpf_tracepoint_event events_table[] =
