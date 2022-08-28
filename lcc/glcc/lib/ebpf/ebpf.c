@@ -1246,6 +1246,7 @@ static int bpf_kprobe_release(struct inode *inode, struct file *filp)
 	struct bpf_kprobe *bpf_kp = filp->private_data;
 	if (bpf_kp->prog) {
 		bpf_kprobe_unregister(bpf_kp->bke);
+		free_bpf_kprobe_event(bpf_kp->bke);
 		bpf_prog_put(bpf_kp->prog);
 	}
 
@@ -1388,7 +1389,7 @@ free_prog_nouncharge:
 
 // #define BPF_PROG_ATTACH_LAST_FIELD attach_flags
 
-static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
+static int bpf_prog_attach_kprobe(u32 prog_fd, char *name, bool is_return)
 {
 	struct bpf_kprobe *bpf_kp;
 	struct bpf_prog *prog;
@@ -1403,7 +1404,7 @@ static int bpf_prog_attach_kprobe(u32 prog_fd, char *name)
 		goto free_bpf_kp;
 	}
 
-	bpf_kp->bke = alloc_bpf_kprobe_event(prog, name, false);
+	bpf_kp->bke = alloc_bpf_kprobe_event(prog, name, is_return);
 	if (IS_ERR(bpf_kp->bke)) {
 		err = PTR_ERR(bpf_kp->bke);
 		goto free_bpf_kp;
@@ -1476,27 +1477,35 @@ free_bpf_tp:
 	return err;
 }
 
-static int bpf_prog_attach(u32 prog_fd, char *funcname)
+static int bpf_prog_attach(u64 arg)
 {
+	struct ebpfdrv_attr attr = {};
 	struct bpf_prog *prog;
 	int err;
+	u32 prog_fd;
 
+	/* copy attributes from user space, may be less than sizeof(bpf_attr) */
+	if (copy_from_user(&attr, u64_to_user_ptr((u64)arg), sizeof(attr)) != 0)
+		return -EFAULT;
+
+	dump_ebpfdrv_attr(&attr);
+	
+	prog_fd = attr.prog_fd;
 	prog = bpf_prog_get(prog_fd);
 
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
 	
-	printk("prog name(struct bpf_prog) is %s\n", prog->aux->name);
 	switch(prog->type)
 	{
 		case BPF_PROG_TYPE_KPROBE:
 		{
-			err = bpf_prog_attach_kprobe(prog_fd, funcname);
+			err = bpf_prog_attach_kprobe(prog_fd, attr.name, attr.is_return);
 			break;
 		}
 		case BPF_PROG_TYPE_TRACEPOINT:
 		{
-			err = bpf_prog_attach_tracepoint(prog_fd, funcname);
+			err = bpf_prog_attach_tracepoint(prog_fd, attr.name);
 			break;
 		}
 		default:
@@ -1569,7 +1578,6 @@ static int bpf_obj_get_info_by_fd(const union bpf_attr *attr,
 	return err;
 }
 
-static char func_name[80];
 static long ebpf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	union bpf_attr attr = {};
@@ -1588,18 +1596,9 @@ static long ebpf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (cmd == IOCTL_BPF_PROG_ATTACH)
 	{
 		printk("IOCTL_BPF_PROG_ATTACH\n");
-		err = bpf_prog_attach(arg, func_name);
+		err = bpf_prog_attach(arg);
 		printk("IOCTL_BPF_PROG_ATTACH return %d\n", err);
 		return err;
-	}
-
-	if (cmd == IOCTL_BPF_PROG_FUNCNAME)
-	{
-		if(strncpy_from_user(func_name, u64_to_user_ptr(arg), strlen_user(u64_to_user_ptr(arg))) < 0)
-			return -EFAULT;
-		func_name[strlen_user(u64_to_user_ptr(arg))] = 0;
-		printk("func name is %s\n", func_name);
-		return 0;
 	}
 
 	err = check_uarg_tail_zero(u64_to_user_ptr((u64)arg), sizeof(attr), sizeof(attr));

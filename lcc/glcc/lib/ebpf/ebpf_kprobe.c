@@ -13,7 +13,7 @@ static __always_inline void __bpf_kprobe_run(struct bpf_prog *prog, u64 *args)
 
 static int bpf_kprobe_dispatcher(struct kprobe *kp, struct pt_regs *regs)
 {
-    struct bpf_kprobe_event *bke = container_of(kp, struct bpf_kprobe_event, kp);
+    struct bpf_kprobe_event *bke = container_of(kp, struct bpf_kprobe_event, rp.kp);
     __bpf_kprobe_run(bke->prog, regs);
     return 0;
 }
@@ -34,6 +34,7 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
 	if (!bke)
 		return -ENOMEM;
     
+    bke->is_return = is_return;
     // todo: alloc nhit
 
     if (symbol) {
@@ -42,6 +43,8 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
             err = -ENOMEM;
             goto free_bke;
         }
+        bke->rp.kp.symbol_name = bke->symbol;
+        bke->rp.kp.offset = 0;
     } else {
         printk(KERN_ERR "BUG: no symbol exists\n");
         err = -EINVAL;
@@ -50,11 +53,8 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
 
     if (is_return)
         bke->rp.handler = bpf_kretprobe_dispatcher;
-    else {
-        bke->kp.symbol_name = bke->symbol;
-        bke->kp.offset = 0;
-        bke->kp.pre_handler = bpf_kprobe_dispatcher;
-    }
+    else
+        bke->rp.kp.pre_handler = bpf_kprobe_dispatcher;
     
     bke->prog = prog;
     return bke;
@@ -74,11 +74,17 @@ void free_bpf_kprobe_event(struct bpf_kprobe_event *bke)
 
 int bpf_kprobe_register(struct bpf_kprobe_event *bke)
 {
-    return register_kprobe(&bke->kp);
+    if (bke->is_return)
+        return register_kretprobe(&bke->rp);
+    else 
+        return register_kprobe(&bke->rp.kp);
 }
 
 void bpf_kprobe_unregister(struct bpf_kprobe_event *bke)
 {
-    unregister_kprobe(&bke->kp);
+    if (bke->is_return)
+        unregister_kretprobe(&bke->rp);
+    else 
+        unregister_kprobe(&bke->rp.kp);
 }
 

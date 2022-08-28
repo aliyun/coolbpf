@@ -10,6 +10,7 @@ struct bpf_kprobe_event
     struct kretprobe rp;    // 3.10 kretprobe does not have kp
     struct kprobe kp;
     struct bpf_prog *prog;
+    bool is_return;
 };
 
 struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *symbol, bool is_return);
