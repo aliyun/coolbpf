@@ -32,8 +32,11 @@ static struct hook_env
     int ebpfdrv_fd;
 } env = {
     .init_done = false,
-    .init_failed = false;
+    .init_failed = false,
 };
+
+
+struct ebpfdrv_attr ebpfdrv_atrr;
 
 #define __NR_perf_event_open 298
 #define __NR_bpf 321
@@ -152,17 +155,15 @@ long int handle_bpf_call(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int si
     return err;
 }
 
-
-
 int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int group_fd, unsigned long flags)
 {
     struct perf_event_attr attr = {};
     int type;
     int err;
-    int pfd;
+    int pfd = -EINVAL;
     const char *name = (char *)old_attr->config1;
 
-    if (old_attr->config == PERF_COUNT_SW_BPF_OUTPUT)
+    if (old_attr->config == PERF_COUNT_SW_BPF_OUTPUT || old_attr->config == PERF_COUNT_SW_DUMMY)
     {
         pr_dbg("perf_event_open create perf buffer\n");
         old_attr->config = PERF_COUNT_SW_DUMMY;
@@ -176,7 +177,7 @@ int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int g
     }
     else // kprobe or tracepoint
     {
-       
+
         // config1 is function name
         if (old_attr->config1 == 0)
         {
@@ -187,12 +188,8 @@ int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int g
         {
             pr_dbg("perf_event_open create perf event, type is kprobe\n");
             // kprobe
-            err = ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_FUNCNAME, old_attr->config1);
-            if (err < 0)
-            {
-                pr_err("IOCTL_BPF_PROG_FUNCNAME set func name error %d\n", err);
-                return err;
-            }
+            strcpy(ebpfdrv_atrr.name, name);
+            pr_dbg("store kprobe function name: %s\n", ebpfdrv_atrr.name);
             pfd = 0xbeef; // fake perf event fd
         }
     }
@@ -279,7 +276,9 @@ int ioctl(int __fd, unsigned long int __request, ...)
         prog_fd = va_arg(valist, __u32);
         va_end(valist);
 
-        err = ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_ATTACH, prog_fd);
+        ebpfdrv_atrr.prog_fd = prog_fd;
+        dump_ebpfdrv_attr(&ebpfdrv_atrr);
+        ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_ATTACH, &ebpfdrv_atrr);
         pr_dbg("PERF_EVENT_IOC_SET_BPF result %d\n", err);
         break;
     }
@@ -300,6 +299,9 @@ int ioctl(int __fd, unsigned long int __request, ...)
     return err;
 }
 
+// Just let sucessfully open file but not used.
+#if 1
+
 FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64)
 {
     int err;
@@ -308,10 +310,12 @@ FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64
 #define REAL_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/kprobe/type"
 // It does not matter let libbpf read tracepoint type.
 #define FAKE_KPROBE_TYPE_FILE "/sys/bus/event_source/devices/tracepoint/type"
+#define REAL_KRETPROBE_TYPE_FILE  "/sys/bus/event_source/devices/kretprobe/type"
+#define FAKE_KRETPROBE_TYPE_FILE FAKE_KPROBE_TYPE_FILE
 #define TRACEPOINT_TYPE_FILE_PREFIX "/sys/kernel/debug/tracing/events"
 
     pr_dbg("fopen%s :filename: %s\n", is64 ? "64" : "", __filename);
-   
+
     err = env_init();
     if (err < 0)
     {
@@ -321,17 +325,28 @@ FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64
 
     if (strncmp(__filename, REAL_KPROBE_TYPE_FILE, sizeof(REAL_KPROBE_TYPE_FILE) - 1) == 0)
     {
+        ebpfdrv_atrr.is_return = false;
         if (!is64)
             return fopen_p(FAKE_KPROBE_TYPE_FILE, __modes);
         else
             return fopen64_p(FAKE_KPROBE_TYPE_FILE, __modes);
     }
 
+    if (strncmp(__filename, REAL_KRETPROBE_TYPE_FILE, sizeof(REAL_KRETPROBE_TYPE_FILE) - 1) == 0)
+    {
+        ebpfdrv_atrr.is_return = true;
+        if (!is64)
+            return fopen_p(FAKE_KRETPROBE_TYPE_FILE, __modes);
+        else
+            return fopen64_p(FAKE_KRETPROBE_TYPE_FILE, __modes);
+    }
+
     if (strncmp(TRACEPOINT_TYPE_FILE_PREFIX, __filename, sizeof(TRACEPOINT_TYPE_FILE_PREFIX) - 1) == 0)
     {
         sscanf(__filename, "/sys/kernel/debug/tracing/events/%[^/]/%[^/]/id", subsys, eventname);
         pr_dbg("subsys:%s, eventname:%s\n", subsys, eventname);
-        ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_PROG_FUNCNAME, eventname);
+        strcpy(ebpfdrv_atrr.name, eventname);
+        pr_dbg("store tracepoint function name: %s\n", ebpfdrv_atrr.name);
     }
     if (!is64)
         return fopen_p(__filename, __modes);
@@ -339,8 +354,6 @@ FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64
         return fopen64_p(__filename, __modes);
 }
 
-// Just let sucessfully open file but not used.
-#if 1
 FILE *fopen(const char *__filename, const char *__modes)
 {
     return fopen_common_handle(__filename, __modes, false);

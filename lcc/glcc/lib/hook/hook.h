@@ -11,6 +11,13 @@
 #define IOCTL_BPF_PROG_FUNCNAME _IOW(';', 7, char *)
 #define IOCTL_BPF_OBJ_GET_INFO_BY_FD _IOWR(';', 8, union bpf_attr *)
 
+
+struct ebpfdrv_attr {
+    uint32_t prog_fd;
+    char name[80];
+    bool is_return;
+};
+
 #define DEBUG 1
 static void level_print(char *fmt, ...)
 {
@@ -36,5 +43,10 @@ static void level_print(char *fmt, ...)
 #define pr_dbg(...)
 #endif
 
+
+static __always_inline dump_ebpfdrv_attr(struct ebpfdrv_attr *attr)
+{
+    pr_dbg("ebpfdrv_attr: prog_fd - %u, name - %s, is_return: %u\n", attr->prog_fd, attr->name, attr->is_return);
+}
 
 #endif
