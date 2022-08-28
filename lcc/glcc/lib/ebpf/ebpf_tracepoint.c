@@ -74,6 +74,31 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
     return 0;
 }
 
+static int ebpf_sched_switch(void *data, struct task_struct *prev, struct task_struct *next)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args
+    {
+        struct trace_entry entry;
+        char prev_comm[TASK_COMM_LEN];
+        pid_t prev_pid;
+        int prev_prio;
+        long prev_state;
+        char next_comm[TASK_COMM_LEN];
+        pid_t next_pid;
+        int next_prio;
+    } arg = {
+        .prev_pid = prev->pid,
+        .prev_prio = prev->prio,
+        .prev_state = prev->state,
+        .next_pid = next->pid,
+        .next_prio = next->prio,
+    };
+    memcpy(arg.prev_comm, prev->comm, TASK_COMM_LEN);
+    memcpy(arg.next_comm, next->comm, TASK_COMM_LEN);
+    __bpf_tracepoint_run(prog, &arg);
+}
+
 static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
 {
     struct bpf_prog *prog = (struct bpf_prog *)data;
@@ -109,6 +134,7 @@ static struct bpf_tracepoint_event events_table[] =
         {.name = "net_dev_queue", .bpf_func = ebpf_net_dev_queue},
         {.name = "softirq_raise", .bpf_func = ebpf_softirq_raise},
         {.name = "sched_wakeup", .bpf_func = ebpf_sched_wakeup},
+        {.name = "sched_switch", .bpf_func = ebpf_sched_switch},
         {.name = "netif_receive_skb", .bpf_func = ebpf_netif_receive_skb},
         {.name = "net_dev_xmit", .bpf_func = ebpf_net_dev_xmit},
 };
