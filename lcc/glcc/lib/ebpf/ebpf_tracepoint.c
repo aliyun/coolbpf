@@ -32,7 +32,7 @@ static int ebpf_net_dev_xmit(void *data, void *skbaddr, int rc, void *dev, int l
         .rc = rc,
         .len = len,
     };
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
     return 0;
 }
 
@@ -48,7 +48,7 @@ static int ebpf_netif_receive_skb(void *data, struct sk_buff *skb)
         .skb = skb,
         .len = skb->len,
     };
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
     return 0;
 }
 
@@ -70,7 +70,7 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
         .target_cpu = task_cpu(p),
     };
     memcpy(arg.comm, p->comm, TASK_COMM_LEN);
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
     return 0;
 }
 
@@ -96,7 +96,7 @@ static int ebpf_sched_switch(void *data, struct task_struct *prev, struct task_s
     };
     memcpy(arg.prev_comm, prev->comm, TASK_COMM_LEN);
     memcpy(arg.next_comm, next->comm, TASK_COMM_LEN);
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
 }
 
 static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
@@ -109,7 +109,7 @@ static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
     } arg = {
         .vec = vec_nr,
     };
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
     return 0;
 }
 
@@ -125,7 +125,7 @@ static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
         .skb = skb,
         .len = skb->len,
     };
-    __bpf_tracepoint_run(prog, &arg);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
     return 0;
 }
 
