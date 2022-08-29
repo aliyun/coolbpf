@@ -97,6 +97,7 @@ static int ebpf_sched_switch(void *data, struct task_struct *prev, struct task_s
     memcpy(arg.prev_comm, prev->comm, TASK_COMM_LEN);
     memcpy(arg.next_comm, next->comm, TASK_COMM_LEN);
     __bpf_tracepoint_run(prog, (u64 *)&arg);
+    return 0;
 }
 
 static int ebpf_softirq_raise(void *data, unsigned int vec_nr)
