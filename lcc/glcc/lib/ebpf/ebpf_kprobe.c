@@ -14,14 +14,14 @@ static __always_inline void __bpf_kprobe_run(struct bpf_prog *prog, u64 *args)
 static int bpf_kprobe_dispatcher(struct kprobe *kp, struct pt_regs *regs)
 {
     struct bpf_kprobe_event *bke = container_of(kp, struct bpf_kprobe_event, rp.kp);
-    __bpf_kprobe_run(bke->prog, regs);
+    __bpf_kprobe_run(bke->prog, (u64 *)regs);
     return 0;
 }
 
 static int bpf_kretprobe_dispatcher(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct bpf_kprobe_event *bke = container_of(ri->rp, struct bpf_kprobe_event, rp);
-    __bpf_kprobe_run(bke->prog, regs);
+    __bpf_kprobe_run(bke->prog, (u64 *)regs);
     return 0;
 }
 
