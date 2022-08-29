@@ -73,6 +73,25 @@ static const struct bpf_map_ops * const bpf_map_types[] = {
 #undef BPF_MAP_TYPE
 };
 
+struct ebpfdrv_attr
+{
+    uint32_t prog_fd;
+    union
+    {
+        struct
+        {
+            bool is_return;
+            uint64_t name;
+        } kprobe;
+
+        struct
+        {
+            uint64_t category;
+            uint64_t name;
+        } tracepoint;
+    };
+};
+
 #define u64_to_user_ptr(x) (          \
 	{                                 \
 		typecheck(u64, x);            \
@@ -1435,7 +1454,7 @@ free_bpf_kp:
 	return err;
 }
 
-static int bpf_prog_attach_tracepoint(u32 prog_fd, char *name)
+static int bpf_prog_attach_tracepoint(u32 prog_fd, char *category, char *name)
 {
 	struct bpf_tracepoint *bpf_tp;
 	struct bpf_tracepoint_event *bte;
@@ -1482,14 +1501,14 @@ static int bpf_prog_attach(u64 arg)
 	struct ebpfdrv_attr attr = {};
 	struct bpf_prog *prog;
 	int err;
+	char name[128];
+	char category[64];
 	u32 prog_fd;
 
 	/* copy attributes from user space, may be less than sizeof(bpf_attr) */
 	if (copy_from_user(&attr, u64_to_user_ptr((u64)arg), sizeof(attr)) != 0)
 		return -EFAULT;
 
-	dump_ebpfdrv_attr(&attr);
-	
 	prog_fd = attr.prog_fd;
 	prog = bpf_prog_get(prog_fd);
 
@@ -1500,12 +1519,31 @@ static int bpf_prog_attach(u64 arg)
 	{
 		case BPF_PROG_TYPE_KPROBE:
 		{
-			err = bpf_prog_attach_kprobe(prog_fd, attr.name, attr.is_return);
+			if (strncpy_from_user(name, u64_to_user_ptr(attr.kprobe.name), sizeof(name) - 1) < 0)
+			{
+				err = -EFAULT;
+				goto out;
+			}
+			name[sizeof(name) - 1] = 0;
+			err = bpf_prog_attach_kprobe(prog_fd, attr.kprobe.name, attr.kprobe.is_return);
 			break;
 		}
 		case BPF_PROG_TYPE_TRACEPOINT:
 		{
-			err = bpf_prog_attach_tracepoint(prog_fd, attr.name);
+			if (strncpy_from_user(name, u64_to_user_ptr(attr.tracepoint.name), sizeof(name) - 1) < 0)
+			{
+				err = -EFAULT;
+				goto out;
+			}
+			name[sizeof(name) - 1] = 0;
+			
+			if (strncpy_from_user(category, u64_to_user_ptr(attr.tracepoint.category), sizeof(category) - 1) < 0)
+			{
+				err = -EFAULT;
+				goto out;
+			}
+			category[sizeof(category) - 1] = 0;
+			err = bpf_prog_attach_tracepoint(prog_fd, category, name);
 			break;
 		}
 		default:
@@ -1515,6 +1553,7 @@ static int bpf_prog_attach(u64 arg)
 		}
 	}
 
+out:
 	bpf_prog_put(prog);
 	return err;
 }
