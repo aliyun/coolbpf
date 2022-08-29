@@ -103,14 +103,10 @@ long int handle_bpf_call(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int si
         pr_dbg("BPF_MAP_CREATE result is %d\n", err);
         break;
     case BPF_MAP_LOOKUP_ELEM:
-        pr_dbg("BPF_MAP_LOOKUP_ELEM\n");
         err = ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_MAP_LOOKUP_ELEM, attr);
-        pr_dbg("BPF_MAP_LOOKUP_ELEM result is %d\n", err);
         break;
     case BPF_MAP_UPDATE_ELEM:
-        pr_dbg("BPF_MAP_UPDATE_ELEM\n");
         err = ioctl_p(env.ebpfdrv_fd, IOCTL_BPF_MAP_UPDATE_ELEM, attr);
-        pr_dbg("BPF_MAP_UPDATE_ELEM result is %d\n", err);
         break;
     case BPF_MAP_DELETE_ELEM:
         pr_dbg("BPF_MAP_DELETE_ELEM\n");
@@ -183,6 +179,7 @@ int handle_perf_call(struct perf_event_attr *old_attr, pid_t pid, int cpu, int g
         {
             // tracepoint
             pr_dbg("perf_event_open create perf event, type is tracepoint\n");
+            pfd = 0xbeef; // fake perf event fd
         }
         else
         {
@@ -238,8 +235,9 @@ long int syscall(long int __sysno, ...)
     }
     default:
     {
-        err = -ENOTSUP;
-        pr_err("Unexpected syscall number, program exit.\n");
+        pr_dbg("unexpected syscall nr %u\n", __sysno);
+        unsigned long addr = (unsigned long)&__sysno;
+        err = syscall_p(__sysno, (char *)(addr + 8));
         break;
     }
     }
@@ -291,8 +289,9 @@ int ioctl(int __fd, unsigned long int __request, ...)
     }
     default:
     {
-        err = -ENOTSUP;
-        pr_err("Unexpected ioctl request\n");
+        pr_dbg("unexpected ioctl\n");
+        unsigned long addr = (unsigned long)__request;
+        err = ioctl_p(__fd, __request, (char *)(addr + 8));
         break;
     }
     }
@@ -314,7 +313,7 @@ FILE *fopen_common_handle(const char *__filename, const char *__modes, bool is64
 #define FAKE_KRETPROBE_TYPE_FILE FAKE_KPROBE_TYPE_FILE
 #define TRACEPOINT_TYPE_FILE_PREFIX "/sys/kernel/debug/tracing/events"
 
-    pr_dbg("fopen%s :filename: %s\n", is64 ? "64" : "", __filename);
+    // pr_dbg("fopen%s :filename: %s\n", is64 ? "64" : "", __filename);
 
     err = env_init();
     if (err < 0)
