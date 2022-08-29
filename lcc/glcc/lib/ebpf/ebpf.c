@@ -1595,9 +1595,7 @@ static long ebpf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	
 	if (cmd == IOCTL_BPF_PROG_ATTACH)
 	{
-		printk("IOCTL_BPF_PROG_ATTACH\n");
 		err = bpf_prog_attach(arg);
-		printk("IOCTL_BPF_PROG_ATTACH return %d\n", err);
 		return err;
 	}
 
@@ -1616,14 +1614,10 @@ static long ebpf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		err = map_create(&attr);
 		break;
 	case IOCTL_BPF_MAP_LOOKUP_ELEM:
-		printk("IOCTL_BPF_MAP_LOOKUP_ELEM\n");
 		err = map_lookup_elem(&attr);
-		printk("IOCTL_BPF_MAP_LOOKUP_ELEM return %d\n", err);
 		break;
 	case IOCTL_BPF_MAP_UPDATE_ELEM:
-		printk("IOCTL_BPF_MAP_UPDATE_ELEM\n");
 		err = map_update_elem(&attr);
-		printk("IOCTL_BPF_MAP_UPDATE_ELEM return %d\n", err);
 		break;
 	case IOCTL_BPF_MAP_DELETE_ELEM:
 		err = map_delete_elem(&attr);
