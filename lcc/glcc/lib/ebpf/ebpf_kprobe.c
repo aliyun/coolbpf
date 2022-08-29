@@ -32,7 +32,7 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
 
     bke = kzalloc(sizeof(*bke), GFP_USER);
 	if (!bke)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
     
     bke->is_return = is_return;
     // todo: alloc nhit
