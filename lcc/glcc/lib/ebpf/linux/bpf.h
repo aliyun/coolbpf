@@ -484,8 +484,8 @@ extern const struct bpf_func_proto bpf_ktime_get_ns_proto;
 extern const struct bpf_func_proto bpf_get_current_pid_tgid_proto;
 // extern const struct bpf_func_proto bpf_get_current_uid_gid_proto;
 extern const struct bpf_func_proto bpf_get_current_comm_proto;
-// extern const struct bpf_func_proto bpf_get_stackid_proto;
-extern const struct bpf_func_proto bpf_get_stack_proto;
+extern const struct bpf_func_proto bpf_get_stackid_proto;
+// extern const struct bpf_func_proto bpf_get_stack_proto;
 
 /* Shared helpers among cBPF and eBPF. */
 void bpf_user_rnd_init_once(void);

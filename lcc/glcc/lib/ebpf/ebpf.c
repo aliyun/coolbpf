@@ -711,8 +711,7 @@ static int map_lookup_elem(union bpf_attr *attr)
 		err = -EACCES;
 		// err = bpf_percpu_array_copy(map, key, value);
 	} else if (map->map_type == BPF_MAP_TYPE_STACK_TRACE) {
-		err = -EACCES;
-		// err = bpf_stackmap_copy(map, key, value);
+		err = bpf_stackmap_copy(map, key, value);
 	} else if (IS_FD_ARRAY(map)) {
 		rcu_read_lock();
 		err = bpf_fd_array_map_update_elem(map, f.file, key, value,

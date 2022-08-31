@@ -11,6 +11,7 @@ perf_output_end_t perf_output_end_p;
 free_uid_t free_uid_p;
 __vmalloc_node_range_t __vmalloc_node_range_p;
 get_callchain_buffers_t get_callchain_buffers_p;
+put_callchain_buffers_t put_callchain_buffers_p;
 sha_init_t sha_init_p;
 sha_transform_t sha_transform_p;
 module_alloc_t module_alloc_p;
@@ -214,6 +215,10 @@ int load_allsyms(void)
 
 	get_callchain_buffers_p = (get_callchain_buffers_t)kallsyms_lookup_name("get_callchain_buffers");
 	if (get_callchain_buffers_p == NULL)
+		goto err;
+	
+	put_callchain_buffers_p = (put_callchain_buffers_t)kallsyms_lookup_name("put_callchain_buffers");
+	if (put_callchain_buffers_p == NULL)
 		goto err;
 	
 	sha_init_p = (sha_init_t)kallsyms_lookup_name("sha_init");

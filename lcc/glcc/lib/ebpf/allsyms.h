@@ -22,6 +22,7 @@ typedef void *(*__vmalloc_node_range_t)(unsigned long size, unsigned long align,
 			unsigned long start, unsigned long end, gfp_t gfp_mask,
 			pgprot_t prot, int node, const void *caller);
 typedef int (*get_callchain_buffers_t)(void);
+typedef void (*put_callchain_buffers_t)(void);
 typedef void (*sha_init_t)(__u32 *buf);
 typedef void (*sha_transform_t)(__u32 *digest, const char *data, __u32 *W);
 typedef void *(*module_alloc_t)(unsigned long size);
@@ -43,6 +44,7 @@ extern perf_output_end_t perf_output_end_p;
 extern free_uid_t free_uid_p;
 extern __vmalloc_node_range_t __vmalloc_node_range_p;
 extern get_callchain_buffers_t get_callchain_buffers_p;
+extern put_callchain_buffers_t put_callchain_buffers_p;
 extern sha_init_t sha_init_p;
 extern sha_transform_t sha_transform_p;
 extern module_alloc_t module_alloc_p;
