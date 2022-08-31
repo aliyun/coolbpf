@@ -18,75 +18,8 @@ module_free_t module_free_p;
 // struct file_operations *perf_fops_p;
 ftrace_find_event_t ftrace_find_event_p;
 perf_callchain_kernel_t perf_callchain_kernel_p;
-
-
-int load_allsyms(void)
-{
-    trace_printk_init_buffers_p = (trace_printk_init_buffers_t)kallsyms_lookup_name("trace_printk_init_buffers");
-    if (trace_printk_init_buffers_p == NULL)
-        goto err;
-	
-	perf_prepare_sample_p = (perf_prepare_sample_t)kallsyms_lookup_name("perf_prepare_sample");
-	if (perf_prepare_sample_p == NULL)
-		goto err;
-	
-	perf_output_begin_p = (perf_output_begin_t)kallsyms_lookup_name("perf_output_begin");
-	if (perf_output_begin_p == NULL)
-		goto err;
-	
-	perf_output_sample_p = (perf_output_sample_t)kallsyms_lookup_name("perf_output_sample");
-	if (perf_output_sample_p == NULL)
-		goto err;
-
-	perf_output_end_p = (perf_output_end_t)kallsyms_lookup_name("perf_output_end");
-	if (perf_output_end_p == NULL)
-		goto err;
-
-    free_uid_p = (free_uid_t)kallsyms_lookup_name("free_uid");
-    if (free_uid_p == NULL)
-        goto err;
-
-    __vmalloc_node_range_p = (__vmalloc_node_range_t)kallsyms_lookup_name("__vmalloc_node_range");
-    if (__vmalloc_node_range_p == NULL)
-        goto err;
-
-	get_callchain_buffers_p = (get_callchain_buffers_t)kallsyms_lookup_name("get_callchain_buffers");
-	if (get_callchain_buffers_p == NULL)
-		goto err;
-	
-	sha_init_p = (sha_init_t)kallsyms_lookup_name("sha_init");
-    if (sha_init_p == NULL)
-        goto err;
-	
-	sha_transform_p = (sha_transform_t)kallsyms_lookup_name("sha_transform");
-    if (sha_transform_p == NULL)
-        goto err;
-	
-	module_alloc_p = (module_alloc_t)kallsyms_lookup_name("module_alloc");
-	if (module_alloc_p == NULL)
-        goto err;
-	
-	module_free_p = (module_free_t)kallsyms_lookup_name("module_free");
-	if (module_free_p == NULL)
-        goto err;
-	
-	// perf_fops_p = (struct file_operations *)kallsyms_lookup_name("perf_fops");
-	// if (perf_fops_p == NULL)
-	// 	goto err;
-
-	ftrace_find_event_p = (ftrace_find_event_t)kallsyms_lookup_name("ftrace_find_event");
-	if (ftrace_find_event_p == NULL)
-        goto err;
-	
-	perf_callchain_kernel_p = (perf_callchain_kernel_t)kallsyms_lookup_name("perf_callchain_kernel");
-	if (perf_callchain_kernel_p == NULL)
-		goto err;
-
-    return 0;
-err:
-	printk(KERN_NOTICE "Error to find function syms\n");
-    return -EINVAL;
-}
+perf_event_get_t perf_event_get_p;
+perf_event_read_local_t perf_event_read_local_p;
 
 void perf_event_output(struct perf_event *event,
 				struct perf_sample_data *data,
@@ -111,7 +44,7 @@ exit:
 	rcu_read_unlock();
 }
 
-struct file *perf_event_get(unsigned int fd)
+struct file *inner_perf_event_get(unsigned int fd)
 {
 	struct file *file;
 
@@ -181,7 +114,7 @@ __perf_update_times(struct perf_event *event, u64 now, u64 *enabled, u64 *runnin
 		*running += delta;
 }
 
-int perf_event_read_local(struct perf_event *event, u64 *value,
+int inner_perf_event_read_local(struct perf_event *event, u64 *value,
 			  u64 *enabled, u64 *running)
 {
 	unsigned long flags;
@@ -245,4 +178,82 @@ out:
 	local_irq_restore(flags);
 
 	return ret;
+}
+
+
+int load_allsyms(void)
+{
+    trace_printk_init_buffers_p = (trace_printk_init_buffers_t)kallsyms_lookup_name("trace_printk_init_buffers");
+    if (trace_printk_init_buffers_p == NULL)
+        goto err;
+	
+	perf_prepare_sample_p = (perf_prepare_sample_t)kallsyms_lookup_name("perf_prepare_sample");
+	if (perf_prepare_sample_p == NULL)
+		goto err;
+	
+	perf_output_begin_p = (perf_output_begin_t)kallsyms_lookup_name("perf_output_begin");
+	if (perf_output_begin_p == NULL)
+		goto err;
+	
+	perf_output_sample_p = (perf_output_sample_t)kallsyms_lookup_name("perf_output_sample");
+	if (perf_output_sample_p == NULL)
+		goto err;
+
+	perf_output_end_p = (perf_output_end_t)kallsyms_lookup_name("perf_output_end");
+	if (perf_output_end_p == NULL)
+		goto err;
+
+    free_uid_p = (free_uid_t)kallsyms_lookup_name("free_uid");
+    if (free_uid_p == NULL)
+        goto err;
+
+    __vmalloc_node_range_p = (__vmalloc_node_range_t)kallsyms_lookup_name("__vmalloc_node_range");
+    if (__vmalloc_node_range_p == NULL)
+        goto err;
+
+	get_callchain_buffers_p = (get_callchain_buffers_t)kallsyms_lookup_name("get_callchain_buffers");
+	if (get_callchain_buffers_p == NULL)
+		goto err;
+	
+	sha_init_p = (sha_init_t)kallsyms_lookup_name("sha_init");
+    if (sha_init_p == NULL)
+        goto err;
+	
+	sha_transform_p = (sha_transform_t)kallsyms_lookup_name("sha_transform");
+    if (sha_transform_p == NULL)
+        goto err;
+	
+	module_alloc_p = (module_alloc_t)kallsyms_lookup_name("module_alloc");
+	if (module_alloc_p == NULL)
+        goto err;
+	
+	module_free_p = (module_free_t)kallsyms_lookup_name("module_free");
+	if (module_free_p == NULL)
+        goto err;
+	
+	// perf_fops_p = (struct file_operations *)kallsyms_lookup_name("perf_fops");
+	// if (perf_fops_p == NULL)
+	// 	goto err;
+
+	ftrace_find_event_p = (ftrace_find_event_t)kallsyms_lookup_name("ftrace_find_event");
+	if (ftrace_find_event_p == NULL)
+        goto err;
+	
+	perf_callchain_kernel_p = (perf_callchain_kernel_t)kallsyms_lookup_name("perf_callchain_kernel");
+	if (perf_callchain_kernel_p == NULL)
+		goto err;
+	
+	perf_event_get_p = (perf_event_get_t)kallsyms_lookup_name("perf_event_get");
+	if (perf_callchain_kernel_p == NULL)
+		perf_event_get_p = inner_perf_event_get;
+	
+	perf_event_read_local_p = (perf_event_read_local_t)kallsyms_lookup_name("perf_event_read_local");
+	if (perf_event_read_local_p) 
+		perf_event_read_local_p = inner_perf_event_read_local;
+
+
+    return 0;
+err:
+	printk(KERN_NOTICE "Error to find function syms\n");
+    return -EINVAL;
 }

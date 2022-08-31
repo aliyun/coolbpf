@@ -28,6 +28,9 @@ typedef void *(*module_alloc_t)(unsigned long size);
 typedef void (*module_free_t)(struct module *mod, void *module_region);
 typedef struct trace_event *(*ftrace_find_event_t)(int type);
 typedef void (*perf_callchain_kernel_t)(struct perf_callchain_entry *entry, struct pt_regs *regs);
+typedef struct file* (*perf_event_get_t)(unsigned int fd);
+typedef int (*perf_event_read_local_t)(struct perf_event *event, u64 *value,
+			  u64 *enabled, u64 *running);
 
 extern trace_printk_init_buffers_t trace_printk_init_buffers_p;
 extern perf_prepare_sample_t perf_prepare_sample_p;
@@ -44,10 +47,10 @@ extern module_free_t module_free_p;
 // extern struct file_operations *perf_fops_p;
 extern ftrace_find_event_t ftrace_find_event_p;
 extern perf_callchain_kernel_t perf_callchain_kernel_p;
+extern perf_event_get_t perf_event_get_p;
+extern perf_event_read_local_t perf_event_read_local_p;
 
 int load_allsyms(void);
-struct file *perf_event_get(unsigned int fd);
-int perf_event_read_local(struct perf_event *event, u64 *value, u64 *enabled, u64 *running);
 
 
 // redefinition with perf_event.h

@@ -536,13 +536,13 @@ static void *perf_event_fd_array_get_ptr(struct bpf_map *map,
 	struct file *perf_file;
 	u64 value;
 
-	perf_file = perf_event_get(fd);
+	perf_file = perf_event_get_p(fd);
 	if (IS_ERR(perf_file))
 		return perf_file;
 
 	ee = ERR_PTR(-EOPNOTSUPP);
 	event = perf_file->private_data;
-	if (perf_event_read_local(event, &value, NULL, NULL) == -EOPNOTSUPP)
+	if (perf_event_read_local_p(event, &value, NULL, NULL) == -EOPNOTSUPP)
 		goto err_out;
 
 	ee = bpf_event_entry_gen(perf_file, map_file);
