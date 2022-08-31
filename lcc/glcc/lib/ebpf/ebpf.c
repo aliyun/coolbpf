@@ -707,7 +707,7 @@ static int map_lookup_elem(union bpf_attr *attr)
 	if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
 	    map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH) {
 		err = -EACCES;
-		// err = bpf_percpu_hash_copy(map, key, value);
+		err = bpf_percpu_hash_copy(map, key, value);
 	} else if (map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY) {
 		err = -EACCES;
 		// err = bpf_percpu_array_copy(map, key, value);
@@ -804,7 +804,7 @@ static int map_update_elem(union bpf_attr *attr)
 	if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
 	    map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH) {
 		err = -EACCES;
-		// err = bpf_percpu_hash_update(map, key, value, attr->flags);
+		err = bpf_percpu_hash_update(map, key, value, attr->flags);
 	} else if (map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY) {
 		err = -EACCES;
 		// err = bpf_percpu_array_update(map, key, value, attr->flags);
