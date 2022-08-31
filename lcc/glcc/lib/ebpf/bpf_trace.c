@@ -407,7 +407,7 @@ __bpf_perf_event_output(struct pt_regs *regs, struct bpf_map *map,
 
 	perf_sample_data_init(&sample_data, 0, 0);
 	sample_data.raw = raw;
-	perf_event_output(event, &sample_data, regs);
+	perf_event_output_p(event, &sample_data, regs);
 	return 0;
 }
 

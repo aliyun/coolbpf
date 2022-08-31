@@ -31,6 +31,9 @@ typedef void (*perf_callchain_kernel_t)(struct perf_callchain_entry *entry, stru
 typedef struct file* (*perf_event_get_t)(unsigned int fd);
 typedef int (*perf_event_read_local_t)(struct perf_event *event, u64 *value,
 			  u64 *enabled, u64 *running);
+typedef void (*perf_event_output_t)(struct perf_event *event,
+				struct perf_sample_data *data,
+				struct pt_regs *regs);
 
 extern trace_printk_init_buffers_t trace_printk_init_buffers_p;
 extern perf_prepare_sample_t perf_prepare_sample_p;
@@ -49,6 +52,7 @@ extern ftrace_find_event_t ftrace_find_event_p;
 extern perf_callchain_kernel_t perf_callchain_kernel_p;
 extern perf_event_get_t perf_event_get_p;
 extern perf_event_read_local_t perf_event_read_local_p;
+extern perf_event_output_t perf_event_output_p;
 
 int load_allsyms(void);
 
@@ -67,8 +71,6 @@ int load_allsyms(void);
 // 	data->txn = 0;
 // }
 
-void perf_event_output(struct perf_event *event,
-				struct perf_sample_data *data,
-				struct pt_regs *regs);
+
 
 #endif

@@ -20,8 +20,9 @@ ftrace_find_event_t ftrace_find_event_p;
 perf_callchain_kernel_t perf_callchain_kernel_p;
 perf_event_get_t perf_event_get_p;
 perf_event_read_local_t perf_event_read_local_p;
+perf_event_output_t perf_event_output_p;
 
-void perf_event_output(struct perf_event *event,
+void inner_perf_event_output(struct perf_event *event,
 				struct perf_sample_data *data,
 				struct pt_regs *regs)
 {
@@ -248,8 +249,12 @@ int load_allsyms(void)
 		perf_event_get_p = inner_perf_event_get;
 	
 	perf_event_read_local_p = (perf_event_read_local_t)kallsyms_lookup_name("perf_event_read_local");
-	if (perf_event_read_local_p) 
+	if (perf_event_read_local_p == NULL) 
 		perf_event_read_local_p = inner_perf_event_read_local;
+
+	perf_event_output_p = (perf_event_output_t)kallsyms_lookup_name("perf_event_output");
+	if (perf_event_output_p == NULL)
+		perf_event_output_p = inner_perf_event_output;
 
 
     return 0;
