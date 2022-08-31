@@ -2535,7 +2535,6 @@ static int check_helper_call(struct bpf_verifier_env *env, int func_id, int insn
 		err_str = "cannot get callchain buffer for func %s#%d\n";
 #else
 		err = -ENOTSUPP;
-		DEBUG_LINE;
 		err_str = "func %s#%d not supported without CONFIG_PERF_EVENTS\n";
 #endif
 		if (err) {

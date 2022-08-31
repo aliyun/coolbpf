@@ -1209,12 +1209,12 @@ struct bpf_prog *trace_bpf_int_jit_compile(struct bpf_prog *prog)
 	int *addrs;
 	int pass;
 	int i;
-	DEBUG_LINE;
+
 	if (!prog->jit_requested)
 		return orig_prog;
 
 	tmp = bpf_jit_blind_constants(prog);
-	DEBUG_LINE;
+
 	/*
 	 * If blinding was requested and we failed during blinding,
 	 * we must fall back to the interpreter.

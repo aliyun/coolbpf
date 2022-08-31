@@ -654,7 +654,6 @@ static struct bpf_map *bpf_map_inc_not_zero(struct bpf_map *map,
 
 int __weak bpf_stackmap_copy(struct bpf_map *map, void *key, void *value)
 {
-	DEBUG_LINE;
 	return -ENOTSUPP;
 }
 
@@ -1290,17 +1289,16 @@ static int bpf_prog_load(union bpf_attr *attr)
 	char license[128];
 	bool is_gpl;
 
-	DEBUG_LINE;
 	/* RHEL7 - allow only following types */
 	if (type != BPF_PROG_TYPE_KPROBE &&
 	    type != BPF_PROG_TYPE_TRACEPOINT &&
 	    type != BPF_PROG_TYPE_PERF_EVENT &&
 	    !is_test_type(type))
 		return -EINVAL;
-	DEBUG_LINE;
+
 	if (CHECK_ATTR(BPF_PROG_LOAD))
 		return -EINVAL;
-	DEBUG_LINE;
+
 	if (attr->prog_flags & ~BPF_F_STRICT_ALIGNMENT)
 		return -EINVAL;
 	/* copy eBPF program license from user space */
@@ -1326,7 +1324,7 @@ static int bpf_prog_load(union bpf_attr *attr)
 
 	if (bpf_prog_load_check_attach_type(type, attr->expected_attach_type))
 		return -EINVAL;
-	DEBUG_LINE;
+
 	/* plain bpf_prog allocation */
 	prog = bpf_prog_alloc(bpf_prog_size(attr->insn_cnt), GFP_USER);
 	if (!prog)
@@ -1336,7 +1334,7 @@ static int bpf_prog_load(union bpf_attr *attr)
 	// err = security_bpf_prog_alloc(prog->aux);
 	// if (err)
 	// 	goto free_prog_nouncharge;
-	DEBUG_LINE;
+
 	err = bpf_prog_charge_memlock(prog);
 	if (err)
 		goto free_prog_sec;
@@ -1378,7 +1376,7 @@ static int bpf_prog_load(union bpf_attr *attr)
 	err = bpf_prog_alloc_id(prog);
 	if (err)
 		goto free_used_maps;
-	DEBUG_LINE;
+
 	err = bpf_prog_new_fd(prog);
 	if (err < 0) {
 		/* failed to allocate fd.

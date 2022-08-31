@@ -117,7 +117,6 @@ struct bpf_prog *bpf_prog_alloc(unsigned int size, gfp_t gfp_extra_flags)
 	fp->aux = aux;
 	fp->aux->prog = fp;
 	fp->jit_requested = ebpf_jit_enabled();
-	DEBUG_LINE;
 
 	INIT_LIST_HEAD_RCU(&fp->aux->ksym_lnode);
 
@@ -1595,7 +1594,6 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
 #ifdef CONFIG_BPF_JIT_ALWAYS_ON
 	if (!fp->jited) {
 		*err = -ENOTSUPP;
-		DEBUG_LINE;
 		return fp;
 	}
 #endif

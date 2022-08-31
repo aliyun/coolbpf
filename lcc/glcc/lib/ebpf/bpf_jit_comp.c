@@ -160,7 +160,6 @@ void bpf_jit_compile(struct sk_filter *fp)
 	unsigned int *addrs;
 	const struct sock_filter *filter = fp->insns;
 	int flen = fp->len;
-	DEBUG_LINE;
 	if (!bpf_jit_enable)
 		return;
 
