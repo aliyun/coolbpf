@@ -469,16 +469,16 @@ static const struct bpf_func_proto bpf_perf_event_output_proto = {
 // 	return 0;
 // }
 
-// BPF_CALL_0(bpf_get_current_task)
-// {
-// 	return (long) current;
-// }
+BPF_CALL_0(bpf_get_current_task)
+{
+	return (long) current;
+}
 
-// static const struct bpf_func_proto bpf_get_current_task_proto = {
-// 	.func		= bpf_get_current_task,
-// 	.gpl_only	= true,
-// 	.ret_type	= RET_INTEGER,
-// };
+static const struct bpf_func_proto bpf_get_current_task_proto = {
+	.func		= bpf_get_current_task,
+	.gpl_only	= true,
+	.ret_type	= RET_INTEGER,
+};
 
 // BPF_CALL_3(bpf_probe_read_str, void *, dst, u32, size,
 // 	   const void *, unsafe_ptr)
@@ -528,8 +528,8 @@ tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	// 	return &bpf_tail_call_proto;
 	case BPF_FUNC_get_current_pid_tgid:
 		return &bpf_get_current_pid_tgid_proto;
-	// case BPF_FUNC_get_current_task:
-	// 	return &bpf_get_current_task_proto;
+	case BPF_FUNC_get_current_task:
+		return &bpf_get_current_task_proto;
 	// case BPF_FUNC_get_current_uid_gid:
 	// 	return &bpf_get_current_uid_gid_proto;
 	case BPF_FUNC_get_current_comm:
