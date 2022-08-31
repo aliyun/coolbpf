@@ -781,11 +781,11 @@ static int map_update_elem(union bpf_attr *attr)
 		goto err_put;
 	}
 
-	// if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
-	//     map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH ||
-	//     map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY)
-	// 	value_size = round_up(map->value_size, 8) * num_possible_cpus();
-	// else
+	if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
+	    map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH ||
+	    map->map_type == BPF_MAP_TYPE_PERCPU_ARRAY)
+		value_size = round_up(map->value_size, 8) * num_possible_cpus();
+	else
 		value_size = map->value_size;
 
 	err = -ENOMEM;
