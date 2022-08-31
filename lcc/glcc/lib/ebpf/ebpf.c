@@ -1525,7 +1525,7 @@ static int bpf_prog_attach(u64 arg)
 				goto out;
 			}
 			name[sizeof(name) - 1] = 0;
-			err = bpf_prog_attach_kprobe(prog_fd, attr.kprobe.name, attr.kprobe.is_return);
+			err = bpf_prog_attach_kprobe(prog_fd, name, attr.kprobe.is_return);
 			break;
 		}
 		case BPF_PROG_TYPE_TRACEPOINT:

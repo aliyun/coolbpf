@@ -25,27 +25,30 @@ static int bpf_kretprobe_dispatcher(struct kretprobe_instance *ri, struct pt_reg
     return 0;
 }
 
-struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *symbol, bool is_return)
+struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, const char *symbol, bool is_return)
 {
     struct bpf_kprobe_event *bke;
     int err = 0;
 
     bke = kzalloc(sizeof(*bke), GFP_USER);
-	if (!bke)
-		return ERR_PTR(-ENOMEM);
-    
+    if (!bke)
+        return ERR_PTR(-ENOMEM);
+
     bke->is_return = is_return;
     // todo: alloc nhit
 
-    if (symbol) {
+    if (symbol)
+    {
         bke->symbol = kstrdup(symbol, GFP_USER);
-        if (!bke->symbol) {
+        if (!bke->symbol)
+        {
             err = -ENOMEM;
             goto free_bke;
         }
         bke->rp.kp.symbol_name = bke->symbol;
-        bke->rp.kp.offset = 0;
-    } else {
+    }
+    else
+    {
         printk(KERN_ERR "BUG: no symbol exists\n");
         err = -EINVAL;
         goto free_bke;
@@ -55,7 +58,7 @@ struct bpf_kprobe_event *alloc_bpf_kprobe_event(struct bpf_prog *prog, char *sym
         bke->rp.handler = bpf_kretprobe_dispatcher;
     else
         bke->rp.kp.pre_handler = bpf_kprobe_dispatcher;
-    
+
     bke->prog = prog;
     return bke;
 
@@ -72,19 +75,25 @@ void free_bpf_kprobe_event(struct bpf_kprobe_event *bke)
     kfree(bke);
 }
 
+// attach k(ret)probe
 int bpf_kprobe_register(struct bpf_kprobe_event *bke)
 {
+    int err;
     if (bke->is_return)
-        return register_kretprobe(&bke->rp);
-    else 
-        return register_kprobe(&bke->rp.kp);
+        err = register_kretprobe(&bke->rp);
+    else
+        err = register_kprobe(&bke->rp.kp);
+
+    printk("Register %s: name - %s, error: %u\n", bke->is_return ? "kretprobe" : "kprobe", bke->symbol, err);
+    return err;
 }
 
 void bpf_kprobe_unregister(struct bpf_kprobe_event *bke)
 {
     if (bke->is_return)
         unregister_kretprobe(&bke->rp);
-    else 
+    else
         unregister_kprobe(&bke->rp.kp);
+    
+    printk("Unegister %s: name - %s\n", bke->is_return ? "kretprobe" : "kprobe", bke->symbol);
 }
-
