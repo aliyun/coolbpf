@@ -4,6 +4,7 @@
 
 struct bpf_tracepoint_event
 {
+    void *category;
     void *name;
     // void *tp;
     void *bpf_func;

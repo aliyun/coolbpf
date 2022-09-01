@@ -130,6 +130,24 @@ static int ebpf_net_dev_queue(void *data, struct sk_buff *skb)
     return 0;
 }
 
+static int ebpf_sched_stat_template(void *data, struct task_struct *tsk, u64 delay)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        struct trace_entry entry;
+        char comm[TASK_COMM_LEN];
+        pid_t pid;
+        u64 delay;
+    } arg = {
+        .pid = tsk->pid,
+        .delay = delay,
+    };
+     memcpy(arg.comm, tsk->comm, TASK_COMM_LEN);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
 static struct bpf_tracepoint_event events_table[] =
     {
         {.name = "net_dev_queue", .bpf_func = ebpf_net_dev_queue},
@@ -138,6 +156,9 @@ static struct bpf_tracepoint_event events_table[] =
         {.name = "sched_switch", .bpf_func = ebpf_sched_switch},
         {.name = "netif_receive_skb", .bpf_func = ebpf_netif_receive_skb},
         {.name = "net_dev_xmit", .bpf_func = ebpf_net_dev_xmit},
+        {.name = "sched_stat_wait", .bpf_func = ebpf_sched_stat_template},
+        {.name = "sched_stat_iowait", .bpf_func = ebpf_sched_stat_template},
+        {.name = "sched_stat_blocked", .bpf_func = ebpf_sched_stat_template},
 };
 
 struct bpf_tracepoint_event *bpf_find_tracepoint(char *tp_name)
