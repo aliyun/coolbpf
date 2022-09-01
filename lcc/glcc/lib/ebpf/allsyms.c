@@ -249,9 +249,11 @@ int load_allsyms(void)
 	if (perf_callchain_kernel_p == NULL)
 		goto err;
 	
-	perf_event_get_p = (perf_event_get_t)kallsyms_lookup_name("perf_event_get");
-	if (perf_callchain_kernel_p == NULL)
-		perf_event_get_p = inner_perf_event_get;
+	// todo: we cannot use perf_event_get in kernel
+	// https://www.spinics.net/lists/linux-fsdevel/msg142795.html
+	// perf_event_get_p = (perf_event_get_t)kallsyms_lookup_name("perf_event_get");
+	// if (perf_event_get_p == NULL)
+	perf_event_get_p = inner_perf_event_get;
 	
 	perf_event_read_local_p = (perf_event_read_local_t)kallsyms_lookup_name("perf_event_read_local");
 	if (perf_event_read_local_p == NULL) 
