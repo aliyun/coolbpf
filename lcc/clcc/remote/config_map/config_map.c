@@ -22,7 +22,7 @@ void user_config(struct clcc_struct *pclcc) {
     unsigned int key = 0;
     unsigned int val = 1;
 
-    pclcc->map_update_elem(pclcc->get_maps_id("user_config"), &key, &val, 0);
+    pclcc->map_update_elem(pclcc->get_maps_id("user_config"), &key, &val);
 }
 
 void event_run(struct clcc_struct* pclcc) {
@@ -51,7 +51,7 @@ int main(int argc,char *argv[]) {
     }
 
     signal(SIGINT, stop);
-    pclcc->init(-1);
+    pclcc->init(-1, 1);
     printf("The program starts executing and will exit after 10 seconds.\n");
     printf("user config map\n");
     user_config(pclcc);
