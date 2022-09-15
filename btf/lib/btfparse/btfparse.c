@@ -174,7 +174,7 @@ struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_na
     if (typeid < 0)
     {
         errno = EINVAL;
-        return NULL;
+        goto free_ma;
     }
 
     offset = 0;
@@ -182,11 +182,14 @@ struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_na
     if (!member)
     {
         pr_dbg("failed to find member: %s in struct: %s, err = %d\n", member_name, btf__name_by_offset(btf, btf__type_by_id(btf, typeid)->name_off), -errno);
-        return NULL;
+        goto free_ma;
     }
 
     ma->offset = offset;
     ma->size = btf__resolve_size(btf, member->type);
     ma->real_size = btf_type_find_realtype(btf, member->type)->size;
     return ma;
+
+free_ma:
+    return NULL;
 }
