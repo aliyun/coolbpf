@@ -32,6 +32,7 @@
 #include "bpf.h"
 #include "libbpf.h"
 #include "libbpf_internal.h"
+#include "bpf_drv.h"
 
 /*
  * When building perf, unistd.h is overridden. __NR_bpf is
@@ -63,6 +64,10 @@ static inline __u64 ptr_to_u64(const void *ptr)
 static inline int sys_bpf(enum bpf_cmd cmd, union bpf_attr *attr,
 			  unsigned int size)
 {
+#ifdef CONFIG_BPF_DRV
+	if (bpf_drv_needed())
+		return sys_bpf_ioctl(cmd, attr, size);
+#endif
 	return syscall(__NR_bpf, cmd, attr, size);
 }
 
