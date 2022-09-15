@@ -143,7 +143,7 @@ int sys_bpf_ioctl(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int size)
     return ioctl(env.ebpfdrv_fd, request, attr);
 }
 
-int bpf_drv_attach_kprobe(struct bpf_program *prog, bool retprobe, const char *func_name)
+int bpf_drv_attach_kprobe(const struct bpf_program *prog, bool retprobe, const char *func_name)
 {
     struct ebpfdrv_attr attr = {};
     int prog_fd;
@@ -160,7 +160,7 @@ int bpf_drv_attach_kprobe(struct bpf_program *prog, bool retprobe, const char *f
     return ioctl(env.ebpfdrv_fd, IOCTL_BPF_PROG_ATTACH, &attr);
 }
 
-int bpf_drv_attach_tracepoint(struct bpf_program *prog, const char *tp_category, const char *tp_name)
+int bpf_drv_attach_tracepoint(const struct bpf_program *prog, const char *tp_category, const char *tp_name)
 {
     struct ebpfdrv_attr attr = {};
     int prog_fd;
@@ -177,7 +177,7 @@ int bpf_drv_attach_tracepoint(struct bpf_program *prog, const char *tp_category,
     return ioctl(env.ebpfdrv_fd, IOCTL_BPF_PROG_ATTACH, &attr);
 }
 
-int bpf_drv_attach_perf_events(struct bpf_program *prog, int pfd)
+int bpf_drv_attach_perf_events(const struct bpf_program *prog, int pfd)
 {
     struct ebpfdrv_attr attr = {};
     int prog_fd;
