@@ -152,7 +152,7 @@ int bpf_drv_attach_kprobe(const struct bpf_program *prog, bool retprobe, const c
     if (prog_fd < 0) {
 		pr_warn("prog '%s': can't attach BPF program w/o FD (did you load it?)\n",
 			bpf_program__name(prog));
-		return ERR_PTR(-EINVAL);
+		return -EINVAL;
 	}
     attr.prog_fd = prog_fd;
     attr.kprobe.is_return = retprobe;
@@ -169,7 +169,7 @@ int bpf_drv_attach_tracepoint(const struct bpf_program *prog, const char *tp_cat
     if (prog_fd < 0) {
 		pr_warn("prog '%s': can't attach BPF program w/o FD (did you load it?)\n",
 			bpf_program__name(prog));
-		return ERR_PTR(-EINVAL);
+		return -EINVAL;
 	}
     attr.prog_fd = prog_fd;
     attr.tracepoint.category = ptr_to_u64(tp_category);

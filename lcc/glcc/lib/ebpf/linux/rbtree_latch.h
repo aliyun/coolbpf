@@ -60,12 +60,12 @@ static inline int raw_read_seqcount_latch(seqcount_t *s)
        return lockless_dereference(s->sequence);
 }
 
-static inline void raw_write_seqcount_latch(seqcount_t *s)
-{
-       smp_wmb();      /* prior stores before incrementing "sequence" */
-       s->sequence++;
-       smp_wmb();      /* increment "sequence" before following stores */
-}
+// static inline void raw_write_seqcount_latch(seqcount_t *s)
+// {
+//        smp_wmb();      /* prior stores before incrementing "sequence" */
+//        s->sequence++;
+//        smp_wmb();      /* increment "sequence" before following stores */
+// }
 
 /**
  * latch_tree_ops - operators to define the tree order
