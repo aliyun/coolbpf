@@ -1,1 +1,1 @@
-/work/newlcc/third/vmlinux_515.h
+../../../../../third/vmlinux_515.h
