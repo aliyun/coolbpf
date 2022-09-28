@@ -14,7 +14,7 @@
  *
  * If we need to allow unconditional lookups (say as required for NMI context
  * usage) we need a more complex setup; this data structure provides this by
- * employing the latch technique -- see @raw_write_seqcount_latch -- to
+ * employing the latch technique -- see @raw_write_seqcount_latch_cb -- to
  * implement a latched RB-tree which does allow for unconditional lookups by
  * virtue of always having (at least) one stable copy of the tree.
  *
@@ -60,12 +60,12 @@ static inline int raw_read_seqcount_latch(seqcount_t *s)
        return lockless_dereference(s->sequence);
 }
 
-// static inline void raw_write_seqcount_latch(seqcount_t *s)
-// {
-//        smp_wmb();      /* prior stores before incrementing "sequence" */
-//        s->sequence++;
-//        smp_wmb();      /* increment "sequence" before following stores */
-// }
+static inline void raw_write_seqcount_latch_cb(seqcount_t *s)
+{
+       smp_wmb();      /* prior stores before incrementing "sequence" */
+       s->sequence++;
+       smp_wmb();      /* increment "sequence" before following stores */
+}
 
 /**
  * latch_tree_ops - operators to define the tree order
@@ -153,7 +153,7 @@ __lt_find(void *key, struct latch_tree_root *ltr, int idx,
  * @ops: operators defining the node order
  *
  * It inserts @node into @root in an ordered fashion such that we can always
- * observe one complete tree. See the comment for raw_write_seqcount_latch().
+ * observe one complete tree. See the comment for raw_write_seqcount_latch_cb().
  *
  * The inserts use rcu_assign_pointer() to publish the element such that the
  * tree structure is stored before we can observe the new @node.
@@ -166,9 +166,9 @@ latch_tree_insert(struct latch_tree_node *node,
 		  struct latch_tree_root *root,
 		  const struct latch_tree_ops *ops)
 {
-	raw_write_seqcount_latch(&root->seq);
+	raw_write_seqcount_latch_cb(&root->seq);
 	__lt_insert(node, root, 0, ops->less);
-	raw_write_seqcount_latch(&root->seq);
+	raw_write_seqcount_latch_cb(&root->seq);
 	__lt_insert(node, root, 1, ops->less);
 }
 
@@ -180,7 +180,7 @@ latch_tree_insert(struct latch_tree_node *node,
  *
  * Removes @node from the trees @root in an ordered fashion such that we can
  * always observe one complete tree. See the comment for
- * raw_write_seqcount_latch().
+ * raw_write_seqcount_latch_cb().
  *
  * It is assumed that @node will observe one RCU quiescent state before being
  * reused of freed.
@@ -193,9 +193,9 @@ latch_tree_erase(struct latch_tree_node *node,
 		 struct latch_tree_root *root,
 		 const struct latch_tree_ops *ops)
 {
-	raw_write_seqcount_latch(&root->seq);
+	raw_write_seqcount_latch_cb(&root->seq);
 	__lt_erase(node, root, 0);
-	raw_write_seqcount_latch(&root->seq);
+	raw_write_seqcount_latch_cb(&root->seq);
 	__lt_erase(node, root, 1);
 }
 
