@@ -17,16 +17,26 @@ class CsurfHandler(tornado.web.RequestHandler):
 
     def post(self):
         lines = self.request.body.decode()
-        parses = json.loads(lines)
-        res = []
-        for parse in parses:
-            res.append(CsurfHandler.surf.proc(parse))
-        response = {
-            "result": 'success',
-            'status': True,
-            'code': 200,
-            'res': res
-        }
+        response = None
+        try:
+            parses = json.loads(lines)
+        except json.decoder.JSONDecodeError:
+            response = {
+                "result": 'failed',
+                'status': False,
+                'code': 500,
+                'res': [{'log': lines}]
+            }
+        if response is None:
+            res = []
+            for parse in parses:
+                res.append(CsurfHandler.surf.proc(parse))
+            response = {
+                "result": 'success',
+                'status': True,
+                'code': 200,
+                'res': res
+            }
         self.write(json_encode(response))
 
 

@@ -19,14 +19,19 @@ import ctypes as ct
 import _ctypes as _ct
 import json
 import hashlib
-from pylcc.lbcMaps import CmapsEvent, CmapsHash, CmapsArray, \
-    CmapsLruHash, CmapsPerHash, CmapsPerArray, CmapsLruPerHash, CmapsStack
+from threading import Thread
+from multiprocessing import cpu_count
+from pylcc.lbcMaps import mapsDict
 from surftrace.execCmd import CexecCmd
 from surftrace.surfException import InvalidArgsException, RootRequiredException, FileNotExistException, DbException
 from surftrace.lbcClient import ClbcClient, segDecode
 from pylcc.lbcInclude import ClbcInclude
 
 LBC_COMPILE_PORT = 7655
+
+
+def getCwd(pathStr):
+    return os.path.split(os.path.realpath(pathStr))[0]
 
 
 class ClbcLoad(object):
@@ -261,10 +266,10 @@ class ClbcBase(ClbcLoad):
     def __init__(self, bpf, bpf_str="",
                  server="pylcc.openanolis.cn",
                  arch="", ver="", env="",
-                 attach=1,
+                 attach=1, workPath=None
                  ):
         super(ClbcBase, self).__init__(bpf, bpf_str, server, arch, ver,
-                                       env)
+                                       env, workPath=workPath)
         bpf_so = self._setupSoName(bpf)
         self._loadSo(bpf_so)
         self._initSo(attach)
@@ -272,9 +277,9 @@ class ClbcBase(ClbcLoad):
         self._loadMaps()
 
     def _setupAttatchs(self):
-        #   int lbc_attach_perf_event(const char* func, int pfd)
+        #   int lbc_attach_perf_event(const char* func, const char* attrs, int pid, int cpu, int group_fd)
         self._so.lbc_attach_perf_event.restype = ct.c_int
-        self._so.lbc_attach_perf_event.argtypes = [ct.c_char_p, ct.c_int]
+        self._so.lbc_attach_perf_event.argtypes = [ct.c_char_p, ct.c_char_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int]
         #   int lbc_attach_kprobe(const char* func, const char* sym)
         self._so.lbc_attach_kprobe.restype = ct.c_int
         self._so.lbc_attach_kprobe.argtypes = [ct.c_char_p, ct.c_char_p]
@@ -305,14 +310,7 @@ class ClbcBase(ClbcLoad):
 
     def _loadMaps(self):
         d = self._loadDesc()['maps']
-        tDict = {'event': CmapsEvent,
-                 'hash': CmapsHash,
-                 'array': CmapsArray,
-                 'lruHash': CmapsLruHash,
-                 'perHash': CmapsPerHash,
-                 'perArray': CmapsPerArray,
-                 'lruPerHash': CmapsLruPerHash,
-                 'stack': CmapsStack, }
+        tDict = mapsDict
         for k in d.keys():
             t = d[k]['type']
             if t in tDict:
@@ -326,6 +324,26 @@ class ClbcBase(ClbcLoad):
             return self.maps[name].event(stream)
         except IndexError:
             return None
+
+    # https://man7.org/linux/man-pages/man2/perf_event_open.2.html
+    def attachPerfEvent(self, function, attrD, pid=0, cpu=-1, group_fd=-1, flags=0):
+        for k, v in attrD.items():  # json int type not support 64 bit
+            if type(v) is not str:
+                try:
+                    attrD[k] = "%d" % v
+                except TypeError:
+                    print("key %s type is %s, not support, skip." % (k, type(v)))
+                    del attrD[k]
+        attrs = json.dumps(attrD)
+        res = self._so.lbc_attach_perf_event(function.encode(), attrs.encode(), pid, cpu, group_fd, flags)
+        if res != 0:
+            raise InvalidArgsException("attach %s to perf event failed." % function)
+        return res
+
+    def attachAllCpuPerf(self, function, attrD, pid=-1, group_fd=-1, flags=0):
+        nr_cpu = cpu_count()
+        for i in range(nr_cpu):
+            self.attachPerfEvent(function, attrD, pid=pid, cpu=i, group_fd=group_fd, flags=flags)
 
     def attachKprobe(self, function, symbol):
         res = self._so.lbc_attach_kprobe(function, symbol)
@@ -371,6 +389,25 @@ class ClbcBase(ClbcLoad):
         res = self._so.lbc_attach_xdp(function, ifindex)
         if res != 0:
             raise InvalidArgsException("attach %s to xdp %d failed." % (function, ifindex))
+
+
+class CeventThread(Thread):
+    def __init__(self, lbc, event, cb, lost=None):
+        super(CeventThread, self).__init__()
+        self.setDaemon(True)
+        self._lbc = lbc
+        self._event = event
+        self._cb = cb
+        self.lost = lost
+        self.start()
+
+    def cb(self, cpu, data, size):
+        e = self._lbc.getMap(self._event, data, size)
+        self._cb(cpu, e)
+
+    def run(self):
+        self._lbc.maps[self._event].open_perf_buffer(self.cb, lost=self.lost)
+        self._lbc.maps[self._event].perf_buffer_poll()
 
 
 if __name__ == "__main__":

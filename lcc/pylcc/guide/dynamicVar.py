@@ -14,7 +14,8 @@
 __author__ = 'liaozhaoyan'
 
 import sys
-from pylcc.lbcBase import ClbcBase
+from signal import pause
+from pylcc.lbcBase import ClbcBase, CeventThread
 
 bpfPog = r"""
 #include "lbc.h"
@@ -41,7 +42,7 @@ int j_wake_up_new_task(struct pt_regs *ctx)
     bpf_get_current_comm(&data.c_comm, TASK_COMM_LEN);
     data.p_pid = pid;
     bpf_core_read(&data.p_comm[0], TASK_COMM_LEN, &parent->comm[0]);
-    
+
     bpf_perf_event_output(ctx, &e_out, BPF_F_CURRENT_CPU, &data, sizeof(data));
     return 0;
 }
@@ -54,19 +55,14 @@ class CdynamicVar(ClbcBase):
     def __init__(self):
         super(CdynamicVar, self).__init__("dynamicVar", bpf_str=bpfPog)
 
-    def _cb(self, cpu, data, size):
-        e = self.getMap('e_out', data, size)
-        print("current pid:%d, comm:%s. wake_up_new_task pid: %d, comm: %s" % (
-            e.c_pid, e.c_comm, e.p_pid, e.p_comm
+    def _cb(self, cpu, e):
+        print("cpu: %d current pid:%d, comm:%s. wake_up_new_task pid: %d, comm: %s" % (
+            cpu, e.c_pid, e.c_comm, e.p_pid, e.p_comm
         ))
 
     def loop(self):
-        self.maps['e_out'].open_perf_buffer(self._cb)
-        try:
-            self.maps['e_out'].perf_buffer_poll()
-        except KeyboardInterrupt:
-            print("key interrupt.")
-            exit()
+        CeventThread(self, 'e_out', self._cb)
+        pause()
 
 
 if __name__ == "__main__":
