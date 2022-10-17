@@ -14,24 +14,29 @@ __author__ = 'liaozhaoyan'
 
 import re
 
+
 class ClbcSymbol(object):
     def __init__(self):
-        self.__reEvent = re.compile("LBC_PERF_OUTPUT[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ ]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
-        reHash = re.compile("LBC_HASH[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
-        reArray = re.compile("LBC_ARRAY[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+        self.__reEvent = re.compile(r"LBC_PERF_OUTPUT[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ ]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
+        reHash = re.compile(r"LBC_HASH[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
+        reArray = re.compile(r"LBC_ARRAY[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
+        reHist2 = re.compile(r"LBC_HIST2[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
+        reHist10 = re.compile(r"LBC_HIST10[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         reLruHash = re.compile(
-            "LBC_LRU_HASH[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+            r"LBC_LRU_HASH[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         rePerHash = re.compile(
-            "LBC_PERCPU_HASH[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+            r"LBC_PERCPU_HASH[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         rePerArray = re.compile(
-            "LBC_PERCPU_Array[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+            r"LBC_PERCPU_Array[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         reLruPerHash = re.compile(
-            "LBC_LRU_PERCPU_HASH[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_ \\[\\]]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+            r"LBC_LRU_PERCPU_HASH[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_ \[\]]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         reStack = re.compile(
-            "LBC_STACK[ \\t]*\\([ \\t]*[a-zA-Z0-9_]+[ \\t]*,[ \\t]*[a-zA-Z0-9_]+[ \\t]*\\)[ \\t]*;")
+            r"LBC_STACK[ \t]*\([ \t]*[a-zA-Z0-9_]+[ \t]*,[ \t]*[a-zA-Z0-9_]+[ \t]*\)[ \t]*;")
         self._reMaps = {
             'hash': reHash,
             'array': reArray,
+            'hist2': reHist2,
+            'hist10': reHist10,
             'lruHash': reLruHash,
             'perHash': rePerHash,
             'perArray': rePerArray,
@@ -59,12 +64,17 @@ class ClbcSymbol(object):
                     l = self.__reInBrackets.findall(e)[0]
                     m, other = l.split(",", 1)
                     ds[m.strip()] = {'type': t, "ktype": 'u32', "vtype": 'u64[127]'}
+            elif t in ('hist2', "hist10"):
+                for e in es:
+                    m = self.__reInBrackets.findall(e)[0]
+                    ds[m.strip()] = {'type': t, "ktype": 'int', "vtype": 'long'}
             else:
                 for e in es:
                     l = self.__reInBrackets.findall(e)[0]
                     m, k, v, other = l.split(",", 3)
                     ds[m.strip()] = {'type': t, "ktype": k.strip(), "vtype": v.strip()}
         return ds
+
 
 if __name__ == "__main__":
     sym = ClbcSymbol()

@@ -186,7 +186,7 @@ class CparsePahole(CexecCmd):
         return dStruct
 
     def parseType(self, t):
-        if t.startswith('struct'):
+        if t.startswith('struct '):
             return self._getStruct(t)
         else:
             return self._getTop(t)
