@@ -1,0 +1,43 @@
+# -*- coding: utf-8 -*-
+"""
+-------------------------------------------------
+   File Name：     attach.py
+   Description :
+   Author :       liaozhaoyan
+   date：          2022/6/15
+-------------------------------------------------
+   Change Activity:
+                   2022/6/15:
+-------------------------------------------------
+"""
+__author__ = 'liaozhaoyan'
+
+from signal import pause
+from pylcc.lbcBase import ClbcBase
+
+bpfPog = r"""
+#include "lbc.h"
+
+SEC("kprobe/*")
+int j_wake_up_new_task2(struct pt_regs *ctx)
+{
+    struct task_struct* parent = (struct task_struct *)PT_REGS_PARM1(ctx);
+
+    bpf_printk("hello attach, parent: %d\n", _(parent->tgid));
+    return 0;
+}
+
+char _license[] SEC("license") = "GPL";
+"""
+
+
+class Cattach(ClbcBase):
+    def __init__(self):
+        super(Cattach, self).__init__("attach", bpf_str=bpfPog, attach=0)
+        self.attachKprobe("j_wake_up_new_task2", "wake_up_new_task")
+        pause()
+
+
+if __name__ == "__main__":
+    attach = Cattach()
+    pass
