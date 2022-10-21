@@ -32,7 +32,6 @@ char _license[] SEC("license") = "GPL";
 class CtraceUprobe(ClbcBase):
     def __init__(self):
         super(CtraceUprobe, self).__init__("traceUprobe", bpf_str=bpfPog, attach=0)
-
         self.traceUprobes("call_symbol", -1, "bash:readline")
         pause()
 
