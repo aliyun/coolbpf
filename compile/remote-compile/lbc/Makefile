@@ -13,6 +13,7 @@ INCLUDES := -I$(OUTPUT) -I$(INC) -Iinclude -Ibpf -Ilibbpf/include/uapi
 CFLAGS := -g -fPIC $(INCLUDES)
 ARCH := $(shell uname -m)
 CARCH := $(shell uname -m | sed 's/x86_64/x86/')
+LIB_Z_ELF_BFD_OBJ := /root/staticlib/x86_64/libz.a /root/staticlib/x86_64/libelf.a
 
 SO = bpf.so
 SOURCE = $(wildcard ${SRC}/*.c)
@@ -36,6 +37,7 @@ $(OUTPUT) $(OUTPUT)/libbpf:
 
 # build libbpf.a
 $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPUT)/libbpf
+	touch src/bpf_init.c
 	$(MAKE) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1
 	cp $(LIBBPF_SRC)/libbpf.a ./
 
@@ -78,7 +80,5 @@ $(SRC)/lbc_static.o: $(SRC)/lbc_static.c $(SKEL) $(SRC)/perf_event_attr.h
 
 OBJS=$(SRC)/bpf_init.o $(SRC)/perf_event_attr.o $(SRC)/cJSON.o $(SRC)/lbc_static.o
 
-$(SO): %: $(OBJECT) $(LIBBPF_OBJ) $(wildcard $(INC)/%.h) | $(OUTPUT)
-	$(CC) $(CFLAGS) -shared -fPIC -lelf -lz -o $@ $^
-
-
+$(SO): %: $(OBJECT) $(LIBBPF_OBJ) $(LIB_Z_ELF_BFD_OBJ) $(wildcard $(INC)/%.h) | $(OUTPUT)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $^

@@ -26,6 +26,8 @@ dbDir = os.path.join(rootDir, "hive/db")
 btfDir = os.path.join(rootDir, "hive/btf")
 compileDir = os.path.join(rootDir, "lbc")
 koBuildDir = os.path.join(rootDir, "lbc/ko")
+elfSoDir = os.path.join(rootDir, "lbc/elf_sym")
+
 soFile = "bpf.so"
 objFile = ".output/lbc.bpf.o"
 dfFile = "pre.db"
@@ -80,6 +82,7 @@ class CsurfServer(object):
             "c": self._compileSo,
             "obj": self._compileObj,
             "ko": self._koBuild,
+            "elf_so": self._sendElfSo,
         }
         self._reSql = re.compile(r"[^a-zA-Z0-9_% ]")
         self._lock = lock
@@ -162,6 +165,19 @@ class CsurfServer(object):
         dSend['res'] = i.getFunc(t)
         return dSend
 
+    def _sendElfSo(self, dRecv):
+        arch = self._setupArch(dRecv)
+        soPath = os.path.join(elfSoDir, arch)
+        os.chdir(soPath)
+        dSend = {'ver': dRecv['ver'], 'arch': arch}
+        try:
+            with open("syms.so", "rb") as f:
+                dSend['so'] = segEncode(f.read()).decode()
+                dSend['log'] = "ok."
+        except IOError:
+            dSend['log'] = "read elf so file failed."
+        return dSend
+
     def _sendBtf(self, dRecv):
         arch = self._setupArch(dRecv)
         btfPath = os.path.join(btfDir, arch)
@@ -236,6 +252,7 @@ class CsurfServer(object):
                                                                                                   self._transArch(arch),
                                                                                                   dRecv['env']))
             print(dSend['clog'])
+            # self._c.cmd("strip -x %s" % filePath)
             try:
                 with open(filePath, 'rb') as f:
                     dSend[k] = base64.b64encode(f.read()).decode()
