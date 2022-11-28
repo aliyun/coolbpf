@@ -11,11 +11,6 @@ struct clcc_call_stack{
     int depth;
 };
 
-struct ksym {
-    long addr;
-    char *name;
-};
-
 static const char * clcc_funcs[] = {
     "lbc_bpf_init",
     "lbc_bpf_exit",
@@ -39,7 +34,6 @@ static const char * clcc_funcs[] = {
     "lbc_attach_netns",
     "lbc_attach_xdp",
     "lbc_get_map_types",
-    "ksym_search",
 };
 
 struct clcc_struct{
@@ -232,17 +226,10 @@ struct clcc_struct{
      */
     int  (*attach_xdp)(const char* func, int ifindex);
     const char* (*get_map_types)(void);
-    /*
-     * member: ksym_search
-     * description: get symbol from kernel addr.
-     * arg1: kernnel addr.
-     * return: symbol name and address information.
-     */
-    struct ksym* (*ksym_search)(unsigned long addr);
 };
 
 
-int clcc_setup_syms(void* handle, struct clcc_struct *pclcc)
+static inline int clcc_setup_syms(void* handle, struct clcc_struct *pclcc)
 {
     void** head = (void** )&(pclcc->init);
     void* func = NULL;
@@ -266,7 +253,7 @@ int clcc_setup_syms(void* handle, struct clcc_struct *pclcc)
  * arg1: so path to load
  * return: struct clcc_struct *
  */
-struct clcc_struct* clcc_init(const char* so_path)
+static inline struct clcc_struct* clcc_init(const char* so_path)
 {
     void *handle = NULL;
     struct clcc_struct *pclcc = NULL;
@@ -304,7 +291,7 @@ open_failed:
  * arg1:  struct clcc_struct *p; setup from clcc_init function, mem will be free in this function.
  * return: None
  */
-void clcc_deinit(struct clcc_struct* pclcc)
+static inline void clcc_deinit(struct clcc_struct* pclcc)
 {
     void *handle = pclcc->handle;
 
@@ -321,10 +308,10 @@ void clcc_deinit(struct clcc_struct* pclcc)
  * arg4: pclcc: setup from clcc_init function
  * return: 0 if success.
  */
-int clcc_get_call_stack(int table_id,
-                               int stack_id,
-                               struct clcc_call_stack *pstack,
-                               struct clcc_struct *pclcc) {
+static inline int clcc_get_call_stack(int table_id,
+                                      int stack_id,
+                                      struct clcc_call_stack *pstack,
+                                      struct clcc_struct *pclcc) {
     int i;
     int ret;
 
@@ -342,24 +329,6 @@ int clcc_get_call_stack(int table_id,
         }
     }
     return 0;
-}
-
-/*
- * function name: clcc_print_stack
- * description:  print call stack
- * arg1: pstack:  struct clcc_call_stack, stack to print, setup from clcc_get_call_stack.
- * arg2: pclcc: setup from clcc_init function
- * return: None.
- */
-void clcc_print_stack(struct clcc_call_stack *pstack,
-                             struct clcc_struct *pclcc){
-    int i;
-    struct ksym* sym;
-
-    for (i = 0; i < pstack->depth; i ++) {
-        sym = pclcc->ksym_search(pstack->stack[i]);
-        printf("\t0x%lx: %s+0x%lx\n", pstack->stack[i], sym->name, pstack->stack[i] - sym->addr);
-    }
 }
 
 #endif
