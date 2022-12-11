@@ -8241,7 +8241,7 @@ struct bpf_program *bpf_program_clone(const struct bpf_program *prog)
 		pr_warn("alloc memory failed for cloned bpf program\n");
 		return NULL;
 	}
-	memcpy(&clone_prog, prog, sizeof(struct bpf_program));
+	memcpy(clone_prog, prog, sizeof(struct bpf_program));
 	return clone_prog;
 }
 
