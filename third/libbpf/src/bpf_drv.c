@@ -180,9 +180,6 @@ int bpf_drv_attach_tracepoint(const struct bpf_program *prog, const char *tp_cat
 int bpf_drv_attach_perf_events(const struct bpf_program *prog, int pfd)
 {
     struct ebpfdrv_attr attr = {};
-    int prog_fd;
-
-    attr.prog_fd = prog_fd;
 
     attr.prog_fd = bpf_program__fd(prog);
     attr.perf_events.pfd = pfd;
