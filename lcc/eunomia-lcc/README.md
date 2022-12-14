@@ -1,0 +1,84 @@
+# eunomia-lcc
+
+use eunomia-bpf as a frontend for Coolbpf libbpf and kernel bpf supported.
+
+使用 [eunomia-bpf](https://gitee.com/anolis/eunomia) 作为 Coolbpf 的用户态开发库，让 Coolbpf 也能：
+
+- 在编写 eBPF 程序或工具时只编写 libbpf 内核态代码，自动获取内核态导出信息，自动生成命令行参数、直方图输出等；
+- 使用 WASM 进行用户态交互程序的开发，在 WASM 虚拟机内部控制整个 eBPF 程序的加载和执行，以及处理相关数据；
+- 可以将预编译的 eBPF 程序打包为通用的 JSON 或 WASM 模块，跨架构和内核版本进行分发，无需重新编译即可动态加载运行。
+
+同时保留 Coolbpf 的低版本兼容、BTF 自动获取、远程编译等特性，让 eBPF 程序的开发更加简便易行。
+
+## example: signsoop
+
+以编译 example 为例，首先确保 eunomia-bpf 已经作为一个 submodule 加入到项目中：
+
+```bash
+git submodule update --init --recursive
+```
+
+然后在项目根目录下执行，编译 eunomia-bpf 的编译工具链和运行时，在编译时需要安装 `libclang`, `libelf` and `zlib` 库：
+
+```bash
+cd lcc/eunomia-lcc
+make
+```
+
+编译完成后可以看到编译工具 `ecc` 和运行工具 `ecli`, 可以使用 `ecc` 编译 example 中的 eBPF 程序：
+
+```console
+$ ./ecc example/sigsnoop.bpf.c example/sigsnoop.h
+Compiling bpf object...
+Generating export types...
+Packing ebpf object and config into package.json...
+```
+
+或者在 x86 上也可以用 docker 编译：
+
+```bash
+cd example
+docker run -it -v `pwd`/:/src/ yunwei37/ebpm:latest
+```
+
+可以使用 `ecli` 运行编译后的程序：
+
+```console
+$ sudo ./ecli example/package.json
+TIME     PID     TPID    SIG     RET     COMM    
+20:43:44  21276  3054    0       0       cpptools-srv
+20:43:44  22407  3054    0       0       cpptools-srv
+20:43:44  20222  3054    0       0       cpptools-srv
+20:43:44  8933   3054    0       0       cpptools-srv
+20:43:44  2915   2803    0       0       node
+20:43:44  2943   2803    0       0       node
+20:43:44  31453  3054    0       0       cpptools-srv
+
+$ sudo ./ecli example/package.json  -h
+Usage: sigsnoop_bpf [--help] [--version] [--verbose] [--filtered_pid VAR] [--target_signal VAR] [--failed_only]
+
+Trace standard and real-time signals.
+
+Optional arguments:
+  -h, --help            shows help message and exits 
+  -v, --version         prints version information and exits 
+  --verbose             prints libbpf debug information 
+  --filtered_pid        Process ID to trace. If set to 0, trace all processes. 
+  --target_signal       Signal number to trace. If set to 0, trace all signals. 
+  --failed_only         Trace only failed signals. If set to false, trace all signals. 
+
+Built with eunomia-bpf framework.
+
+$ sudo ./ecli example/package.json --filtered_pid 3024
+TIME     PID     TPID    SIG     RET     COMM    
+16:38:33  3024   2920    0       0       node
+16:38:34  3024   2920    0       0       node
+16:38:34  3024   2920    0       0       node
+16:38:35  3024   2920    0       0       node
+16:38:35  3024   2920    0       0       node
+16:38:36  3024   2920    0       0       node
+```
+
+## 更多信息
+
+请参考：<https://gitee.com/anolis/eunomia>

@@ -6,8 +6,11 @@
 
 #define MAX_ENTRIES	10240
 
+/// "Process ID to trace. If set to 0, trace all processes."
 const volatile pid_t filtered_pid = 0;
+/// "Signal number to trace. If set to 0, trace all signals."
 const volatile int target_signal = 0;
+/// "Trace only failed signals. If set to false, trace all signals."
 const volatile bool failed_only = false;
 
 struct {
@@ -142,4 +145,5 @@ int sig_trace(struct trace_event_raw_signal_generate *ctx)
 	return 0;
 }
 
+/// "Trace standard and real-time signals."
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
