@@ -1,4 +1,4 @@
 ecli
 ecc
-example/*.o
-example/*.json
+example/*/*.o
+example/*/*.json

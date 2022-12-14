@@ -80,7 +80,53 @@ TIME     PID     TPID    SIG     RET     COMM
 16:38:36  3024   2920    0       0       node
 ```
 
-### 
+### runqlat
+
+This program summarizes scheduler run queue latency as a histogram, showing
+how long tasks spent waiting their turn to run on-CPU.
+
+```console
+$ ./ecc runqlat.bpf.c runqlat.h
+Compiling bpf object...
+Generating export types...
+Packing ebpf object and config into package.json...
+$ sudo ./ecli package.json
+     (unit)              : count    distribution
+         0 -> 1          : 69       |**********************************      |
+         2 -> 3          : 58       |*****************************           |
+         4 -> 7          : 42       |*********************                   |
+         8 -> 15         : 69       |**********************************      |
+        16 -> 31         : 80       |****************************************|
+        32 -> 63         : 28       |**************                          |
+        64 -> 127        : 10       |*****                                   |
+       128 -> 255        : 6        |***                                     |
+       256 -> 511        : 1        |                                        |
+       512 -> 1023       : 1        |                                        |
+      1024 -> 2047       : 0        |                                        |
+      2048 -> 4095       : 1        |                                        |
+      4096 -> 8191       : 0        |                                        |
+      8192 -> 16383      : 1        |                                        |
+
+$ sudo ./ecli package.json -h
+Usage: runqlat_bpf [--help] [--version] [--verbose] [--filter_cg] [--targ_per_process] [--targ_per_thread] [--targ_per_pidns] [--targ_ms] [--targ_tgid VAR]
+
+Summarize run queue (scheduler) latency as a histogram
+
+Optional arguments:
+  -h, --help            shows help message and exits 
+  -v, --version         prints version information and exits 
+  --verbose             prints libbpf debug information 
+  --filter_cg           set value of bool variable filter_cg 
+  --targ_per_process    print a histogram per process ID 
+  --targ_per_thread     print a histogram per thread ID 
+  --targ_per_pidns      print a histogram per PID namespace 
+  --targ_ms             millisecond histogram 
+  --targ_tgid           trace this PID only 
+
+Built with eunomia-bpf framework.
+```
+
+
 
 ## 更多信息
 
