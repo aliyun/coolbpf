@@ -153,6 +153,49 @@ Optional arguments:
 Built with eunomia-bpf framework.
 ```
 
+### opensnoop
+
+Demonstrations of opensnoop, the Linux eBPF/bcc version.
+
+opensnoop traces the open() syscall system-wide, and prints various details.
+Example output:
+
+```console
+$ sudo ecli package.json -h
+Usage: opensnoop_bpf [--help] [--version] [--verbose] [--pid_target VAR] [--tgid_target VAR] [--uid_target VAR] [--failed]
+
+Trace open family syscalls.
+
+Optional arguments:
+  -h, --help    shows help message and exits 
+  -v, --version prints version information and exits 
+  --verbose     prints libbpf debug information 
+  --pid_target  Process ID to trace 
+  --tgid_target Thread ID to trace 
+  --uid_target  User ID to trace 
+  -f, --failed  trace only failed events 
+
+Built with eunomia-bpf framework.
+
+$ sudo ecli examples/bpftools/opensnoop/package.json
+TIME     TS      PID     UID     RET     FLAGS   COMM    FNAME   
+20:31:50  0      1       0       51      524288  systemd /proc/614/cgroup
+20:31:50  0      33182   0       25      524288  ecli    /etc/localtime
+20:31:53  0      754     0       6       0       irqbalance /proc/interrupts
+20:31:53  0      754     0       6       0       irqbalance /proc/stat
+20:32:03  0      754     0       6       0       irqbalance /proc/interrupts
+20:32:03  0      754     0       6       0       irqbalance /proc/stat
+20:32:03  0      632     0       7       524288  vmtoolsd /etc/mtab
+20:32:03  0      632     0       9       0       vmtoolsd /proc/devices
+
+$ sudo ecli examples/bpftools/opensnoop/package.json --pid_target 754
+TIME     TS      PID     UID     RET     FLAGS   COMM    FNAME   
+20:34:13  0      754     0       6       0       irqbalance /proc/interrupts
+20:34:13  0      754     0       6       0       irqbalance /proc/stat
+20:34:23  0      754     0       6       0       irqbalance /proc/interrupts
+20:34:23  0      754     0       6       0       irqbalance /proc/stat
+```
+
 ## 更多信息
 
 请参考：<https://gitee.com/anolis/eunomia>
