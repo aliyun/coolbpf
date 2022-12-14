@@ -1,0 +1,3 @@
+[submodule "third/eunomia-bpf"]
+	path = third/eunomia-bpf
+	url = https://github.com/eunomia-bpf/eunomia-bpf
