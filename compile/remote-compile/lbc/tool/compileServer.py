@@ -281,6 +281,7 @@ class ClocalTcpServer(Process):
         self._recv_data(client_socket)
         client_socket.close()
 
+
 if __name__ == "__main__":
     server = ClocalTcpServer(LBC_COMPILE_PORT)
     server.start()

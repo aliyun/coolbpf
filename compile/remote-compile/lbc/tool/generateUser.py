@@ -16,12 +16,12 @@ import re
 import os
 import sys
 import json
-import shlex
-from subprocess import PIPE, Popen
+import hashlib
 from checkSymbol import ClbcSymbol
 # from parseArgs import CpaserGdbArgs
 from parsePahole import CparsePahole
-import hashlib
+from objelf import CobjElf
+from ffiGen import CffiGen
 
 
 class CgenerateUser(object):
@@ -30,6 +30,7 @@ class CgenerateUser(object):
         self._skel = os.path.join(self.__path, '.output/lbc.skel.h')
         self._bpfc = os.path.join(self.__path, "bpf/lbc.bpf.c")
         self._bpfo = os.path.join(self.__path, '.output/lbc.bpf.o')
+        self._ffiDb = os.path.join(self.__path, "lbc.db")
         self._reMaps = re.compile("struct bpf_map \\*[A-Za-z0-9_]+;")
 
     def upSkel(self, skel):
@@ -53,6 +54,17 @@ class CgenerateUser(object):
         with open(os.path.join(self.__path, oFile), 'w') as f:
             f.write(s)
 
+    def _genFFI(self, ffiList):
+        if os.path.exists(self._ffiDb):
+            os.remove(self._ffiDb)
+        e = CobjElf(self._bpfo)
+        e.toDb("lbc", self._ffiDb)
+        g = CffiGen(self._ffiDb)
+        for ffi in ffiList:
+            g.gen(ffi)
+        return g.out()
+        # os.remove(self._ffiDb)
+
     def genModelSymbols(self, ver, arch, env=""):
         a = CparsePahole(self._bpfo)
         dOut = {}
@@ -61,18 +73,30 @@ class CgenerateUser(object):
             sym = ClbcSymbol()
             s = f.read()
             s += env
-            dOut['hash'] = hashlib.sha256(s).hexdigest()
+            dOut['hash'] = hashlib.sha256(s.encode()).hexdigest()
+            ffiList = []
             ds = sym.findEvent(s)
             for k, v in ds.items():
-                dMaps[k] ={ 'type': v['type'], 'ktype': None, "vtype": a.parseType(v['vtype'])}
+                dMaps[k] = {'type': v['type'],
+                            "fktype": "", 'ktype': None,
+                            "fvtype": v['vtype'], "vtype": a.parseType(v['vtype'])}
+                if v['vtype'] not in ffiList:
+                    ffiList.append(v['vtype'])
             hs = sym.findMaps(s)
             for k, v in hs.items():
-                dMaps[k] = {'type': v['type'], 'ktype': a.parseType(v['ktype']), "vtype": a.parseType(v['vtype'])}
+                dMaps[k] = {'type': v['type'],
+                            "fktype": v['ktype'], 'ktype': a.parseType(v['ktype']),
+                            "fvtype": v['vtype'], "vtype": a.parseType(v['vtype'])}
+                if v['ktype'] not in ffiList:
+                    ffiList.append(v['ktype'])
+                if v['vtype'] not in ffiList:
+                    ffiList.append(v['vtype'])
         dOut['maps'] = dMaps
         dOut['arch'] = arch
         dOut['kern_version'] = ver
-        print(dOut['kern_version'])
-        s = json.dumps(dOut).replace('"', '\\"')
+        dOut["ffi"] = self._genFFI(ffiList)
+        print(dOut['ffi'])
+        s = json.dumps(dOut)
         return """
 
 #include "lbc_static.h"
@@ -80,11 +104,11 @@ class CgenerateUser(object):
         
 const char* lbc_get_map_types(void)
 {
-    const char* s = "%s";
+    const char* s = %s;
     return s;
 }  
      
-        """ % (s)
+        """ % (json.dumps(s))
 
 
 if __name__ == "__main__":

@@ -45,28 +45,28 @@ bpf/vmlinux.h: $(wildcard vmlinux/*.h)
 	ln -sf ../../hive/header/$(ARCH)/vmlinux-$(VMLINUX_VERSION).h bpf/vmlinux.h
 	python tool/replaceHead.py bpf/lbc.org.h bpf/vmlinux.h bpf/lbc.h
 
-.PRECIOUS: $(OUTPUT)/%.bpf.o
+.PRECIOUS: $(OUTPUT)/lbc.bpf.o
 
-.PRECIOUS: $(OUTPUT)/%.skel.h
+.PRECIOUS: $(OUTPUT)/lbc.skel.h
 
 # compile bpf program
-$(OUTPUT)/%.bpf.o: bpf/%.bpf.c $(LIBBPF_OBJ) $(wildcard bpf/%.h) bpf/vmlinux.h | $(OUTPUT)
+$(OUTPUT)/lbc.bpf.o: bpf/lbc.bpf.c $(LIBBPF_OBJ) $(wildcard bpf/lbc.h) bpf/vmlinux.h | $(OUTPUT)
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(CARCH) $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) $(CLFLAG) -c $(filter %.c,$^) -o $@
 #	$(CC) $(CFLAGS) -c $(filter %.c,$^) -w
 #	$(LLVM_STRIP) -g $@ # strip useless DWARF info
 
 # gen skeleton header file
-$(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT)
+$(OUTPUT)/lbc.skel.h: $(OUTPUT)/lbc.bpf.o
 	$(BPFTOOL) gen skeleton $< > $@
 
-$(SRC)/bpf_init.c: $(SKEL)
-	python tool/generateUser.py $(VMLINUX_VERSION) $(ARCH) $(CLFLAG)
+$(SRC)/bpf_init.c: $(OUTPUT)/lbc.skel.h
+	python3 tool/generateUser.py $(VMLINUX_VERSION) $(ARCH) $(CLFLAG)
 
 # link pingtrace elf
 touch: $(SKEL)
 	python tool/generateUser.py
 
-$(SRC)/bpf_init.o: $(SRC)/bpf_init.c $(SKEL)  $(wildcard $(INC)/%.h)
+$(SRC)/bpf_init.o: $(SRC)/bpf_init.c
 	$(CC) $(CFLAGS) -fPIC -c $< -o $@
 
 $(SRC)/perf_event_attr.o: $(SRC)/perf_event_attr.c $(SRC)/perf_event_attr.h $(SRC)/cJSON.h
@@ -80,5 +80,5 @@ $(SRC)/lbc_static.o: $(SRC)/lbc_static.c $(SKEL) $(SRC)/perf_event_attr.h
 
 OBJS=$(SRC)/bpf_init.o $(SRC)/perf_event_attr.o $(SRC)/cJSON.o $(SRC)/lbc_static.o
 
-$(SO): %: $(OBJECT) $(LIBBPF_OBJ) $(LIB_Z_ELF_BFD_OBJ) $(wildcard $(INC)/%.h) | $(OUTPUT)
+$(SO): %: $(OBJS) $(LIBBPF_OBJ) $(LIB_Z_ELF_BFD_OBJ)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $^
