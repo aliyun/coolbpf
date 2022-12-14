@@ -42,7 +42,7 @@ Packing ebpf object and config into package.json...
 docker run -it -v `pwd`/:/src/ yunwei37/ebpm:latest
 ```
 
-可以使用 `ecli` 运行编译后的程序：
+可以使用 `ecli` 运行编译后的程序，可以通过内核态代码中的全局变量指定命令行参数，生成帮助信息等：
 
 ```console
 $ sudo ./ecli package.json
@@ -79,6 +79,33 @@ TIME     PID     TPID    SIG     RET     COMM
 16:38:35  3024   2920    0       0       node
 16:38:36  3024   2920    0       0       node
 ```
+
+### minimal
+
+`minimal` is just that – a minimal practical BPF application example. It
+doesn't use or require BPF CO-RE, so should run on quite old kernels. It
+installs a tracepoint handler which is triggered once every second. It uses
+`bpf_printk()` BPF helper to communicate with the world. 
+
+```console
+$ ./ecc minimal.bpf.c
+Compiling bpf object...
+Packing ebpf object and config into package.json...
+$ sudo ecli package.json
+Runing eBPF program...
+```
+
+To see it's output,
+read `/sys/kernel/debug/tracing/trace_pipe` file as a root:
+
+```shell
+$ sudo cat /sys/kernel/debug/tracing/trace_pipe
+           <...>-3840345 [010] d... 3220701.101143: bpf_trace_printk: BPF triggered from PID 3840345.
+           <...>-3840345 [010] d... 3220702.101265: bpf_trace_printk: BPF triggered from PID 3840345.
+```
+
+`minimal` is great as a bare-bones experimental playground to quickly try out
+new ideas or BPF features.
 
 ### runqlat
 
@@ -125,8 +152,6 @@ Optional arguments:
 
 Built with eunomia-bpf framework.
 ```
-
-
 
 ## 更多信息
 
