@@ -51,8 +51,10 @@ class CparsePahole(CexecCmd):
                                  'u32': 'I',
                                  'long long': 'q',
                                  'long': 'l',
+                                 'long int': 'l',
                                  'unsigned long': 'L',
                                  'unsigned long long': 'Q',
+                                 'long long unsigned int': 'Q',
                                  '__s64': 'q',
                                  '__u64': 'Q',
                                  's64': 'q',
@@ -150,7 +152,7 @@ class CparsePahole(CexecCmd):
         dMems['offset'] = int(offset)
         dMems['size'] = int(size)
         if dMems['array']:
-            dMems['size'] /= dMems['array']
+            dMems['size'] = int(dMems['size'] / dMems['array'])
         return dMems
 
     def _getStruct(self, sStruct):

@@ -63,11 +63,12 @@ class ClbcSymbol(object):
                 for e in es:
                     l = self.__reInBrackets.findall(e)[0]
                     m, other = l.split(",", 1)
-                    ds[m.strip()] = {'type': t, "ktype": 'u32', "vtype": 'u64[127]'}
+                    # vtype u64[127] ,127 is a const value for stack,  should not change!!
+                    ds[m.strip()] = {'type': t, "ktype": 'unsigned int', "vtype": 'long long unsigned int[127]'}
             elif t in ('hist2', "hist10"):
                 for e in es:
                     m = self.__reInBrackets.findall(e)[0]
-                    ds[m.strip()] = {'type': t, "ktype": 'int', "vtype": 'long'}
+                    ds[m.strip()] = {'type': t, "ktype": 'int', "vtype": 'long int'}
             else:
                 for e in es:
                     l = self.__reInBrackets.findall(e)[0]
