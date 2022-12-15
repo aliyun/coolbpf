@@ -1,0 +1,3 @@
+[submodule "third/eunomia-bpf"]
+	path = third/eunomia-bpf
+	url = https://gitee.com/anolis/eunomia
