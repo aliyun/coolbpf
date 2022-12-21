@@ -4590,21 +4590,21 @@ static int btf_dedup_remap_types(struct btf_dedup *d)
  */
 struct btf *btf__load_vmlinux_btf(void)
 {
-	struct {
-		const char *path_fmt;
-	} locations[] = {
+	const char *locations[] = {
+		"%1$s/tools/vmlinux-%2$s",
 		/* try canonical vmlinux BTF through sysfs first */
-		{ "/sys/kernel/btf/vmlinux" },
-		/* fall back to trying to find vmlinux ELF on disk otherwise */
-		{ "/boot/vmlinux-%1$s" },
-		{ "/lib/modules/%1$s/vmlinux-%1$s" },
-		{ "/lib/modules/%1$s/build/vmlinux" },
-		{ "/usr/lib/modules/%1$s/kernel/vmlinux" },
-		{ "/usr/lib/debug/boot/vmlinux-%1$s" },
-		{ "/usr/lib/debug/boot/vmlinux-%1$s.debug" },
-		{ "/usr/lib/debug/lib/modules/%1$s/vmlinux" },
+		"/sys/kernel/btf/vmlinux",
+		/* fall back to trying to find vmlinux on disk otherwise */
+		"/boot/vmlinux-%1$s",
+		"/lib/modules/%1$s/vmlinux-%1$s",
+		"/lib/modules/%1$s/build/vmlinux",
+		"/usr/lib/modules/%1$s/kernel/vmlinux",
+		"/usr/lib/debug/boot/vmlinux-%1$s",
+		"/usr/lib/debug/boot/vmlinux-%1$s.debug",
+		"/usr/lib/debug/lib/modules/%1$s/vmlinux",
 	};
 	char path[PATH_MAX + 1];
+	char *sysak_env_path;
 	struct utsname buf;
 	struct btf *btf;
 	int i, err;
@@ -4612,7 +4612,14 @@ struct btf *btf__load_vmlinux_btf(void)
 	uname(&buf);
 
 	for (i = 0; i < ARRAY_SIZE(locations); i++) {
-		snprintf(path, PATH_MAX, locations[i].path_fmt, buf.release);
+		if (i == 0) {
+			sysak_env_path = getenv("SYSAK_WORK_PATH");
+			if (sysak_env_path)
+				snprintf(path, PATH_MAX, locations[i], sysak_env_path, buf.release);
+			else 
+				continue;
+		} else 
+			snprintf(path, PATH_MAX, locations[i], buf.release);
 
 		if (access(path, R_OK))
 			continue;
