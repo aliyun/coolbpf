@@ -9,28 +9,23 @@ endif
 COOLBPF_VERSION := 0.1.0
 COOLBPF_MAJOR_VERSION := $(firstword $(subst ., ,$(COOLBPF_VERSION)))
 
-INCLUDES := -I. 
-ALL_CFLAGS := $(INCLUDES)
-
-SHARED_CFLAGS += -fPIC -fvisibility=hidden -DSHARED
-
-CFLAGS ?= -g -O2 -Werror -Wall -std=gnu89
-ALL_CFLAGS += $(CFLAGS) -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
-ALL_LDFLAGS += $(LDFLAGS)
-ifdef NO_PKG_CONFIG
-	ALL_LDFLAGS += -lelf -lz -lbpf
-else
-	PKG_CONFIG ?= pkg-config
-	ALL_CFLAGS += $(shell $(PKG_CONFIG) --cflags libelf zlib libbpf)
-	ALL_LDFLAGS += $(shell $(PKG_CONFIG) --libs libelf zlib libbpf)
-endif
-
 OBJDIR ?= .
 SHARED_OBJDIR := $(OBJDIR)/sharedobjs
 STATIC_OBJDIR := $(OBJDIR)/staticobjs
 OBJS := coolbpf.o 
 SHARED_OBJS := $(addprefix $(SHARED_OBJDIR)/,$(OBJS))
 STATIC_OBJS := $(addprefix $(STATIC_OBJDIR)/,$(OBJS))
+
+DESTDIR ?=
+
+INCLUDES := -I. -I$(DESTDIR)
+ALL_CFLAGS := $(INCLUDES)
+
+SHARED_CFLAGS += -fPIC -fvisibility=hidden -DSHARED
+
+CFLAGS ?= -g -O2 -Werror -Wall -std=gnu89
+ALL_CFLAGS += $(CFLAGS) -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+ALL_LDFLAGS += -L$(DESTDIR) -lbpf $(LDFLAGS)
 
 STATIC_LIBS := $(OBJDIR)/coolbpf.a
 ifndef BUILD_STATIC_ONLY
@@ -44,8 +39,6 @@ HEADERS := coolbpf.h
 PC_FILE := $(OBJDIR)/coolbpf.pc
 
 INSTALL = install
-
-DESTDIR ?=
 
 ifeq ($(filter-out %64 %64be %64eb %64le %64el s390x, $(shell uname -m)),)
 	LIBSUBDIR := lib64
@@ -81,8 +74,7 @@ $(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION): $(OBJDIR)/coolbpf.so.$(COOLBPF_VE
 
 $(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION): $(SHARED_OBJS)
 	$(call msg,CC,$@)
-	$(Q)$(CC) -shared \
-		  -Wl,-soname,coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
+	$(Q)$(CC) -shared -Wl,-soname,coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
 		  $^ $(ALL_LDFLAGS) -o $@
 
 $(OBJDIR)/coolbpf.pc:
