@@ -1,0 +1,145 @@
+ifeq ($(V),1)
+	Q =
+	msg =
+else
+	Q = @
+	msg = @printf '  %-8s %s%s\n' "$(1)" "$(2)" "$(if $(3), $(3))";
+endif
+
+COOLBPF_VERSION := 0.1.0
+COOLBPF_MAJOR_VERSION := $(firstword $(subst ., ,$(COOLBPF_VERSION)))
+
+INCLUDES := -I. 
+ALL_CFLAGS := $(INCLUDES)
+
+SHARED_CFLAGS += -fPIC -fvisibility=hidden -DSHARED
+
+CFLAGS ?= -g -O2 -Werror -Wall -std=gnu89
+ALL_CFLAGS += $(CFLAGS) -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
+ALL_LDFLAGS += $(LDFLAGS)
+ifdef NO_PKG_CONFIG
+	ALL_LDFLAGS += -lelf -lz -lbpf
+else
+	PKG_CONFIG ?= pkg-config
+	ALL_CFLAGS += $(shell $(PKG_CONFIG) --cflags libelf zlib libbpf)
+	ALL_LDFLAGS += $(shell $(PKG_CONFIG) --libs libelf zlib libbpf)
+endif
+
+OBJDIR ?= .
+SHARED_OBJDIR := $(OBJDIR)/sharedobjs
+STATIC_OBJDIR := $(OBJDIR)/staticobjs
+OBJS := coolbpf.o 
+SHARED_OBJS := $(addprefix $(SHARED_OBJDIR)/,$(OBJS))
+STATIC_OBJS := $(addprefix $(STATIC_OBJDIR)/,$(OBJS))
+
+STATIC_LIBS := $(OBJDIR)/coolbpf.a
+ifndef BUILD_STATIC_ONLY
+	SHARED_LIBS := $(OBJDIR)/coolbpf.so \
+		       $(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
+		       $(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION)
+endif
+
+HEADERS := coolbpf.h
+
+PC_FILE := $(OBJDIR)/coolbpf.pc
+
+INSTALL = install
+
+DESTDIR ?=
+
+ifeq ($(filter-out %64 %64be %64eb %64le %64el s390x, $(shell uname -m)),)
+	LIBSUBDIR := lib64
+else
+	LIBSUBDIR := lib
+endif
+
+# By default let the pc file itself use ${prefix} in includedir/libdir so that
+# the prefix can be overridden at runtime (eg: --define-prefix)
+ifndef LIBDIR
+	LIBDIR_PC := $$\{prefix\}/$(LIBSUBDIR)
+else
+	LIBDIR_PC := $(LIBDIR)
+endif
+PREFIX ?= /usr
+LIBDIR ?= $(PREFIX)/$(LIBSUBDIR)
+INCLUDEDIR ?= $(PREFIX)/include
+UAPIDIR ?= $(PREFIX)/include
+
+TAGS_PROG := $(if $(shell which etags 2>/dev/null),etags,ctags)
+
+all: $(STATIC_LIBS) $(SHARED_LIBS) $(PC_FILE)
+
+$(OBJDIR)/coolbpf.a: $(STATIC_OBJS)
+	$(call msg,AR,$@)
+	$(Q)$(AR) rcs $@ $^
+
+$(OBJDIR)/coolbpf.so: $(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION)
+	$(Q)ln -sf $(^F) $@
+
+$(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION): $(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION)
+	$(Q)ln -sf $(^F) $@
+
+$(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION): $(SHARED_OBJS)
+	$(call msg,CC,$@)
+	$(Q)$(CC) -shared \
+		  -Wl,-soname,coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
+		  $^ $(ALL_LDFLAGS) -o $@
+
+$(OBJDIR)/coolbpf.pc:
+	$(Q)sed -e "s|@PREFIX@|$(PREFIX)|" \
+		-e "s|@LIBDIR@|$(LIBDIR_PC)|" \
+		-e "s|@VERSION@|$(COOLBPF_VERSION)|" \
+		< coolbpf.pc.template > $@
+
+$(STATIC_OBJDIR) $(SHARED_OBJDIR):
+	$(call msg,MKDIR,$@)
+	$(Q)mkdir -p $@
+
+$(STATIC_OBJDIR)/%.o: %.c | $(STATIC_OBJDIR)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(ALL_CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(SHARED_OBJDIR)/%.o: %.c | $(SHARED_OBJDIR)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(ALL_CFLAGS) $(SHARED_CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+define do_install
+	$(call msg,INSTALL,$1)
+	$(Q)if [ ! -d '$(DESTDIR)$2' ]; then		\
+		$(INSTALL) -d -m 755 '$(DESTDIR)$2';	\
+	fi;
+	$(Q)$(INSTALL) $(if $3,-m $3,) $1 '$(DESTDIR)$2'
+endef
+
+# Preserve symlinks at installation.
+define do_s_install
+	$(call msg,INSTALL,$1)
+	$(Q)if [ ! -d '$(DESTDIR)$2' ]; then		\
+		$(INSTALL) -d -m 755 '$(DESTDIR)$2';	\
+	fi;
+	$(Q)cp -fR $1 '$(DESTDIR)$2'
+endef
+
+install: all install_headers install_pkgconfig
+	$(call do_s_install,$(STATIC_LIBS) $(SHARED_LIBS),$(LIBDIR))
+
+install_headers:
+	$(call do_install,$(HEADERS),$(INCLUDEDIR),644)
+
+install_pkgconfig: $(PC_FILE)
+	$(call do_install,$(PC_FILE),$(LIBDIR)/pkgconfig,644)
+
+clean:
+	$(call msg,CLEAN)
+	$(Q)rm -rf *.o *.a *.so *.so.* *.pc $(SHARED_OBJDIR) $(STATIC_OBJDIR)
+
+.PHONY: cscope tags
+cscope:
+	$(call msg,CSCOPE)
+	$(Q)ls *.c *.h > cscope.files
+	$(Q)cscope -b -q -f cscope.out
+
+tags:
+	$(call msg,CTAGS)
+	$(Q)rm -f TAGS tags
+	$(Q)ls *.c *.h | xargs $(TAGS_PROG) -a

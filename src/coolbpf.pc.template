@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=${prefix}/include
+
+Name: coolbpf
+Description: BPF library
+Version: @VERSION@
+Libs: -L${libdir} -lcoolbpf
+Requires.private: libbpf
+Cflags: -I${includedir}
