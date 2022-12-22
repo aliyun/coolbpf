@@ -29,9 +29,9 @@ ALL_LDFLAGS += -L$(DESTDIR) -lbpf $(LDFLAGS)
 
 STATIC_LIBS := $(OBJDIR)/coolbpf.a
 ifndef BUILD_STATIC_ONLY
-	SHARED_LIBS := $(OBJDIR)/coolbpf.so \
-		       $(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
-		       $(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION)
+	SHARED_LIBS := $(OBJDIR)/libcoolbpf.so \
+		       $(OBJDIR)/libcoolbpf.so.$(COOLBPF_MAJOR_VERSION) \
+		       $(OBJDIR)/libcoolbpf.so.$(COOLBPF_VERSION)
 endif
 
 HEADERS := coolbpf.h
@@ -66,15 +66,15 @@ $(OBJDIR)/coolbpf.a: $(STATIC_OBJS)
 	$(call msg,AR,$@)
 	$(Q)$(AR) rcs $@ $^
 
-$(OBJDIR)/coolbpf.so: $(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION)
+$(OBJDIR)/libcoolbpf.so: $(OBJDIR)/libcoolbpf.so.$(COOLBPF_MAJOR_VERSION)
 	$(Q)ln -sf $(^F) $@
 
-$(OBJDIR)/coolbpf.so.$(COOLBPF_MAJOR_VERSION): $(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION)
+$(OBJDIR)/libcoolbpf.so.$(COOLBPF_MAJOR_VERSION): $(OBJDIR)/libcoolbpf.so.$(COOLBPF_VERSION)
 	$(Q)ln -sf $(^F) $@
 
-$(OBJDIR)/coolbpf.so.$(COOLBPF_VERSION): $(SHARED_OBJS)
+$(OBJDIR)/libcoolbpf.so.$(COOLBPF_VERSION): $(SHARED_OBJS)
 	$(call msg,CC,$@)
-	$(Q)$(CC) -shared -Wl,-soname,coolbpf.so.$(COOLBPF_MAJOR_VERSION) \
+	$(Q)$(CC) -shared -Wl,-soname,libcoolbpf.so.$(COOLBPF_MAJOR_VERSION) \
 		  $^ $(ALL_LDFLAGS) -o $@
 
 $(OBJDIR)/coolbpf.pc:
