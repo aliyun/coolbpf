@@ -163,7 +163,7 @@ texinfo_documents = [
 
 read_the_docs_build = os.environ.get('READTHEDOCS', None) == 'True'
 
-if not read_the_docs_build:
+if read_the_docs_build:
     subprocess.call('make clean', shell=True)
     subprocess.call('doxygen', shell=True)
 
