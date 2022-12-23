@@ -1,4 +1,13 @@
-
+/**
+ * @file coolbpf.h
+ * @author Shuyi Cheng (chengshuyi@linux.alibaba.com)
+ * @brief 
+ * @version 0.1
+ * @date 2022-12-22
+ * 
+ * @copyright Copyright (c) 2022
+ * 
+ */
 #ifndef __COOLBPF_H
 #define __COOLBPF_H
 
@@ -52,9 +61,30 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
 
 #define COOLBPF_MAJOR_VERSION 0
 #define COOLBPF_MINOR_VERSION 1
+
+/**
+ * @brief get coolbpf major verison
+ * 
+ * @return uint32_t 
+ */
 uint32_t coolbpf_major_version();
+
+/**
+ * @brief get coolbpf minor version
+ * 
+ * @return uint32_t 
+ */
 uint32_t coolbpf_minor_version();
+
+/**
+ * @brief get coolbpf version as string
+ * 
+ * @return const char* 
+ */
 const char *coolbpf_version_string(void);
+
+
+
 #endif
 
 #endif
