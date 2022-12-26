@@ -102,6 +102,10 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
 #define COOLBPF_MINOR_VERSION 1
 
 
+#ifndef COOLBPF_API
+#define COOLBPF_API __attribute__((visibility("default")))
+#endif
+
 /**
  * @brief Parameters required to create perf threads
  * 
@@ -119,21 +123,21 @@ struct perf_thread_arguments {
  * 
  * @return uint32_t 
  */
-uint32_t coolbpf_major_version();
+COOLBPF_API uint32_t coolbpf_major_version();
 
 /**
  * @brief get coolbpf minor version
  * 
  * @return uint32_t 
  */
-uint32_t coolbpf_minor_version();
+COOLBPF_API uint32_t coolbpf_minor_version();
 
 /**
  * @brief get coolbpf version as string
  * 
  * @return const char* 
  */
-const char *coolbpf_version_string(void);
+COOLBPF_API const char *coolbpf_version_string(void);
 
 /**
  * @brief Create a perf thread to receive perf events
@@ -141,7 +145,7 @@ const char *coolbpf_version_string(void);
  * @param mapfd fd of map of type BPF_MAP_TYPE_PERF_EVENT_ARRAY
  * @return pthread_t thread id, you can use it later to destroy the thread
  */
-pthread_t initial_perf_thread(struct perf_thread_arguments *args);
+COOLBPF_API pthread_t initial_perf_thread(struct perf_thread_arguments *args);
 
 /**
  * @brief Destroy perf thread
@@ -149,7 +153,7 @@ pthread_t initial_perf_thread(struct perf_thread_arguments *args);
  * @param thread perf thread id
  * @return int 
  */
-int kill_perf_thread(pthread_t thread);
+COOLBPF_API int kill_perf_thread(pthread_t thread);
 
 #endif
 
