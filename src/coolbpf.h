@@ -101,10 +101,8 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
 #define COOLBPF_MAJOR_VERSION 0
 #define COOLBPF_MINOR_VERSION 1
 
+#include "coolbpf_common.h"
 
-#ifndef COOLBPF_API
-#define COOLBPF_API __attribute__((visibility("default")))
-#endif
 
 /**
  * @brief Parameters required to create perf threads
