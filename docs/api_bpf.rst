@@ -1,15 +1,14 @@
-.. SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 
 .. _api:
 
 .. toctree:: Table of Contents
 
 
-COOLBPF API
+COOLBPF eBPF API
 ==========
 
-coolbpf.h
---------
-.. doxygenfile:: coolbpf.h
+.. doxygenfile:: coolbpf_bpf.h
    :project: coolbpf
    :sections: func define public-type enum
+
+
