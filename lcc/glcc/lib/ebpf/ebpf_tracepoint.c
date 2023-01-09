@@ -148,6 +148,34 @@ static int ebpf_sched_stat_template(void *data, struct task_struct *tsk, u64 del
     return 0;
 }
 
+static int ebpf_workqueue_execute_start(void *data, struct work_struct *work)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        void *work;
+        void *function;
+    } arg = {
+        .work = work,
+        .function = work->function,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
+static int ebpf_workqueue_work_template(void *data, struct work_struct *work)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        void *work;
+    } arg = {
+        .work = work,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
 static struct bpf_tracepoint_event events_table[] =
     {
         {.name = "net_dev_queue", .bpf_func = ebpf_net_dev_queue},
@@ -159,6 +187,9 @@ static struct bpf_tracepoint_event events_table[] =
         {.name = "sched_stat_wait", .bpf_func = ebpf_sched_stat_template},
         {.name = "sched_stat_iowait", .bpf_func = ebpf_sched_stat_template},
         {.name = "sched_stat_blocked", .bpf_func = ebpf_sched_stat_template},
+        {.name = "workqueue_execute_start", .bpf_func = ebpf_workqueue_execute_start},
+        {.name = "workqueue_execute_end", .bpf_func = ebpf_workqueue_work_template},
+        {.name = "workqueue_activate_work", bpf_func = ebpf_workqueue_work_template},
 };
 
 struct bpf_tracepoint_event *bpf_find_tracepoint(char *tp_name)
