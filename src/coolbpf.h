@@ -21,7 +21,9 @@
 #define COOLBPF_MINOR_VERSION 1
 
 #include "coolbpf_common.h"
-
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+#include <pthread.h>
 
 /**
  * @brief Parameters required to create perf threads
