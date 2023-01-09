@@ -13,7 +13,7 @@
 
 #ifdef __VMLINUX_H__
 
-#include "coolbpf_common.h"
+#include "coolbpf_bpf.h"
 
 #else
 
