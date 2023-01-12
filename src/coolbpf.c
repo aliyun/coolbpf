@@ -54,6 +54,8 @@ void *perf_thread_worker(void *ctx)
 
     pb_opts.sample_cb = args->sample_cb;
     pb = perf_buffer__new(args->mapfd, args->pg_cnt == 0 ? 128 : args->pg_cnt, &pb_opts);
+    free(args);
+    
     if (!pb)
     {
         err = -errno;
@@ -80,6 +82,11 @@ cleanup:
 pthread_t initial_perf_thread(struct perf_thread_arguments *args)
 {
     pthread_t thread;
+    struct perf_thread_arguments *args_copy = malloc(sizeof(struct perf_thread_arguments));
+    if (!args_copy)
+        return -ENOMEM;
+    
+    memcpy(args_copy, args, sizeof(struct perf_thread_arguments));
     pthread_create(&thread, NULL, perf_thread_worker, args);
     return thread;
 }
