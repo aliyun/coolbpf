@@ -35,6 +35,7 @@ struct perf_thread_arguments {
     perf_buffer_lost_fn lost_cb;        /**< callback function when the event is lost */
     int pg_cnt;                         /**< perf buffer size in page, default is 128 page */
     int timeout_ms;                     /**< timeout of perf poll in ms, default is 100ms */
+    void *ctx;                          /**< perf_buffer_sample_fn and perf_buffer_lost_fn context */
 };
 
 /**

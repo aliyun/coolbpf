@@ -53,6 +53,8 @@ void *perf_thread_worker(void *ctx)
     int timeout_ms = args->timeout_ms == 0 ? 100 : args->timeout_ms;
 
     pb_opts.sample_cb = args->sample_cb;
+    pb_opts.ctx = args->ctx;
+    pb_opts.lost_cb = args->lost_cb;
     pb = perf_buffer__new(args->mapfd, args->pg_cnt == 0 ? 128 : args->pg_cnt, &pb_opts);
     free(args);
     
