@@ -58,6 +58,15 @@ COOLBPF_API uint32_t coolbpf_minor_version();
  */
 COOLBPF_API const char *coolbpf_version_string(void);
 
+
+/**
+ * @brief perf thread worker
+ * 
+ * @param ctx perf thread arguments
+ * @return void *
+ */
+COOLBPF_API void *perf_thread_worker(void *ctx);
+
 /**
  * @brief Create a perf thread to receive perf events
  * 
