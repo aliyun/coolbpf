@@ -23,6 +23,7 @@
 #include <bpf/bpf.h>
 #include <asm/unistd.h>
 #include <pthread.h>
+#include <signal.h>
 
 #include "coolbpf.h"
 uint32_t coolbpf_major_version(void)
@@ -73,6 +74,9 @@ void *perf_thread_worker(void *ctx)
             fprintf(stderr, "error polling perf buffer: %s\n", strerror(-err));
             goto cleanup;
         }
+
+        if (err == -EINTR)
+            goto cleanup;
         /* reset err to return 0 if exiting */
         err = 0;
     }
@@ -95,7 +99,9 @@ pthread_t initial_perf_thread(struct perf_thread_arguments *args)
 
 int kill_perf_thread(pthread_t thread)
 {
-    return pthread_cancel(thread);
+    pthread_kill(thread, SIGQUIT);
+    pthread_join(thread, NULL);
+    return 0;
 }
 
 #endif
