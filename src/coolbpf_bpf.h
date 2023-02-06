@@ -96,5 +96,60 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
 #define BPF_STACK_TRACE(_name, _max_entries) \
     BPF_MAP(_name, BPF_MAP_TYPE_STACK_TRACE, u32, stack_trace_t, _max_entries)
 
+static inline int fast_log2(long value)
+{
+    int n = 0;
+    int i;
+
+    if (value < 1) {
+        goto end;
+    }
+
+    #pragma unroll
+    for (i = 32; i > 0; i /= 2) {
+        long v = 1ULL << i;
+        if (value >= v) {
+            n += i;
+            value = value >> i;
+        }
+    }
+end:
+    return n;
+}
+
+#define NUM_E16 10000000000000000ULL
+#define NUM_E8  100000000ULL
+#define NUM_E4  10000ULL
+#define NUM_E2  100ULL
+#define NUM_E1  10ULL
+static inline int fast_log10(long v)
+{
+    int n = 0;
+    if (v >= NUM_E16) {n += 16; v /= NUM_E16;}
+    if (v >=  NUM_E8) {n +=  8; v /=  NUM_E8;}
+    if (v >=  NUM_E4) {n +=  4; v /=  NUM_E4;}
+    if (v >=  NUM_E2) {n +=  2; v /=  NUM_E2;}
+    if (v >=  NUM_E1) {n +=  1;}
+    return n;
+}
+
+static inline void add_hist(struct bpf_map_def* maps, int k, int v) {
+    u64 *pv = bpf_map_lookup_elem(maps, &k);
+    if (pv) {
+        __sync_fetch_and_add(pv, v);
+    }
+}
+
+#define incr_hist(maps, k) add_hist(maps, k, 1)
+
+static inline void hist2_push(struct bpf_map_def* maps, long v) {
+    int k = fast_log2(v);
+    incr_hist(maps, k);
+}
+
+static inline void hist10_push(struct bpf_map_def* maps, long v) {
+    int k = fast_log10(v);
+    incr_hist(maps, k);
+}
 
 #endif
