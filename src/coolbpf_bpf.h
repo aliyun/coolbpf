@@ -97,4 +97,6 @@ typedef __u64 stack_trace_t[MAX_STACK_DEPTH];
     BPF_MAP(_name, BPF_MAP_TYPE_STACK_TRACE, u32, stack_trace_t, _max_entries)
 
 
+char _license[] SEC("license") = "GPL";
+
 #endif
