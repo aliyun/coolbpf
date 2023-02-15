@@ -11,4 +11,6 @@ COOLBPF USERSPACE API
    :project: coolbpf
    :sections: func define public-type enum
 
-
+.. doxygenfile:: kallsyms.h
+   :project: coolbpf
+   :sections: func define public-type enum
