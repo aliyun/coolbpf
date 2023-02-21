@@ -84,6 +84,13 @@ COOLBPF_API pthread_t initial_perf_thread(struct perf_thread_arguments *args);
  */
 COOLBPF_API int kill_perf_thread(pthread_t thread);
 
+/**
+ * @brief Extend locked-in-memory address space
+ * 
+ * @return int 
+ */
+int bump_memlock_rlimit(void);
+
 #endif
 
 #endif

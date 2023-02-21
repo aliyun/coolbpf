@@ -24,6 +24,7 @@
 #include <asm/unistd.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/resource.h>
 
 #include "coolbpf.h"
 uint32_t coolbpf_major_version(void)
@@ -104,4 +105,13 @@ int kill_perf_thread(pthread_t thread)
     return 0;
 }
 
+int bump_memlock_rlimit(void)
+{
+	struct rlimit rlim_new = {
+		.rlim_cur	= RLIM_INFINITY,
+		.rlim_max	= RLIM_INFINITY,
+	};
+
+	return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
+}
 #endif
