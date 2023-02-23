@@ -74,6 +74,28 @@ static int ebpf_sched_wakeup(void *data, struct task_struct *p, int success)
     return 0;
 }
 
+static int ebpf_sched_wakeup_new(void *data, struct task_struct *p, int success)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args
+    {
+        struct trace_entry entry;
+        char comm[TASK_COMM_LEN];
+        pid_t pid;
+        int prio;
+        int success;
+        int target_cpu;
+    } arg = {
+        .pid = p->pid,
+        .prio = p->prio,
+        .success = success,
+        .target_cpu = task_cpu(p),
+    };
+    memcpy(arg.comm, p->comm, TASK_COMM_LEN);
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+    return 0;
+}
+
 static int ebpf_sched_switch(void *data, struct task_struct *prev, struct task_struct *next)
 {
     struct bpf_prog *prog = (struct bpf_prog *)data;
@@ -156,7 +178,7 @@ static int ebpf_workqueue_execute_start(void *data, struct work_struct *work)
         void *function;
     } arg = {
         .work = work,
-        .function = work->function,
+        .function = work->func,
     };
     __bpf_tracepoint_run(prog, (u64 *)&arg);
 
@@ -176,11 +198,68 @@ static int ebpf_workqueue_work_template(void *data, struct work_struct *work)
     return 0;
 }
 
+static int ebpf_mm_vmscan_direct_reclaim_begin_template(void *data, int order, int may_writepage, gfp_t gfp_flags)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        int order;
+        gfp_t gfp_flags;
+    } arg = {
+        .order = order,
+        .gfp_flags = gfp_flags,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
+static int ebpf_mm_vmscan_direct_reclaim_end_template(void *data, unsigned long nr_reclaimed)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        unsigned long nr_reclaimed;
+    } arg = {
+        .nr_reclaimed = nr_reclaimed,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
+static int ebpf_mm_vmscan_memcg_reclaim_begin_template(void *data, int order, int may_writepage, gfp_t gfp_flags)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        int order;
+        gfp_t gfp_flags;
+    } arg = {
+        .order = order,
+        .gfp_flags = gfp_flags,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
+static int ebpf_mm_vmscan_memcg_reclaim_end_template(void *data, unsigned long nr_reclaimed)
+{
+    struct bpf_prog *prog = (struct bpf_prog *)data;
+    struct args {
+        unsigned long nr_reclaimed;
+    } arg = {
+        .nr_reclaimed = nr_reclaimed,
+    };
+    __bpf_tracepoint_run(prog, (u64 *)&arg);
+
+    return 0;
+}
+
 static struct bpf_tracepoint_event events_table[] =
     {
         {.name = "net_dev_queue", .bpf_func = ebpf_net_dev_queue},
         {.name = "softirq_raise", .bpf_func = ebpf_softirq_raise},
         {.name = "sched_wakeup", .bpf_func = ebpf_sched_wakeup},
+        {.name = "sched_wakeup_new", .bpf_func = ebpf_sched_wakeup_new},
         {.name = "sched_switch", .bpf_func = ebpf_sched_switch},
         {.name = "netif_receive_skb", .bpf_func = ebpf_netif_receive_skb},
         {.name = "net_dev_xmit", .bpf_func = ebpf_net_dev_xmit},
@@ -189,7 +268,11 @@ static struct bpf_tracepoint_event events_table[] =
         {.name = "sched_stat_blocked", .bpf_func = ebpf_sched_stat_template},
         {.name = "workqueue_execute_start", .bpf_func = ebpf_workqueue_execute_start},
         {.name = "workqueue_execute_end", .bpf_func = ebpf_workqueue_work_template},
-        {.name = "workqueue_activate_work", bpf_func = ebpf_workqueue_work_template},
+        {.name = "workqueue_activate_work", .bpf_func = ebpf_workqueue_work_template},
+        {.name = "mm_vmscan_direct_reclaim_begin", .bpf_func = ebpf_mm_vmscan_direct_reclaim_begin_template},
+        {.name = "mm_vmscan_direct_reclaim_end", .bpf_func = ebpf_mm_vmscan_direct_reclaim_end_template},
+        {.name = "mm_vmscan_memcg_reclaim_begin", .bpf_func = ebpf_mm_vmscan_memcg_reclaim_begin_template},
+        {.name = "mm_vmscan_memcg_reclaim_end", .bpf_func = ebpf_mm_vmscan_memcg_reclaim_end_template},
 };
 
 struct bpf_tracepoint_event *bpf_find_tracepoint(char *tp_name)
