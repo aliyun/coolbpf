@@ -59,6 +59,12 @@ void *perf_thread_worker(void *ctx)
     pb_opts.lost_cb = args->lost_cb;
     pb = perf_buffer__new(args->mapfd, args->pg_cnt == 0 ? 128 : args->pg_cnt, &pb_opts);
     free(args);
+
+    err = libbpf_get_error(pb);
+    if (err) {
+        fprintf(stderr, "error new perf buffer: %s\n", strerror(-err));
+        return NULL;
+    }
     
     if (!pb)
     {
