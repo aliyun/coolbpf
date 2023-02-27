@@ -1,0 +1,18 @@
+
+kprobe:tcp_connect {
+    daddr = sk->__sk_common.skc_daddr;
+    saddr = sk->__sk_common.skc_rcv_saddr;
+    dport = bswap(sk->__sk_common.skc_dport);
+    sport = sk->__sk_common.skc_num;
+
+    print("%s syn: %s:%u -> %s:%u\n", timestr(ns()), ntop(bswap(saddr)), sport, ntop(bswap(daddr)), dport);
+}
+
+kprobe:tcp_finish_connect {
+    daddr = sk->__sk_common.skc_daddr;
+    saddr = sk->__sk_common.skc_rcv_saddr;
+    dport = bswap(sk->__sk_common.skc_dport);
+    sport = sk->__sk_common.skc_num;
+
+    print("%s syn+ack: %s:%u -> %s:%u\n", timestr(ns()), ntop(bswap(saddr)), sport, ntop(bswap(daddr)), dport);
+}

@@ -1,0 +1,13 @@
+
+kprobe:tcp_drop {
+    th = tcphdr(skb);
+    sport = bswap(th->source);
+    dport = bswap(th->dest);
+    
+    ih = iphdr(skb);
+    sip = ntop(bswap(ih->saddr));
+    dip = ntop(bswap(ih->daddr));
+    
+    state = tcpstate(sk->__sk_common.skc_state);
+    print("%s ip: %s:%d -> %s:%d state: %s flags:%s %s\n", timestr(ns()), sip, sport, dip, dport, state, tcpflags(((u8 *)th)[13]), kstack());
+}

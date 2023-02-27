@@ -27,6 +27,17 @@ develop eBPF applications.
    eBPF API Documentation <https://coolbpf.readthedocs.io/en/latest/api_bpf.html>
 
 
+LightWeight CoolBPF documentation
+------------------------------
+LightWeight CoolBPF 是基于 eBPF 的脚本化编程工具，其搭配轻量级 eBPF 编译器，提供丰富的 API，使得开发者
+能够快速开发 eBPF 程序。
+
+.. toctree::
+   :maxdepth: 2
+
+   lwcb/index
+   pylwcb/index 
+
 Indices and tables
 ==================
 

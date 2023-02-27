@@ -1,0 +1,20 @@
+
+
+kprobe:kfree_skb {
+    th = tcphdr(skb);
+    ih = iphdr(skb);
+    protocol = ih->protocol;
+    stack = kstack();
+    sip = ntop(bswap(ih->saddr));
+    dip = ntop(bswap(ih->daddr));
+    sport = bswap(th->source);
+    dport = bswap(th->dest);
+
+    if (protocol == IPPROTO_TCP) {
+        print("%s tcp ip: %s:%d -> %s:%d %s\n", timestr(ns()), sip, sport, dip, dport, stack);
+    } else if (protocol == IPPROTO_ICMP) {
+        print("%s icmp ip: %s -> %s %s\n", timestr(ns()), sip, dip, stack);
+    } else if (protocol == IPPROTO_UDP) {
+        print("%s udp ip:  %s:%d -> %s:%d %s\n", timestr(ns()), sip, sport, dip, dport, stack);
+    }
+}

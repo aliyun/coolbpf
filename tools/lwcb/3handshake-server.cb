@@ -1,0 +1,43 @@
+
+kprobe:tcp_conn_request {
+    ih = iphdr(skb);
+    th = tcphdr(skb);
+    
+    sip = ntop(bswap(ih->saddr));
+    dip = ntop(bswap(ih->daddr));
+    sport = bswap(th->source);
+    dport = bswap(th->dest);
+
+    print("%s syn: %s:%u -> %s:%u\n", timestr(ns()), dip, dport, sip, sport);
+}
+
+kprobe:tcp_v4_send_synack {
+    daddr = req->__req_common.skc_daddr;
+    saddr = req->__req_common.skc_rcv_saddr;
+    dport = bswap(req->__req_common.skc_dport);
+    sport = req->__req_common.skc_num;
+
+    print("%s syn+ack: %s:%u -> %s:%u\n", timestr(ns()), ntop(bswap(saddr)), sport, ntop(bswap(daddr)), dport);
+}
+
+kprobe:tcp_check_req {
+    daddr = req->__req_common.skc_daddr;
+    saddr = req->__req_common.skc_rcv_saddr;
+    dport = bswap(req->__req_common.skc_dport);
+    sport = req->__req_common.skc_num;
+
+    print("%s ack: %s:%u -> %s:%u\n", timestr(ns()), ntop(bswap(saddr)), sport, ntop(bswap(daddr)), dport);
+}
+
+kretprobe:inet_csk_accept {
+    sk = retval;
+
+    daddr = sk->__sk_common.skc_daddr;
+    saddr = sk->__sk_common.skc_rcv_saddr;
+    dport = bswap(sk->__sk_common.skc_dport);
+    sport = sk->__sk_common.skc_num;
+
+    print("%s accept: %s:%u -> %s:%u\n", timestr(ns()), ntop(bswap(saddr)), sport, ntop(bswap(daddr)), dport);
+}
+
+
