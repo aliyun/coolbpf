@@ -1,0 +1,5 @@
+
+
+kretprobe:tcp_v4_connect {
+    print("return value: %d\n", retval);
+}

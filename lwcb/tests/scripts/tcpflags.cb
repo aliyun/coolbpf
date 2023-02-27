@@ -1,0 +1,9 @@
+
+
+
+kprobe:tcp_rcv_established {
+    th = tcphdr(skb);
+    sport = bswap(th->source);
+    dport = bswap(th->dest);
+    print("sport: %d dport: %d flags: %s\n", sport, dport, tcpflags(((u8 *)th)[13]));
+}

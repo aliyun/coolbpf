@@ -1,0 +1,9 @@
+
+
+kprobe:tcp_rcv_established {
+    print("tcp_rcv_established\n");
+}
+
+kretprobe:tcp_rcv_established {
+    print("tcp_rcv_establishedreturn\n");
+}

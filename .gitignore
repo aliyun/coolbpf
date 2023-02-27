@@ -1,2 +1,6 @@
 docs/build
 docs/_build
+lwcb/pylwcb/.env
+lwcb/.vscode
+lwcb/target
+lwcb/pylwcb/target

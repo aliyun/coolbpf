@@ -1,0 +1,31 @@
+/*
+ * This file is part of libFirm.
+ * Copyright (C) 2012 University of Karlsruhe.
+ */
+
+/**
+ * @file
+ * @brief     Definitions for optimization flags
+ * @author    Michael Beck, Sebastian Hack
+ */
+
+/** Turn off all optimizations. */
+FLAG(optimize                           , 0, ON)
+
+/** Common subexpression eliminations: Hash the nodes. */
+FLAG(cse                                , 1, ON)
+
+/** Don't use block predecessor for comparison.
+ *  Default must be zero as code placement must
+ *  be run right after a local optimize walk with
+ *  global_cse on. */
+FLAG(global_cse                         , 2, OFF)
+
+/** Evaluate operations. */
+FLAG(constant_folding                   , 3, ON)
+
+/** Algebraic simplifications. */
+FLAG(algebraic_simplification           , 4, ON)
+
+/** Use Global Null Pointer Test elimination. */
+FLAG(global_null_ptr_elimination        , 5, ON)

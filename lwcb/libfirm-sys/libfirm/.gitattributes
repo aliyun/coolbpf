@@ -1,0 +1,8 @@
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+*.dsp               eol=crlf
+*.dsw               eol=crlf
+*.props             eol=crlf
+*.vcproj            eol=crlf
+*.vcxproj           eol=crlf
+*.vcxproj.filters   eol=crlf

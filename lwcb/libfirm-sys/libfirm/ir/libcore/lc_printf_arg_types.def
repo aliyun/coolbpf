@@ -1,0 +1,16 @@
+/*
+ * This file is part of libFirm.
+ * Copyright (C) 2012 Karlsruhe Institute of Technology.
+ */
+/*          type         | name       | va_arg type */
+LC_ARG_TYPE(char,          char,        int)
+LC_ARG_TYPE(short,         short,       int)
+LC_ARG_TYPE(int,           int,         int)
+LC_ARG_TYPE(long,          long,        long)
+LC_ARG_TYPE(long long,     long_long,   long long)
+LC_ARG_TYPE(double,        double,      double)
+LC_ARG_TYPE(long double,   long_double, long double)
+LC_ARG_TYPE(void *,        ptr,         void *)
+LC_ARG_TYPE(intmax_t,      intmax_t,    intmax_t)
+LC_ARG_TYPE(ptrdiff_t,     ptrdiff_t,   ptrdiff_t)
+LC_ARG_TYPE(size_t,        size_t,      size_t)

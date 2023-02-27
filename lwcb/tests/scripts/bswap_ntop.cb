@@ -1,0 +1,5 @@
+
+kprobe:tcp_rcv_established {
+    ih = iphdr(skb);
+    print("sip: %s dip: %s\n", ntop(bswap(ih->saddr)), ntop(bswap(ih->daddr)));
+}

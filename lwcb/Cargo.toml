@@ -1,0 +1,47 @@
+[package]
+name = "lwcb"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder = "1.4.3"
+anyhow = "1.0.57"
+logos = "0.12.1"
+libc = "0.2.134"
+btfparse = { path = "btfparse" }
+regalloc2 = "0.4.1"
+log = "0.4.14"
+once_cell = "1.8.0"
+qbe = "2.0.0"
+libbpf-sys = "1.0.4+v1.0.1"
+structopt = "0.3.26"
+lazy_static = "1.4.0"
+tempfile = "3"
+num_cpus = "1.0"
+perf-event-open-sys = "1.0"
+crossbeam-channel = "0.5"
+libfirm-rs = { path = "libfirm-rs" }
+libfirm-sys = { path = "libfirm-sys" }
+mio = { version = "0.7", features = ["os-ext", "os-poll", "net"] }
+cached = "0.23.0"
+page_size = "0.4.2"
+errno = "0.2.8"
+paste = "1.0"
+strum_macros = "0.24.3"
+env_logger = "0.10.0"
+uname = "0.1.1"
+nom = "7.1.3"
+chrono = "0.4.23"
+
+[workspace]
+members = [
+    "btfparse",
+    "libfirm-sys",
+    "libfirm-rs",
+]
+
+exclude = [
+    "pylwcb",
+]

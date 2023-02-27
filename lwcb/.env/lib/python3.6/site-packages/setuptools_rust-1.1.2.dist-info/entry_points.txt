@@ -1,0 +1,7 @@
+[distutils.commands]
+build_rust = setuptools_rust:build_rust
+clean_rust = setuptools_rust:clean_rust
+
+[distutils.setup_keywords]
+rust_extensions = setuptools_rust.setuptools_ext:rust_extensions
+

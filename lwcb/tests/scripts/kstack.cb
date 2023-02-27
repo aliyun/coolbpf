@@ -1,0 +1,4 @@
+
+kprobe:tcp_rcv_established {
+    print("kernel stack: %s\n", kstack(1));
+}
