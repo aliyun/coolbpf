@@ -50,8 +50,8 @@ int coolbpf_object_load(struct coolbpf_object *cb)
 {
     int err = 0;
     if (cb->preload)
-        err = cb->preload(cb->ctx, cb->skel);
-    err = err ?: cb->skel_load(cb->skel);
+        err = cb->preload(cb->ctx, cb->skel_obj);
+    err = err ?: cb->skel_load(cb->skel_obj);
     return err;
 }
 
@@ -59,14 +59,14 @@ int coolbpf_object_attach(struct coolbpf_object *cb)
 {
     int err = 0;
     if (cb->preattach)
-        err = cb->preattach(cb->ctx, cb->skel);
-    err = err ?: cb->skel_attach(cb->skel);
+        err = cb->preattach(cb->ctx, cb->skel_obj);
+    err = err ?: cb->skel_attach(cb->skel_obj);
     return err;
 }
 
-void coolbpf_object_destory(struct coolbpf_object *cb)
+void coolbpf_object_destroy(struct coolbpf_object *cb)
 {
-    cb->skel_destory(cb->skel);
+    cb->skel_destroy(cb->skel_obj);
 }
 
 int coolbpf_object_find_map(struct coolbpf_object *cb, const char *name)
@@ -76,7 +76,7 @@ int coolbpf_object_find_map(struct coolbpf_object *cb, const char *name)
 
 const struct bpf_object *coolbpf_get_bpf_object(struct coolbpf_object *cb)
 {
-    return (const struct bpf_object *)(((uint64_t *)cb->skel)[1]);
+    return (const struct bpf_object *)(((uint64_t *)cb->skel_obj)[1]);
 }
 
 void *perf_thread_worker(void *ctx)
