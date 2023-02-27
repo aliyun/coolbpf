@@ -46,6 +46,39 @@ const char *coolbpf_version_string(void)
 #undef __S
 }
 
+int coolbpf_object_load(struct coolbpf_object *cb)
+{
+    int err = 0;
+    if (cb->preload)
+        err = cb->preload(cb->ctx, cb->skel);
+    err = err ?: cb->skel_load(cb->skel);
+    return err;
+}
+
+int coolbpf_object_attach(struct coolbpf_object *cb)
+{
+    int err = 0;
+    if (cb->preattach)
+        err = cb->preattach(cb->ctx, cb->skel);
+    err = err ?: cb->skel_attach(cb->skel);
+    return err;
+}
+
+void coolbpf_object_destory(struct coolbpf_object *cb)
+{
+    cb->skel_destory(cb->skel);
+}
+
+int coolbpf_object_find_map(struct coolbpf_object *cb, const char *name)
+{
+    return bpf_object__find_map_fd_by_name(coolbpf_get_bpf_object(cb), name);
+}
+
+const struct bpf_object *coolbpf_get_bpf_object(struct coolbpf_object *cb)
+{
+    return (const struct bpf_object *)(((uint64_t *)cb->skel)[1]);
+}
+
 void *perf_thread_worker(void *ctx)
 {
     int err;
@@ -61,11 +94,12 @@ void *perf_thread_worker(void *ctx)
     free(args);
 
     err = libbpf_get_error(pb);
-    if (err) {
+    if (err)
+    {
         fprintf(stderr, "error new perf buffer: %s\n", strerror(-err));
         return NULL;
     }
-    
+
     if (!pb)
     {
         err = -errno;
@@ -98,7 +132,7 @@ pthread_t initial_perf_thread(struct perf_thread_arguments *args)
     struct perf_thread_arguments *args_copy = malloc(sizeof(struct perf_thread_arguments));
     if (!args_copy)
         return -ENOMEM;
-    
+
     memcpy(args_copy, args, sizeof(struct perf_thread_arguments));
     pthread_create(&thread, NULL, perf_thread_worker, args);
     return thread;
@@ -113,11 +147,11 @@ int kill_perf_thread(pthread_t thread)
 
 int bump_memlock_rlimit(void)
 {
-	struct rlimit rlim_new = {
-		.rlim_cur	= RLIM_INFINITY,
-		.rlim_max	= RLIM_INFINITY,
-	};
+    struct rlimit rlim_new = {
+        .rlim_cur = RLIM_INFINITY,
+        .rlim_max = RLIM_INFINITY,
+    };
 
-	return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
+    return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
 }
 #endif
