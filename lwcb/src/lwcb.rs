@@ -115,6 +115,7 @@ impl LwCB {
     pub fn read_events(&mut self) -> Vec<Vec<String>> {
         if !self.open_buffer {
             perf_open_buffer();
+            self.open_buffer = true;
         }
 
         perf_read_events()
