@@ -34,7 +34,7 @@ ifndef BUILD_STATIC_ONLY
 		       $(OBJDIR)/libcoolbpf.so.$(COOLBPF_VERSION)
 endif
 
-HEADERS := coolbpf.h coolbpf_bpf.h coolbpf_common.h kallsyms.h
+HEADERS := coolbpf.h coolbpf_bpf.h coolbpf_common.h kallsyms.h fastksym.h
 
 PC_FILE := $(OBJDIR)/coolbpf.pc
 
