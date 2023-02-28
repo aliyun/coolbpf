@@ -17,8 +17,8 @@
 
 #else
 
-#define COOLBPF_MAJOR_VERSION 0
-#define COOLBPF_MINOR_VERSION 1
+#define COOLBPF_MAJOR_VERSION 1
+#define COOLBPF_MINOR_VERSION 0
 
 #include "coolbpf_common.h"
 #include <bpf/libbpf.h>
@@ -122,6 +122,10 @@ COOLBPF_API int coolbpf_object_find_map(struct coolbpf_object *cb, const char *n
  * @return const struct bpf_object*
  */
 COOLBPF_API const struct bpf_object *coolbpf_get_bpf_object(struct coolbpf_object *cb);
+
+
+
+COOLBPF_API int coolbpf_create_perf_thread(struct coolbpf_object *cb, const char *perfmap_name);
 
 /**
  * @brief Parameters required to create perf threads

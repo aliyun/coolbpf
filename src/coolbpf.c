@@ -79,6 +79,12 @@ const struct bpf_object *coolbpf_get_bpf_object(struct coolbpf_object *cb)
     return (const struct bpf_object *)(((uint64_t *)cb->skel)[1]);
 }
 
+int coolbpf_create_perf_thread(struct coolbpf_object *cb, const char *perfmap_name)
+{
+    return 0;
+}
+
+
 void *perf_thread_worker(void *ctx)
 {
     int err;

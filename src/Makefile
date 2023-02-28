@@ -6,7 +6,7 @@ else
 	msg = @printf '  %-8s %s%s\n' "$(1)" "$(2)" "$(if $(3), $(3))";
 endif
 
-COOLBPF_VERSION := 0.1.0
+COOLBPF_VERSION := 1.0.0
 COOLBPF_MAJOR_VERSION := $(firstword $(subst ., ,$(COOLBPF_VERSION)))
 
 OBJDIR ?= .
