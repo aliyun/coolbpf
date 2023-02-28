@@ -36,45 +36,56 @@ struct coolbpf_object
 {
     int (*skel_load)(void *skel);     /**< function callback to load eBPF skeleton */
     int (*skel_attach)(void *skel);   /**< function callback to attach eBPF skeleton */
-    void (*skel_destory)(void *skel); /**< function callback to destory eBPF skeleton */
-    void *skel;                       /**< instance of skeleton object */
+    void (*skel_destroy)(void *skel); /**< function callback to destory eBPF skeleton */
+    void *skel_obj;                   /**< instance of skeleton object */
     pre_load preload;                 /**< function callback before load eBPF skeleton */
     pre_attach preattach;             /**< function callback before attach eBPF skeleton */
     void *ctx;                        /**< user's private context */
 };
 
-#define __coolbpf_object_new(skel, preload, preattach, ctx)                       \
-    (                                                                             \
-        {                                                                         \
-            skel##_bpf *skel_obj = skel##_bpf__open();                            \
-            int __err = 0;                                                        \
-            if (!skel_obj)                                                        \
-                return NULL;                                                      \
-            struct coolbpf_object *cb = calloc(1, sizeof(struct coolbpf_object)); \
-            if (!cb)                                                              \
-                return NULL;                                                      \
-            cb->load = skel##_bpf__load;                                          \
-            cb->attach = skel##_bpf__attach;                                      \
-            cb->destory = skel##_bpf__desotry;                                    \
-            cb->skel = skel_obj;                                                  \
-            cb->preload = preload;                                                \
-            cb->preattach = preattach;                                            \
-            cb->ctx = ctx;                                                        \
-            __err = coolbpf_object_load(cb);                                      \
-            if (__err)                                                            \
-            {                                                                     \
-                printf("failed to load BPF object: %d\n", __err);                 \
-                coolbpf_object_destory(cb);                                       \
-                return NULL;                                                      \
-            }                                                                     \
-            __err = coolbpf_object_attach(cb);                                    \
-            if (__err)                                                            \
-            {                                                                     \
-                printf("failed to attach BPF object: %d\n", __err);               \
-                coolbpf_object_destory(cb);                                       \
-                return NULL;                                                      \
-            }                                                                     \
-            cb;                                                                   \
+#define __coolbpf_object_new(skel, _preload, _preattach, _ctx)                      \
+    (                                                                               \
+        {                                                                           \
+            int __err = 0;                                                          \
+            struct coolbpf_object *__cb = calloc(1, sizeof(struct coolbpf_object)); \
+            if (!__cb)                                                              \
+            {                                                                       \
+                printf("failed to allocate memory for coolbpf_object\n");           \
+                goto __real_out;                                                    \
+            }                                                                       \
+            struct skel##_bpf *skel_obj = skel##_bpf__open();                       \
+            if (!skel_obj)                                                          \
+            {                                                                       \
+                printf("failed to open CoolBPF object\n");                          \
+                goto __failed_out;                                                  \
+            }                                                                       \
+            __cb->skel_load = skel##_bpf__load;                                     \
+            __cb->skel_attach = skel##_bpf__attach;                                 \
+            __cb->skel_destroy = skel##_bpf__destroy;                               \
+            __cb->skel_obj = skel_obj;                                              \
+            __cb->preload = _preload;                                               \
+            __cb->preattach = _preattach;                                           \
+            __cb->ctx = _ctx;                                                       \
+            __err = coolbpf_object_load(__cb);                                      \
+            if (__err)                                                              \
+            {                                                                       \
+                printf("failed to load CoolBPF object: %d\n", __err);               \
+                coolbpf_object_destroy(__cb);                                       \
+                goto __failed_out;                                                  \
+            }                                                                       \
+            __err = coolbpf_object_attach(__cb);                                    \
+            if (__err)                                                              \
+            {                                                                       \
+                printf("failed to attach CoolBPF object: %d\n", __err);             \
+                coolbpf_object_destroy(__cb);                                       \
+                goto __failed_out;                                                  \
+            }                                                                       \
+            goto __real_out;                                                        \
+        __failed_out:                                                               \
+            free(__cb);                                                               \
+            __cb = NULL;                                                              \
+        __real_out:                                                                 \
+            __cb;                                                                     \
         })
 
 #define coolbpf_object_new(skel) \
@@ -104,7 +115,7 @@ COOLBPF_API int coolbpf_object_attach(struct coolbpf_object *cb);
  *
  * @param cb
  */
-COOLBPF_API void coolbpf_object_destory(struct coolbpf_object *cb);
+COOLBPF_API void coolbpf_object_destroy(struct coolbpf_object *cb);
 
 /**
  * @brief get bpf map fd from coolbpf object
