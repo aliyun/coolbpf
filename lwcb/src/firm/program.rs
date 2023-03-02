@@ -166,6 +166,12 @@ impl FirmProgram {
                     self.attach_kprobe(func.as_str())?;
                 }
             }
+            ProgramType::Kretprobe => {
+                let func_names = self.func_names.clone();
+                for func in func_names.iter() {
+                    self.attach_kretprobe(func.as_str())?;
+                }
+            }
             _ => todo!(),
         }
 
@@ -231,6 +237,9 @@ impl FirmProgram {
                 BtfKind::Enum => {
                     // todo: fix this
                     return TYPE_I32.clone();
+                }
+                BtfKind::Void => {
+                    return Type::new_primitive(&Mode::ModeANY());
                 }
                 _ => {
                     panic!("{:?} not yet implemented", dump_by_typeid(typeid));
@@ -1090,13 +1099,17 @@ impl FirmProgram {
                 } else {
                     TYPE_U64.clone()
                 };
-                if loaded_ty.mode() != return_type.mode() {
-                    loaded_member_node = Node::new_conv(&loaded_member_node, &return_type.mode());
-                }
-                loaded_member_node.set_type(&return_type);
-                loaded_member_node.set_is_kernel_memory(1);
 
-                self.add_rvalue("retval", &loaded_member_node);
+                if return_type.mode() != Mode::ModeANY() {
+                    if loaded_ty.mode() != return_type.mode() {
+                        loaded_member_node =
+                            Node::new_conv(&loaded_member_node, &return_type.mode());
+                    }
+                    loaded_member_node.set_type(&return_type);
+                    loaded_member_node.set_is_kernel_memory(1);
+
+                    self.add_rvalue("retval", &loaded_member_node);
+                }
             }
             _ => {
                 todo!()
