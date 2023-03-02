@@ -133,7 +133,7 @@ static inline int fast_log10(long v)
     return n;
 }
 
-static inline void add_hist(struct bpf_map_def* maps, int k, int v) {
+static inline void add_hist(void* maps, int k, int v) {
     u64 *pv = bpf_map_lookup_elem(maps, &k);
     if (pv) {
         __sync_fetch_and_add(pv, v);
@@ -142,12 +142,12 @@ static inline void add_hist(struct bpf_map_def* maps, int k, int v) {
 
 #define incr_hist(maps, k) add_hist(maps, k, 1)
 
-static inline void hist2_push(struct bpf_map_def* maps, long v) {
+static inline void hist2_push(void* maps, long v) {
     int k = fast_log2(v);
     incr_hist(maps, k);
 }
 
-static inline void hist10_push(struct bpf_map_def* maps, long v) {
+static inline void hist10_push(void* maps, long v) {
     int k = fast_log10(v);
     incr_hist(maps, k);
 }
