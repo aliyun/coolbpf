@@ -11,6 +11,9 @@ mod gstack;
 mod kallsyms;
 mod lwcb;
 mod utils;
+mod newast;
+mod typer;
+mod symbol;
 
 
 pub static mut IS_IN_PYTHON: bool = false;
