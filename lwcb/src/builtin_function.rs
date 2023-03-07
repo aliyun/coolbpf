@@ -1,7 +1,7 @@
 use anyhow::bail;
-use libfirm_rs::{Node, Type};
+use libfirm_rs::{Node};
 
-use crate::types::Types;
+use crate::types::Type;
 use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BuiltinFunction {
@@ -61,9 +61,9 @@ impl TryFrom<&String> for BuiltinFunction {
 }
 
 impl BuiltinFunction {
-    pub fn return_type(&self) -> Types {
+    pub fn return_type(&self) -> Option<Type> {
         match self {
-            BuiltinFunction::Print => Types::Void,
+            BuiltinFunction::Print => None,
             _ => todo!(),
         }
     }
