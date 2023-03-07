@@ -7,6 +7,7 @@ mod tokens;
 pub use {
     token::Token,
     tokens::Tokens,
+    tokens::TokenStream,
 };
 
 
