@@ -1,6 +1,14 @@
 use std::fmt;
 use std::ops;
 
+use anyhow::{bail, Result};
+
+use crate::btf::btf_find_struct;
+use crate::btf::btf_find_struct_member;
+use crate::btf::try_btf_find_func;
+use crate::newast::ast::Ty;
+use crate::newast::ast::TyKind;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum Types {
@@ -222,3 +230,222 @@ mod tests {
         assert_eq!(c1 + c3, Constant::I32(5));
     }
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeKind {
+    TypeID(u32), // btf type id
+    Void,
+    Char,
+    Bool,
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    String,
+    Ptr(Box<Type>),
+    Struct(Box<Type>),
+    Union(Box<Type>),
+
+    Tuple(Vec<Type>),
+    Map(Box<Type>, Box<Type>), // key type and value type
+    Func(Option<u32>),         // func proto typeid
+    Default,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Type {
+    pub kind: TypeKind,
+}
+
+impl Default for Type {
+    fn default() -> Self {
+        Self {
+            kind: TypeKind::Default,
+        }
+    }
+}
+
+impl Type {
+    pub fn new(kind: TypeKind) -> Self {
+        Self { kind }
+    }
+
+    pub fn typid(&self) -> u32 {
+        if let TypeKind::TypeID(x) = self.kind {
+            return x;
+        }
+        panic!("is not typeid")
+    }
+
+    pub fn is_ptr(&self) -> bool {
+        if let TypeKind::Ptr(_) = &self.kind {
+            return true;
+        }
+        false
+    }
+
+    pub fn ptr_to(&self) -> Self {
+        if let TypeKind::Ptr(p) = &self.kind {
+            return (**p).clone();
+        }
+        panic!("Not a pointer")
+    }
+
+    // get type from member
+    pub fn find_member(&self, name: &str) -> Self {
+        // must be struct or union
+        match &self.kind {
+            TypeKind::Struct(x) | TypeKind::Union(x) => {
+                let typeid = x.typid();
+                return Type::from_typeid(btf_find_struct_member(typeid, name).unwrap().type_id);
+            }
+            _ => {panic!("target is not struct or union")}
+        }
+    }
+
+    pub fn update_mapkey(&mut self, key: Type) -> Result<()>{
+        todo!()
+    }
+
+    pub fn update_mapval(&mut self, val: Type) -> Result<()>{
+        todo!()
+    }
+
+    pub fn from_typeid(typeid: u32) -> Self {
+        Self::new(TypeKind::TypeID(typeid))
+    }
+
+    pub fn from_func(name: &str) -> Self {
+        Self::new(TypeKind::Func(try_btf_find_func(&name)))
+    }
+
+    pub fn from_constant(c: &Constant) -> Self {
+        let type_kind = match c {
+            Constant::Bool(_) => TypeKind::Bool,
+            Constant::Char(_) => TypeKind::Char,
+            Constant::I8(_) => TypeKind::I8,
+            Constant::U8(_) => TypeKind::U8,
+            Constant::I16(_) => TypeKind::I16,
+            Constant::U16(_) => TypeKind::U16,
+
+            Constant::I32(_) => TypeKind::I32,
+            Constant::U32(_) => TypeKind::U32,
+            Constant::I64(_) => TypeKind::I64,
+            Constant::U64(_) => TypeKind::U64,
+        };
+
+        Self::new(type_kind)
+    }
+
+    pub fn from_tykind(ty_kind: &TyKind) -> Self {
+        let type_kind = match &ty_kind {
+            TyKind::Void => TypeKind::Void,
+            TyKind::Char => TypeKind::Char,
+            TyKind::Bool => TypeKind::Bool,
+            TyKind::I8 => TypeKind::I8,
+            TyKind::U8 => TypeKind::U8,
+            TyKind::I16 => TypeKind::I16,
+            TyKind::U16 => TypeKind::U16,
+            TyKind::I32 => TypeKind::I32,
+            TyKind::U32 => TypeKind::U32,
+            TyKind::I64 => TypeKind::I64,
+            TyKind::U64 => TypeKind::U64,
+            TyKind::String => TypeKind::String,
+            TyKind::Struct(name) => {
+                TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(btf_find_struct(name)))))
+            }
+            TyKind::Union(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
+                btf_find_struct(&name),
+            )))),
+            TyKind::Ptr(t) => TypeKind::Ptr(Box::new(Self::from_tykind(&t.kind))),
+
+            TyKind::Kprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
+            TyKind::Kretprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
+        };
+
+        Type::new(type_kind)
+    }
+}
+
+// pub fn gen_type(ast: &Ast) -> Result<()> {
+//     let mut tt = HashMap::new();
+//     tt.insert("arg0".to_owned(), Type::new(TypeKind::U64));
+//     tt.insert("arg1".to_owned(), Type::new(TypeKind::U64));
+//     tt.insert("arg2".to_owned(), Type::new(TypeKind::U64));
+//     tt.insert("arg3".to_owned(), Type::new(TypeKind::U64));
+//     tt.insert("arg4".to_owned(), Type::new(TypeKind::U64));
+
+//     tt.insert("ctx".to_owned(), Type::new(TypeKind::U64));
+//     Ok(())
+// }
+
+// fn gen_type_expr(tt: HashMap<String, Type>, expr: &Expr) {
+//     match expr.kind {
+//         ExprKind::Program(tys, e) => {}
+
+//         ExprKind::Compound(mut c) => {
+//             for mut i in c {
+//                 gen_type_expr(&mut i);
+//             }
+//         }
+
+//         ExprKind::ExprStmt(mut s) => {
+//             gen_type_expr(&mut s);
+//         }
+
+//         ExprKind::If(c, t, e) => {}
+
+//         ExprKind::Ident(name) => {}
+
+//         ExprKind::Str(s) => {}
+
+//         ExprKind::Num(n) => {}
+
+//         ExprKind::Const(c) => {}
+
+//         ExprKind::Unary(op, e) => {}
+
+//         ExprKind::Binary(op, l, r) => {}
+
+//         ExprKind::Cast(e, to) => {}
+
+//         ExprKind::BuiltinCall(b, args) => {}
+
+//         ExprKind::Member(p, s) => {}
+
+//         _ => todo!(),
+//     }
+// }
+
+// fn gen_type_ty(ty: &mut Ty) -> Type {
+//     let type_kind = match &mut ty.kind {
+//         TyKind::Void => TypeKind::Void,
+//         TyKind::Char => TypeKind::Char,
+//         TyKind::Bool => TypeKind::Bool,
+//         TyKind::I8 => TypeKind::I8,
+//         TyKind::U8 => TypeKind::U8,
+//         TyKind::I16 => TypeKind::I16,
+//         TyKind::U16 => TypeKind::U16,
+//         TyKind::I32 => TypeKind::I32,
+//         TyKind::U32 => TypeKind::U32,
+//         TyKind::I64 => TypeKind::I64,
+//         TyKind::U64 => TypeKind::U64,
+//         TyKind::String => TypeKind::String,
+//         TyKind::Struct(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
+//             btf_find_struct(name),
+//         )))),
+//         TyKind::Union(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
+//             btf_find_struct(&name),
+//         )))),
+//         TyKind::Ptr(mut t) => TypeKind::Ptr(Box::new(gen_type_ty(&mut t))),
+
+//         TyKind::Kprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
+//         TyKind::Kretprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
+//     };
+
+//     Type::new(type_kind)
+// }
