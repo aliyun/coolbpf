@@ -4,6 +4,7 @@ use crate::{
 };
 use logos::Span;
 
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     Compound(Vec<Expr>), // compound statement
@@ -144,4 +145,15 @@ pub enum BinaryOp {
     Mod,
 
     Assign,
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test() {
+    }
 }
