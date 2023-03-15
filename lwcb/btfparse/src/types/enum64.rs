@@ -29,10 +29,9 @@ impl Enum64 {
             let hig = reader.read_u32();
             let item;
             if signed {
-                // unsigned
-                item = Enum64Item::Signed((hig as i64) << 32 + low);
+                item = Enum64Item::Signed((i64::from(hig) << 32) | i64::from(low));
             } else {
-                item = Enum64Item::Unsigned((hig as u64) << 32 + low)
+                item = Enum64Item::Unsigned((u64::from(hig) << 32) | u64::from(low))
             }
 
             enums.push((name, item));
