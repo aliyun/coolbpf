@@ -1,5 +1,4 @@
 use anyhow::bail;
-use libfirm_rs::{Node, Type};
 
 use crate::types::Types;
 use std::fmt;

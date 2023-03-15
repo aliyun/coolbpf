@@ -78,9 +78,9 @@ pub fn visit_ast<V: Visit + ?Sized>(visitor: &mut V, ast: &Ast) {
     visitor.visit_translation_unit(&ast.translation_unit)
 }
 
-pub fn visit_identifier<V: Visit + ?Sized>(visitor: &mut V, identifier: &Identifier) {}
-pub fn visit_constant<V: Visit + ?Sized>(visitor: &mut V, constant: &Constant) {}
-pub fn visit_string_literal<V: Visit + ?Sized>(visitor: &mut V, string: &StringLiteral) {}
+pub fn visit_identifier<V: Visit + ?Sized>(_visitor: &mut V, _identifier: &Identifier) {}
+pub fn visit_constant<V: Visit + ?Sized>(_visitor: &mut V, _constant: &Constant) {}
+pub fn visit_string_literal<V: Visit + ?Sized>(_visitor: &mut V, _string: &StringLiteral) {}
 
 pub fn visit_binary_expression<V: Visit + ?Sized>(
     visitor: &mut V,
@@ -91,7 +91,7 @@ pub fn visit_binary_expression<V: Visit + ?Sized>(
     visitor.visit_binary_op(&binary_expression.op);
 }
 
-pub fn visit_binary_op<V: Visit + ?Sized>(visitor: &mut V, binaryop: &BinaryOp) {}
+pub fn visit_binary_op<V: Visit + ?Sized>(_visitor: &mut V, _binaryop: &BinaryOp) {}
 
 pub fn visit_call_expression<V: Visit + ?Sized>(visitor: &mut V, call_expression: &CallExpression) {
     // todo: Do we need to visit callee?
@@ -149,7 +149,8 @@ pub fn visit_compound_statement<V: Visit + ?Sized>(
     }
 }
 
-pub fn visit_bpf_program_type<V: Visit + ?Sized>(visitor: &mut V, program_type: &BpfProgramType) {}
+pub fn visit_bpf_program_type<V: Visit + ?Sized>(_visitor: &mut V, _program_type: &BpfProgramType) {
+}
 
 pub fn visit_bpf_program<V: Visit + ?Sized>(visitor: &mut V, program: &BpfProgram) {
     for ty in &program.types {
@@ -164,6 +165,6 @@ pub fn visit_translation_unit<V: Visit + ?Sized>(visitor: &mut V, unit: &Transla
     }
 }
 
-pub fn visit_if_statement<V: Visit + ?Sized>(visitor: &mut V, if_statement: &IfStatement) {}
+pub fn visit_if_statement<V: Visit + ?Sized>(_visitor: &mut V, _if_statement: &IfStatement) {}
 
-pub fn visit_return<V: Visit + ?Sized>(visitor: &mut V) {}
+pub fn visit_return<V: Visit + ?Sized>(_visitor: &mut V) {}

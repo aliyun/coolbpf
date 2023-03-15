@@ -23,7 +23,7 @@ pub trait Program {
             bail!("Failed to load eBPF program: fd = {}", fd)
         }
         self.set_program_fd(fd);
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -44,8 +44,6 @@ macro_rules! impl_program_common {
         }
     };
 }
-
-pub(crate) use impl_program_common;
 
 use crate::utils::kernel_version::kernel_version;
 
@@ -80,5 +78,5 @@ pub fn bpf_program_load(prog_type: bpf_prog_type, insns: *const bpf_insn, insns_
             panic!("failed to load program: {}, error: {}", s, errno::errno());
         }
     }
-    return fd;
+    fd
 }

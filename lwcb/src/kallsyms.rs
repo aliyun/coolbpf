@@ -1,17 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use lazy_static::lazy_static;
 use std::{
     collections::HashSet,
     fs::File,
     io::{self, BufRead},
-    sync::Mutex,
 };
 
 lazy_static! {
-    pub static ref GLOBAL_KALLSYMS: Kallsyms = {
-        let ksyms = Kallsyms::try_from("/proc/kallsyms").unwrap();
-        ksyms
-    };
+    pub static ref GLOBAL_KALLSYMS: Kallsyms = { Kallsyms::try_from("/proc/kallsyms").unwrap() };
 }
 
 #[derive(Debug, Default)]
@@ -28,7 +24,7 @@ impl TryFrom<&str> for Kallsyms {
         let lines = io::BufReader::new(file).lines();
         for line in lines {
             if let Ok(l) = line {
-                let mut iter = l.trim().split_whitespace();
+                let mut iter = l.split_whitespace();
                 if let Some(x) = iter.next() {
                     iter.next();
                     if let Some(y) = iter.next() {
@@ -90,11 +86,11 @@ impl Kallsyms {
         }
 
         if start == end && self.syms[start].1 <= addr {
-            let mut name = self.syms[start].0.clone();
+            let name = self.syms[start].0.clone();
             return name;
         }
 
-        return String::from("Not Found");
+        String::from("Not Found")
     }
 
     pub fn addr_to_sym(&self, addr: u64) -> String {
@@ -120,6 +116,6 @@ impl Kallsyms {
             return name;
         }
 
-        return String::from("Not Found");
+        String::from("Not Found")
     }
 }

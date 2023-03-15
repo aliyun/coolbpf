@@ -155,9 +155,9 @@ impl MemberExpression {
     }
 }
 
-impl Into<Expression> for MemberExpression {
-    fn into(self) -> Expression {
-        Expression::Member(self)
+impl From<MemberExpression> for Expression {
+    fn from(val: MemberExpression) -> Self {
+        Expression::Member(val)
     }
 }
 

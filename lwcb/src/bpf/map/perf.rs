@@ -1,4 +1,4 @@
-use crate::{is_python, IS_IN_PYTHON};
+use crate::is_python;
 
 use super::{
     layout::Layout,

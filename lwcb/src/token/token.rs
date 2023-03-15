@@ -1,6 +1,5 @@
-use logos::{Lexer, Logos};
+use logos::Logos;
 
-use crate::builtin_function::BuiltinFunction;
 use crate::types::*;
 
 #[derive(Logos, Debug, Clone, PartialEq)]

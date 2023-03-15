@@ -96,11 +96,11 @@ pub fn type_name(tokens: &mut Tokens) -> Result<TypeName> {
         pointer += 1;
     }
 
-    return Ok(TypeName {
+    Ok(TypeName {
         type_specifier: ty,
         pointers: pointer,
         identifier,
-    });
+    })
 }
 
 ///
@@ -192,7 +192,7 @@ pub fn primary_expression(tokens: &mut Tokens) -> Result<Expression> {
                 return Ok(Expression::Constant(constant));
             }
 
-            return Ok(Expression::Identifier(i));
+            Ok(Expression::Identifier(i))
         }
         Token::Constant(c) => Ok(Expression::Constant(c)),
         // Token::
@@ -217,7 +217,7 @@ pub fn argument_expression_list(tokens: &mut Tokens) -> Result<Vec<Expression>> 
         args.push(assignment_expression(tokens)?);
     }
     tokens.eat(Token::RightParen)?;
-    return Ok(args);
+    Ok(args)
 }
 
 ///```grammar
@@ -304,7 +304,7 @@ pub fn unary_expression(tokens: &mut Tokens) -> Result<Expression> {
         );
     }
 
-    return postfix_expression(tokens);
+    postfix_expression(tokens)
 }
 
 ///```grammar
@@ -353,7 +353,7 @@ pub fn cast_expression(tokens: &mut Tokens) -> Result<Expression> {
         }));
     }
 
-    return unary_expression(tokens);
+    unary_expression(tokens)
 }
 
 ///
@@ -384,7 +384,7 @@ pub fn equality_expression(tokens: &mut Tokens) -> Result<Expression> {
         )
         .into());
     }
-    return Ok(expression);
+    Ok(expression)
 }
 
 ///
@@ -424,7 +424,7 @@ pub fn relational_expression(tokens: &mut Tokens) -> Result<Expression> {
         );
     }
 
-    return Ok(expression);
+    Ok(expression)
 }
 
 ///
@@ -455,7 +455,7 @@ pub fn shift_expression(tokens: &mut Tokens) -> Result<Expression> {
         )
         .into());
     }
-    return Ok(expression);
+    Ok(expression)
 }
 
 ///```grammar
@@ -475,7 +475,7 @@ pub fn assignment_expression(tokens: &mut Tokens) -> Result<Expression> {
         )
         .into());
     }
-    return Ok(expression);
+    Ok(expression)
 }
 
 ///
@@ -498,7 +498,7 @@ pub fn expression(tokens: &mut Tokens) -> Result<Expression> {
 pub fn expression_statement(tokens: &mut Tokens) -> Result<Statement> {
     let expression = expression(tokens)?;
     tokens.eat(Token::Semicolon)?;
-    return Ok(Statement::Expression(Some(expression)));
+    Ok(Statement::Expression(Some(expression)))
 }
 
 ///
@@ -540,5 +540,5 @@ pub fn statement(tokens: &mut Tokens) -> Result<Statement> {
         return Ok(Statement::If(if_statement));
     }
 
-    return expression_statement(tokens);
+    expression_statement(tokens)
 }

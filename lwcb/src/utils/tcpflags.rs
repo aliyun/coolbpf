@@ -45,7 +45,7 @@ impl From<u8> for TcpFlags {
             flags.push(TcpFlag::Cwr);
         }
 
-        return TcpFlags(flags);
+        TcpFlags(flags)
     }
 }
 

@@ -10,7 +10,7 @@ impl From<u64> for TimeStr {
     fn from(ns: u64) -> Self {
         let ndt = NaiveDateTime::from_timestamp_opt(
             (ns / 1_000_000_000) as i64,
-            (ns % 1000_000_000) as u32,
+            (ns % 1_000_000_000) as u32,
         )
         .unwrap();
         let dt_utc: DateTime<Utc> = DateTime::from_utc(ndt, Utc);

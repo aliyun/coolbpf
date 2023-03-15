@@ -1,12 +1,5 @@
-use super::{
-    map::{bpf_create_map, Map},
-    perfbuffer::PerfBuffer,
-};
+use super::map::{bpf_create_map, Map};
 use anyhow::{bail, Result};
-use byteorder::{ByteOrder, NativeEndian};
-use libbpf_sys::bpf_map_update_elem;
-use mio::unix::SourceFd;
-use std::ffi::CString;
 
 pub struct HashMap {
     fd: i64,

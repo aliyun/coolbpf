@@ -1,7 +1,6 @@
+use crate::ast::Visit;
 use crate::ast::*;
-use crate::ast::{Ast, Visit};
-use crate::types::{Constant, Identifier, Types};
-use std::{fmt, io::BufWriter};
+use crate::types::{Constant, Identifier};
 
 pub struct Printer {
     ident: usize,

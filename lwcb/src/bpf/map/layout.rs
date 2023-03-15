@@ -1,10 +1,4 @@
-use std::{
-    ffi::CString,
-    fs::{read_to_string, File},
-    net::Ipv4Addr,
-    ops::Range,
-    sync::Mutex,
-};
+use std::net::Ipv4Addr;
 
 use crate::utils::timestr::TimeStr;
 use crate::utils::tstamp::delta_of_mono_real_time;
@@ -15,7 +9,7 @@ use crate::{
     kallsyms::GLOBAL_KALLSYMS,
     utils::{tcpflags::TcpFlags, tcpstate::TcpState},
 };
-use anyhow::{bail, Result};
+
 use btfparse::BtfKind;
 use byteorder::{ByteOrder, NativeEndian};
 use libfirm_rs::{Mode, Node, Type, TypeKind, UsAction};
@@ -129,7 +123,7 @@ impl Layout {
                 p.print_number(data[self.offset as usize] as i8);
             }
             LayoutKind::U8 => {
-                p.print_number(data[self.offset as usize] as u8);
+                p.print_number(data[self.offset as usize]);
             }
             LayoutKind::I16 => {
                 p.print_number(NativeEndian::read_i16(&data[start..start + 2]));
@@ -259,7 +253,7 @@ impl From<&Node> for Layout {
 impl From<u32> for Layout {
     fn from(typeid: u32) -> Self {
         match btf_type_kind(typeid) {
-            BtfKind::Ptr => return Layout::new(LayoutKind::Pointer),
+            BtfKind::Ptr => Layout::new(LayoutKind::Pointer),
             BtfKind::Struct => {
                 panic!("not support")
             }

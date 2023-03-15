@@ -20,7 +20,7 @@ impl Target {
         }
 
         unsafe { set_cur_block(self.block.unwrap().raw()) };
-        return self.block.clone();
+        self.block
     }
 
     pub fn add_pred(&mut self, pred: &Node) {
@@ -43,7 +43,7 @@ impl Target {
     pub fn jump(&mut self, target: &mut Target) {
         if let Some(block) = get_current_block() {
             if target.block.is_none() {
-                target.block = Some(block.clone());
+                target.block = Some(block);
                 target.first = true;
                 return;
             } else if target.first {

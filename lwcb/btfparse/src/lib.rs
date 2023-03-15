@@ -28,18 +28,11 @@ pub use types::{
 };
 
 pub use btf::BtfKind;
-// pub mod func_map;
-
-use anyhow::Result;
 
 pub fn btf_load(path: &PathBuf) -> Btf {
     Btf::from_file(path).unwrap()
 }
 
-pub fn try_btf_load(path: Option<&str>) -> Option<Btf> {
+pub fn try_btf_load(_: Option<&str>) -> Option<Btf> {
     todo!()
-}
-
-fn load(path: &str) -> Result<Btf> {
-    Btf::from_file(path)
 }

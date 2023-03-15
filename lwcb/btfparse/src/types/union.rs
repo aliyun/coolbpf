@@ -21,7 +21,7 @@ impl Union {
 
         let mut members = Vec::new();
 
-        for i in 0..vlen {
+        for _ in 0..vlen {
             members.push(BtfMember::from_reader(reader));
         }
 

@@ -11,16 +11,16 @@ use paste::paste;
 
 fn type_probe_read() -> Type {
     let type_arg1 = Type::new_pointer(&TYPE_U8);
-    let type_arg2 = TYPE_U32.clone();
+    let type_arg2 = *TYPE_U32;
     Type::new_method(&vec![type_arg1, type_arg2, type_arg1], None)
 }
 
 fn type_perf_out() -> Type {
     let type_arg1 = Type::new_pointer(&TYPE_U8);
     let type_arg2 = type_arg1;
-    let type_arg3 = TYPE_U64.clone();
+    let type_arg3 = *TYPE_U64;
     let type_arg4 = Type::new_pointer(&TYPE_U8);
-    let type_arg5 = TYPE_U64.clone();
+    let type_arg5 = *TYPE_U64;
     Type::new_method(
         &vec![type_arg1, type_arg2, type_arg3, type_arg4, type_arg5],
         None,
@@ -29,9 +29,9 @@ fn type_perf_out() -> Type {
 
 fn type_get_stackid() -> Type {
     let type_arg1 = Type::new_pointer(&TYPE_U8);
-    let type_arg2 = TYPE_U64.clone();
-    let type_arg3 = TYPE_U64.clone();
-    let ret = TYPE_U64.clone();
+    let type_arg2 = *TYPE_U64;
+    let type_arg3 = *TYPE_U64;
+    let ret = *TYPE_U64;
 
     Type::new_method(&vec![type_arg1, type_arg2, type_arg3], Some(&ret))
 }
@@ -44,12 +44,12 @@ fn type_KTIME_GET_NS() -> Type {
 // static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) 1;
 fn type_MAP_LOOKUP_ELEM() -> Type {
     let key = Type::new_pointer(&TYPE_U8);
-    Type::new_method(&vec![TYPE_U64.clone(), key], Some(&key.clone()))
+    Type::new_method(&vec![*TYPE_U64, key], Some(&key.clone()))
 }
 
 lazy_static! {
     pub static ref TYPE_BOOL: Type = Type::new_primitive(&Mode::ModeBu());
-    pub static ref TYPE_U8: Type = TYPE_BOOL.clone();
+    pub static ref TYPE_U8: Type = *TYPE_BOOL;
     pub static ref TYPE_I8: Type = Type::new_primitive(&Mode::ModeBs());
     pub static ref TYPE_U16: Type = Type::new_primitive(&Mode::ModeHu());
     pub static ref TYPE_I16: Type = Type::new_primitive(&Mode::ModeHs());

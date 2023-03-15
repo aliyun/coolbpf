@@ -1,4 +1,3 @@
-use super::info_kind_flag;
 use crate::btf::BtfReader;
 
 // https://docs.kernel.org/bpf/btf.html#btf-kind-float

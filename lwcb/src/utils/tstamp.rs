@@ -10,7 +10,7 @@ pub fn current_monotime() -> u64 {
     };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
 
-    (ts.tv_sec as u64) * 1000_000_000 + (ts.tv_nsec as u64)
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
 /// System-wide realtime clock. It is generally synchronized with the clock of
@@ -22,7 +22,7 @@ pub fn current_realtime() -> u64 {
     };
     unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
 
-    (ts.tv_sec as u64) * 1000_000_000 + (ts.tv_nsec as u64)
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
 #[cached(size = 1)]

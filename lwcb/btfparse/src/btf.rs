@@ -2,10 +2,8 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
-use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
-use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 
@@ -321,7 +319,7 @@ fn test_btf_get_func_proto() {
 
     if let BtfType::Func(f) = &btf.types()[id as usize] {
         let fpid = f.type_id - 1;
-        if let BtfType::FuncProto(fp) = &btf.types()[fpid as usize] {
+        if let BtfType::FuncProto(_) = &btf.types()[fpid as usize] {
             return;
         }
     }

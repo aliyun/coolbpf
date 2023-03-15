@@ -3,20 +3,18 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::PathBuf;
 
-use crate::ast::Visit;
 use crate::bpf::map::{Layout, LayoutKind, PerfEvent};
 use crate::btf::{
-    btf_find_func, btf_find_struct, btf_find_struct_member, btf_get_func_args, btf_get_func_name,
-    btf_get_func_returnty, btf_get_point_to, btf_get_struct_name, btf_get_struct_size,
-    btf_skip_const, btf_skip_typedef, btf_skip_volatile, btf_struct_has_bitfield, btf_struct_size,
-    btf_type_kind, btf_type_mode, btf_type_name, btf_type_size, dump_by_typeid, try_btf_find_func,
-    try_btf_find_struct,
+    btf_find_struct, btf_find_struct_member, btf_get_func_args, btf_get_func_returnty,
+    btf_get_point_to, btf_get_struct_name, btf_get_struct_size, btf_skip_const, btf_skip_typedef,
+    btf_skip_volatile, btf_struct_has_bitfield, btf_struct_size, btf_type_kind, btf_type_mode,
+    dump_by_typeid, try_btf_find_func, try_btf_find_struct,
 };
 use crate::builtin_function::BuiltinFunction;
 use crate::gperf::{perf_add_event, perf_get_event_id, perf_mapfd};
 use crate::gstack::get_stackmap_fd;
 use crate::types::Constant;
-use crate::utils::align::{align8, roundup};
+use crate::utils::align::roundup;
 use crate::{ast::*, is_python};
 use anyhow::{bail, Result};
 use btfparse::BtfKind;
@@ -133,7 +131,7 @@ impl FirmProgram {
         kprobe.load()?;
 
         self.kprobe = Some(kprobe);
-        return Ok(());
+        Ok(())
     }
 
     // Determine whether eBPF program loaded
@@ -169,7 +167,7 @@ impl FirmProgram {
             _ => todo!(),
         }
 
-        return Ok(());
+        Ok(())
     }
 
     fn generate_conv(&mut self, value: Node, mode: &Mode) -> Node {
@@ -177,7 +175,7 @@ impl FirmProgram {
             return value;
         }
 
-        return Node::new_conv(&value, mode);
+        Node::new_conv(&value, mode)
     }
 
     pub fn set_perf_mapfd(&mut self, fd: i32) {
@@ -230,7 +228,7 @@ impl FirmProgram {
 
                 BtfKind::Enum => {
                     // todo: fix this
-                    return TYPE_I32.clone();
+                    return *TYPE_I32;
                 }
                 _ => {
                     panic!("{:?} not yet implemented", dump_by_typeid(typeid));
@@ -252,20 +250,20 @@ impl FirmProgram {
         let cname = CString::new(name).unwrap();
         let ident = Ident::new(&cname);
         self.names.push(cname);
-        return ident;
+        ident
     }
 
     fn get_unique_ident(&mut self, name: &str) -> Ident {
         let cname = CString::new(name).unwrap();
         let ident = Ident::unique(&cname);
         self.names.push(cname);
-        return ident;
+        ident
     }
 
     // get member entity of struct, then add member entity into
     // owner type
     fn get_entity(&mut self, owner: &Type, name: &str) -> Entity {
-        let mut tmp_owner = owner.clone();
+        let mut tmp_owner = *owner;
         loop {
             if tmp_owner.kind() == TypeKind::Pointer {
                 tmp_owner = tmp_owner.point_to();
@@ -300,7 +298,7 @@ impl FirmProgram {
 
         let entity = Entity::new_entity(&frame_type, &id, ty);
         let frame = self.graph.frame();
-        return Node::new_member(&frame, &entity);
+        Node::new_member(&frame, &entity)
     }
 
     fn get_frame(&mut self, ty: &Type, name: &str) -> Node {
@@ -309,10 +307,10 @@ impl FirmProgram {
 
         let entity = Entity::new_entity(&frame_type, &id, ty);
         let frame = self.graph.frame();
-        return Node::new_member(&frame, &entity);
+        Node::new_member(&frame, &entity)
     }
 
-    fn get_unique_frame(&mut self, ty: &Type) -> Node {
+    fn get_unique_frame(&mut self, _ty: &Type) -> Node {
         // self.get_frame(ty, "name")
         todo!()
     }
@@ -324,8 +322,8 @@ impl FirmProgram {
     fn create_function_entity(&mut self, name: &CString, method: &Type) -> Entity {
         let id = Ident::new(name);
         let owner = Type::global_type();
-        let mut func_entity = Entity::new_global(&owner, &id, method);
-        func_entity
+
+        Entity::new_global(&owner, &id, method)
     }
 
     fn create_context_pointer(&mut self) {
@@ -339,7 +337,7 @@ impl FirmProgram {
     fn load_context_register(&mut self, reg: &String) -> Result<(Node, Type)> {
         let ctx_type = self.graph.entity().type_().param(0).point_to();
         let ctx_node = self.ctx_node.unwrap();
-        let member_entity = self.get_entity(&ctx_type, &reg.as_str());
+        let member_entity = self.get_entity(&ctx_type, reg.as_str());
         let member_node = Node::new_member(&ctx_node, &member_entity);
         self.deref_address(&member_node, &member_entity.type_())
     }
@@ -362,7 +360,7 @@ impl FirmProgram {
             ));
         }
 
-        return None;
+        None
     }
 
     ///
@@ -374,17 +372,16 @@ impl FirmProgram {
 
     fn generate_helper_ktime_get_ns(&mut self) -> (Node, Type) {
         let callee = Node::new_address(&ENTITY_KTIME_GET_NS);
-        let res = self
-            .generate_helper_call(&callee, &vec![], &TYPE_KTIME_GET_NS)
-            .unwrap();
-        res
+
+        self.generate_helper_call(&callee, &vec![], &TYPE_KTIME_GET_NS)
+            .unwrap()
     }
 
     /// allocate frame
     fn generate_helper_probe_read_with_frame(&mut self, src: &Node, ty: &Type) -> Node {
-        let mut dst = self.get_tmp_frame(&ty);
+        let mut dst = self.get_tmp_frame(ty);
         let size = Node::new_const(&Tarval::new_long(ty.size() as i64, &Mode::ModeIu()));
-        self.generate_helper_probe_read(&dst, &size, &src);
+        self.generate_helper_probe_read(&dst, &size, src);
         dst.set_is_kernel_memory(0);
         dst
     }
@@ -414,12 +411,12 @@ impl FirmProgram {
     fn generate_builtin_tcphdr(&mut self, skb: &Node, skb_ty: &Type) -> Result<(Node, Type)> {
         assert!(skb_ty.is_pointer());
         let head_entity = self.get_entity(&skb_ty.point_to(), "head");
-        let head_node = Node::new_member(&skb, &head_entity);
-        let (head, head_type) = self.deref_address(&head_node, &head_entity.type_())?;
+        let head_node = Node::new_member(skb, &head_entity);
+        let (head, _head_type) = self.deref_address(&head_node, &head_entity.type_())?;
 
         let transport_entity = self.get_entity(&skb_ty.point_to(), "transport_header");
-        let transport_node = Node::new_member(&skb, &transport_entity);
-        let (mut transport, transport_type) =
+        let transport_node = Node::new_member(skb, &transport_entity);
+        let (mut transport, _transport_type) =
             self.deref_address(&transport_node, &transport_entity.type_())?;
 
         let typeid = btf_find_struct("tcphdr");
@@ -462,7 +459,7 @@ impl FirmProgram {
         let dst = self.get_frame(&dst_type, "head");
         let size = Node::new_const(&Tarval::new_long(8, &Mode::ModeIu()));
         let head = self.get_entity(&skb_ty.point_to(), "head");
-        let src = Node::new_member(&skb, &head);
+        let src = Node::new_member(skb, &head);
         self.generate_helper_probe_read(&dst, &size, &src);
         let (res1, _) = self.deref_address(&dst, &dst_type.point_to()).unwrap();
 
@@ -470,7 +467,7 @@ impl FirmProgram {
         let dst = self.get_frame(&dst_type, "network_header");
         let size = Node::new_const(&Tarval::new_long(2, &Mode::ModeIu()));
         let network_header = self.get_entity(&skb_ty.point_to(), "network_header");
-        let src = Node::new_member(&skb, &network_header);
+        let src = Node::new_member(skb, &network_header);
         self.generate_helper_probe_read(&dst, &size, &src);
         let (mut res2, _) = self.deref_address(&dst, &dst_type.point_to()).unwrap();
 
@@ -488,8 +485,8 @@ impl FirmProgram {
         }
         let src = Node::new_add(&res1, &res2);
         self.generate_helper_probe_read(&dst, &size, &src);
-        let res = self.deref_address(&dst, &dst_type).unwrap();
-        return res;
+
+        self.deref_address(&dst, &dst_type).unwrap()
     }
 
     fn generate_builtin_print(&mut self, args: &Vec<(Node, Type)>) -> (Node, Type) {
@@ -521,7 +518,7 @@ impl FirmProgram {
                 } else {
                     // save print format string
                     fmt = Some(arg.0.address_entity().initializer().construct_string());
-                    self.perf_fmtstr.push(arg.0.clone());
+                    self.perf_fmtstr.push(arg.0);
                     continue;
                 }
             }
@@ -549,7 +546,7 @@ impl FirmProgram {
         perf_type.set_align(8);
         self.generate_helper_perf_event_output(&tmpframe, perf_type.size());
 
-        return (tmpframe, perf_type);
+        (tmpframe, perf_type)
     }
 
     fn generate_builtin_kstack(&mut self, ctx: &Node, map: &Node) -> (Node, Type) {
@@ -563,7 +560,7 @@ impl FirmProgram {
     }
 
     fn generate_builtin_ntop(&mut self, input: &Node) -> Node {
-        let mut node = input.clone();
+        let node = *input;
         node.set_us_action(UsAction::Ntop);
         node
     }
@@ -572,14 +569,12 @@ impl FirmProgram {
     /// ty: the type of the dereferenced result (the points_to type)
     fn deref_address(&mut self, addr: &Node, ty: &Type) -> Result<(Node, Type)> {
         match ty.kind() {
-            TypeKind::Struct | TypeKind::Method | TypeKind::Array => {
-                return Ok((addr.clone(), ty.clone()))
-            }
+            TypeKind::Struct | TypeKind::Method | TypeKind::Array => return Ok((*addr, *ty)),
             _ => {}
         }
 
         if addr.is_kernel_memory() {
-            let dst = self.generate_helper_probe_read_with_frame(&addr, ty);
+            let dst = self.generate_helper_probe_read_with_frame(addr, ty);
             return self.deref_address(&dst, ty);
         }
 
@@ -588,7 +583,7 @@ impl FirmProgram {
         let load_mem = Node::new_prog(&load, &Mode::ModeM(), libfirm_sys::pn_Load_pn_Load_M);
         let load_res = Node::new_prog(&load, &mode, libfirm_sys::pn_Load_pn_Load_res);
         self.graph.set_store(&load_mem);
-        return Ok((load_res, ty.clone()));
+        Ok((load_res, *ty))
     }
 
     fn typename_to_type(&mut self, tn: &TypeName) -> Type {
@@ -617,7 +612,7 @@ impl FirmProgram {
 
         let node = self.generate_conv(from.0, &to_type.mode());
 
-        return Ok((node, to_type));
+        Ok((node, to_type))
     }
 
     fn generate_expression_address(&mut self, expression: &Expression) -> Result<(Node, Type)> {
@@ -654,9 +649,9 @@ impl FirmProgram {
                 UnaryOperator::Indirection => {
                     let (addr, ty) = self.generate_expression_value(&u.operand)?;
                     if ty.is_pointer() {
-                        return self.deref_address(&addr, &ty.point_to());
+                        self.deref_address(&addr, &ty.point_to())
                     } else {
-                        return self.deref_address(&addr, &ty);
+                        self.deref_address(&addr, &ty)
                     }
                 }
                 _ => todo!(),
@@ -691,7 +686,7 @@ impl FirmProgram {
                 // https://stackoverflow.com/questions/72583983/interpreting-escape-characters-in-a-string-read-from-user-input
                 // replace literal escape to actual speical character
                 s = s.replace("\\n", "\n");
-                let mut strinit = Initializer::new_compound(s.len() as u64);
+                let strinit = Initializer::new_compound(s.len() as u64);
                 for (i, c) in s.chars().enumerate() {
                     let val = Tarval::new_long(c as i64, &Mode::ModeBu());
                     let init = Initializer::from_tarval(&val);
@@ -704,7 +699,7 @@ impl FirmProgram {
                 let mut entity = Entity::new_global(&gty, &id, &ty);
 
                 entity.set_initializer(&strinit);
-                return Ok((Node::new_address(&entity), ty));
+                Ok((Node::new_address(&entity), ty))
             }
             Expression::Binary(b) => {
                 match b.op {
@@ -759,11 +754,9 @@ impl FirmProgram {
                     BuiltinFunction::Iphdr => {
                         assert!(argvals.len() == 1);
                         let skb = argvals[0];
-                        return Ok(self.generate_builtin_iphdr(&skb.0, &skb.1));
+                        Ok(self.generate_builtin_iphdr(&skb.0, &skb.1))
                     }
-                    BuiltinFunction::Print => {
-                        return Ok(self.generate_builtin_print(&argvals));
-                    }
+                    BuiltinFunction::Print => Ok(self.generate_builtin_print(&argvals)),
                     BuiltinFunction::Kstack => {
                         assert!(argvals.len() <= 1);
                         let mut depth = 20;
@@ -776,7 +769,7 @@ impl FirmProgram {
                         map.set_const_mapfd();
 
                         if let Some(ctx) = self.ctx_node {
-                            let mut res = self.generate_builtin_kstack(&ctx, &map);
+                            let res = self.generate_builtin_kstack(&ctx, &map);
                             res.0.set_us_action(UsAction::from(
                                 UsAction::StackMap as u32 + depth as u32,
                             ));
@@ -787,7 +780,7 @@ impl FirmProgram {
                     BuiltinFunction::Ntop => {
                         assert!(argvals.len() == 1);
                         argvals[0].0.set_us_action(UsAction::Ntop);
-                        return Ok(argvals[0]);
+                        Ok(argvals[0])
                     }
                     BuiltinFunction::Bswap => {
                         assert!(argvals.len() == 1);
@@ -802,32 +795,32 @@ impl FirmProgram {
                             libfirm_sys::pn_Builtin_pn_Builtin_max + 1,
                         );
                         res.set_type(&return_type);
-                        return Ok((res, return_type));
+                        Ok((res, return_type))
                     }
                     BuiltinFunction::TcpState => {
                         assert!(argvals.len() == 1);
                         argvals[0].0.set_us_action(UsAction::TcpState);
-                        return Ok(argvals[0]);
+                        Ok(argvals[0])
                     }
                     BuiltinFunction::TcpFlags => {
                         assert!(argvals.len() == 1);
                         // todo: check if is u8 type
                         argvals[0].0.set_us_action(UsAction::TcpFlags);
-                        return Ok(argvals[0]);
+                        Ok(argvals[0])
                     }
                     BuiltinFunction::Ns => {
-                        assert!(argvals.len() == 0);
-                        return Ok(self.generate_helper_ktime_get_ns());
+                        assert!(argvals.is_empty());
+                        Ok(self.generate_helper_ktime_get_ns())
                     }
                     BuiltinFunction::TimeStr => {
                         assert!(argvals.len() == 1);
                         argvals[0].0.set_us_action(UsAction::TimeStr);
-                        return Ok(argvals[0]);
+                        Ok(argvals[0])
                     }
                     BuiltinFunction::Ksym => {
                         assert!(argvals.len() == 1);
                         argvals[0].0.set_us_action(UsAction::Ksym);
-                        return Ok(argvals[0]);
+                        Ok(argvals[0])
                     }
                     BuiltinFunction::Reg => {
                         assert!(argvals.len() == 1);
@@ -841,12 +834,12 @@ impl FirmProgram {
                     _ => todo!("call expression not yet implemented: {:?}", c),
                 }
             }
-            Expression::Member(m) => {
+            Expression::Member(_m) => {
                 let (addr, ty) = self.generate_expression_address(expression)?;
                 if ty.is_pointer() {
-                    return self.deref_address(&addr, &ty.point_to());
+                    self.deref_address(&addr, &ty.point_to())
                 } else {
-                    return self.deref_address(&addr, &ty);
+                    self.deref_address(&addr, &ty)
                 }
             }
 
@@ -888,11 +881,7 @@ impl FirmProgram {
         match expression {
             Expression::Unary(u) => match u.operator {
                 UnaryOperator::Negate => {
-                    return self.generate_expression_control_flow(
-                        &u.operand,
-                        false_target,
-                        true_target,
-                    );
+                    self.generate_expression_control_flow(&u.operand, false_target, true_target)
                 }
                 _ => {
                     panic!("Only UnaryOperator::Negate is logical expression which is control flow")
@@ -913,7 +902,7 @@ impl FirmProgram {
                             false_target,
                         );
                     }
-                    return Ok(None);
+                    Ok(None)
                 }
                 BinaryOp::Or => {
                     let mut extra_target = Target::new(None);
@@ -925,7 +914,7 @@ impl FirmProgram {
                             false_target,
                         );
                     }
-                    return Ok(None);
+                    Ok(None)
                 }
                 _ => {
                     let relation = match b.op {
@@ -947,12 +936,12 @@ impl FirmProgram {
                         true_target,
                         false_target,
                     );
-                    return Ok(None);
+                    Ok(None)
                 }
             },
             _ => {
-                let (mut left, _) = self.generate_expression_value(expression)?;
-                let mut right = Node::new_const(&Tarval::new_long(0, &left.mode()));
+                let (left, _) = self.generate_expression_value(expression)?;
+                let right = Node::new_const(&Tarval::new_long(0, &left.mode()));
 
                 let relation = Relation::UnorderedLessGreater;
 
@@ -1006,7 +995,7 @@ impl FirmProgram {
                 if let Some(e) = expression {
                     self.generate_expression(e);
                 }
-                return Ok(());
+                Ok(())
             }
             Statement::Return => {
                 // 1. if >= 0, goto perf_output
@@ -1031,18 +1020,16 @@ impl FirmProgram {
                 for statement in &c.statements {
                     self.generate_statement(statement)?;
                 }
-                return Ok(());
+                Ok(())
             }
-            Statement::If(i) => {
-                return self.generate_if_statement(i);
-            }
+            Statement::If(i) => self.generate_if_statement(i),
             _ => todo!(),
         }
     }
 
     fn generate_function_parameters(&mut self, ctx_type_ptr: &Type, ctx_node: &Node) -> Result<()> {
         let ctx_type = ctx_type_ptr.point_to();
-        if let Some(typeid) = try_btf_find_func(&self.func_name()) {
+        if let Some(typeid) = try_btf_find_func(self.func_name()) {
             self.set_func_typeid(typeid);
         }
 
@@ -1057,7 +1044,7 @@ impl FirmProgram {
                 // (struct sk_buff *)ctx->di
                 for i in 0..5 {
                     let member_entity = self.get_entity(&ctx_type, tmp_name[i]);
-                    let member_node = Node::new_member(&ctx_node, &member_entity);
+                    let member_node = Node::new_member(ctx_node, &member_entity);
 
                     let (mut loaded_member_node, loaded_ty) =
                         self.deref_address(&member_node, &member_entity.type_())?;
@@ -1081,14 +1068,14 @@ impl FirmProgram {
             }
             ProgramType::Kretprobe => {
                 let member_entity = self.get_entity(&ctx_type, "ax");
-                let member_node = Node::new_member(&ctx_node, &member_entity);
+                let member_node = Node::new_member(ctx_node, &member_entity);
                 let (mut loaded_member_node, loaded_ty) =
                     self.deref_address(&member_node, &member_entity.type_())?;
 
                 let return_type = if let Some(typeid) = self.try_func_typeid() {
                     self.get_type(btf_get_func_returnty(typeid))
                 } else {
-                    TYPE_U64.clone()
+                    *TYPE_U64
                 };
                 if loaded_ty.mode() != return_type.mode() {
                     loaded_member_node = Node::new_conv(&loaded_member_node, &return_type.mode());
@@ -1107,7 +1094,7 @@ impl FirmProgram {
     }
 
     fn generate_function_method(&mut self) -> Result<()> {
-        let func_ident = self.get_unique_ident(&self.func_name().clone().as_str());
+        let func_ident = self.get_unique_ident(self.func_name().clone().as_str());
         let type_ctx = self.get_context_type();
         let type_ctx_ptr = Type::new_pointer(&type_ctx);
         let method = Type::new_method(&vec![type_ctx_ptr], None);
@@ -1135,7 +1122,7 @@ impl FirmProgram {
         let ctx_node = Node::new_prog(&args, &Mode::ModeP(), 0);
         self.add_rvalue("ctx", &ctx_node);
 
-        self.ctx_node = Some(ctx_node.clone());
+        self.ctx_node = Some(ctx_node);
 
         self.generate_function_parameters(&self.graph.entity().type_().param(0), &ctx_node)?;
         Ok(())
@@ -1148,8 +1135,8 @@ impl FirmProgram {
 
         self.generate_statement(&program.statement).unwrap();
 
-        let mut end_block = self.graph.end_block();
-        let mut ret = Node::new_return(&self.graph.store());
+        let end_block = self.graph.end_block();
+        let ret = Node::new_return(&self.graph.store());
         immblock_add_pred(&end_block, &ret);
 
         self.graph.finalize_cons();
@@ -1175,5 +1162,5 @@ impl FirmProgram {
         self.graph.dump(out);
     }
 
-    pub fn emit(&mut self, out: &str) {}
+    pub fn emit(&mut self, _out: &str) {}
 }

@@ -16,7 +16,7 @@ pub(crate) fn bpf_create_map(
     attr.__bindgen_anon_1.max_entries = max_entries;
     attr.__bindgen_anon_1.map_flags = 0;
 
-    return unsafe { libc::syscall(321, BPF_MAP_CREATE, &attr, std::mem::size_of::<bpf_attr>()) };
+    unsafe { libc::syscall(321, BPF_MAP_CREATE, &attr, std::mem::size_of::<bpf_attr>()) }
 }
 
 // int bpf_lookup_elem(int fd, void *key, void *value)
@@ -45,7 +45,7 @@ pub(crate) fn bpf_map_lookup(fd: i32, key: &[u8], value_size: usize) -> Result<O
         unsafe {
             value.set_len(value_size);
         }
-        return Ok(Some(value));
+        Ok(Some(value))
     } else {
         if errno::errno() == errno::Errno(libc::ENOENT) {
             return Ok(None);
@@ -67,5 +67,5 @@ pub trait Map {
 
     fn set_value_size(&mut self, _: usize) {}
 
-    fn set_max_entries(&mut self, max_entries: usize) {}
+    fn set_max_entries(&mut self, _max_entries: usize) {}
 }

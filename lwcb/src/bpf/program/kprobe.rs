@@ -12,7 +12,7 @@ fn determine_kprobe_perf_type() -> Result<i32> {
     let mut content = read_to_string("/sys/bus/event_source/devices/kprobe/type")?;
 
     for (i, c) in content.chars().enumerate() {
-        if c < '0' || c > '9' {
+        if !c.is_ascii_digit() {
             content.truncate(i);
             break;
         }
@@ -21,7 +21,7 @@ fn determine_kprobe_perf_type() -> Result<i32> {
 }
 
 fn determine_kprobe_retprobe_bit() -> Result<i32> {
-    let mut content = read_to_string("/sys/bus/event_source/devices/kprobe/format/retprobe")?;
+    let content = read_to_string("/sys/bus/event_source/devices/kprobe/format/retprobe")?;
     let skip_len = "config:".len();
     Ok(content[skip_len..skip_len + 1].parse::<i32>()?)
 }
@@ -87,7 +87,7 @@ impl KprobeProgram {
             bail!("Failed to enable bpf program in perf event")
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 

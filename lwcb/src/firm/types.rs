@@ -19,12 +19,11 @@ impl Btf {
     }
 
     fn btf_type(&self, typeid: u32) -> *const btf_type {
-        let ty = unsafe { libbpf_sys::btf__type_by_id(self.raw(), typeid) };
-        ty
+        unsafe { libbpf_sys::btf__type_by_id(self.raw(), typeid) }
     }
 
     pub fn typeid_to_type(&self, typeid: u32) -> Type {
-        let ty = self.btf_type(typeid);
+        let _ty = self.btf_type(typeid);
 
         todo!()
     }
@@ -34,6 +33,6 @@ unsafe impl Send for Btf {}
 
 static GLOBAL_BTF: Lazy<Mutex<Btf>> = Lazy::new(|| Mutex::new(Btf::new()));
 
-pub fn typeid_to_firmtype(typeid: u32) -> Type {
+pub fn typeid_to_firmtype(_typeid: u32) -> Type {
     todo!()
 }

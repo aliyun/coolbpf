@@ -1,4 +1,3 @@
-use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 pub fn btf_locate_path() -> Option<PathBuf> {

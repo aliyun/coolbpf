@@ -11,8 +11,8 @@ pub enum Enum64Item {
 
 #[derive(Debug, Clone)]
 pub struct Enum64 {
-    size: u32,
-    enums: Vec<(String, Enum64Item)>,
+    pub size: u32,
+    pub enums: Vec<(String, Enum64Item)>,
 }
 
 impl Enum64 {

@@ -1,12 +1,10 @@
 use anyhow::Result;
 use btfparse::btf::{Btf, BtfType};
-use btfparse::{btf_load, BtfKind, BtfMember, Func};
+use btfparse::{btf_load, BtfKind, BtfMember};
 use libfirm_rs::Mode;
 use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Mutex;
 
 use crate::types::Constant;
 use crate::utils::btf::btf_locate_path;
@@ -124,7 +122,7 @@ impl BtfCache {
 
 static GLOBAL_BTF: Lazy<Btf> = Lazy::new(|| btf_load(&btf_locate_path().unwrap()));
 
-pub fn btf_typeid_of_arg(btf: &Btf, func_name: &String, arg_name: &String) -> Option<u32> {
+pub fn btf_typeid_of_arg(_btf: &Btf, _func_name: &String, _arg_name: &String) -> Option<u32> {
     // for ty in btf.types() {
     //     match ty {
     //         BtfType::Func(f) => {
@@ -153,7 +151,7 @@ pub fn btf_type_kind(typeid: u32) -> BtfKind {
     (&get_btf!().types()[typeid as usize]).into()
 }
 
-pub fn btf_type_name(typeid: u32) -> &'static str {
+pub fn btf_type_name(_typeid: u32) -> &'static str {
     // get_btf!().types()[typeid as usize]
     todo!()
 }
@@ -201,7 +199,7 @@ pub fn btf_skip_const(typeid: u32) -> u32 {
 }
 
 // translate constant type into btf type
-pub fn btf_type_constant(constant: &Constant) -> u32 {
+pub fn btf_type_constant(_constant: &Constant) -> u32 {
     // get_btfcache!().btf_type_constant(constant)
     todo!()
 }
@@ -286,13 +284,13 @@ pub fn btf_get_func_returnty(typeid: u32) -> u32 {
     panic!("typeid is not Func")
 }
 
-pub fn btf_get_func_argnum(typeid: u32) -> u32 {
+pub fn btf_get_func_argnum(_typeid: u32) -> u32 {
     todo!()
 }
 
 /// Get function argument typeid by argument's name
 ///
-pub fn btf_find_func_arg_by_name(typeid: u32, name: &String) -> Option<u32> {
+pub fn btf_find_func_arg_by_name(_typeid: u32, _name: &String) -> Option<u32> {
     todo!()
 }
 
@@ -306,14 +304,14 @@ pub fn btf_get_func_name(typeid: u32) -> String {
 /// Get function argument typeid by argument's position
 ///
 /// Position counts from 1
-pub fn btf_find_func_arg_by_pos(typeid: u32, pos: usize) -> Option<u32> {
+pub fn btf_find_func_arg_by_pos(_typeid: u32, _pos: usize) -> Option<u32> {
     todo!()
 }
 
 /// Get function argument typeid by type's name of that argument.
 ///
 /// For example, type's name is sock
-pub fn btf_find_func_arg_by_typename(typeid: u32, type_name: &String) -> Option<u32> {
+pub fn btf_find_func_arg_by_typename(_typeid: u32, _type_name: &String) -> Option<u32> {
     todo!()
 }
 
@@ -469,11 +467,11 @@ pub fn try_btf_find_struct(name: &str) -> Option<u32> {
 }
 
 /// Get typeid of struct pointer by structure's name
-pub fn btf_find_struct_pointer(typeid: u32, name: &String) -> Option<u32> {
+pub fn btf_find_struct_pointer(_typeid: u32, _name: &String) -> Option<u32> {
     todo!()
 }
 
-pub fn btf_type_is_pointer(typeid: u32) -> bool {
+pub fn btf_type_is_pointer(_typeid: u32) -> bool {
     // get_btf!().types()[typeid as usize].is_pointer()
     todo!()
 }

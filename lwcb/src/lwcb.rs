@@ -4,9 +4,9 @@ use anyhow::{bail, Result};
 use libfirm_rs::{generate_code, init_libfirm};
 
 use crate::ast::*;
-use crate::bpf::map::StackMap;
+
 use crate::bpf::program::ProgramType;
-use crate::btf::{btf_find_funcs_by_typename, btf_find_struct, btf_get_func_name};
+use crate::btf::{btf_find_funcs_by_typename, btf_get_func_name};
 use crate::firm::FirmProgram;
 use crate::gperf::{perf_open_buffer, perf_poll, perf_read_events};
 use crate::utils::bump_memlock_rlimit;
@@ -39,10 +39,8 @@ impl LwCB {
 
     /// enable dump ir svg graph
     pub fn set_irdump(&mut self, dump: PathBuf) {
-        if !dump.exists() {
-            if std::fs::create_dir_all(&dump).is_err() {
-                panic!("Failed to create irdump directory: {}", dump.display())
-            }
+        if !dump.exists() && std::fs::create_dir_all(&dump).is_err() {
+            panic!("Failed to create irdump directory: {}", dump.display())
         }
         assert!(
             dump.is_dir(),
@@ -54,10 +52,8 @@ impl LwCB {
 
     /// enable dump lower ir(is being optimized) svg graph
     pub fn set_lirdump(&mut self, dump: PathBuf) {
-        if !dump.exists() {
-            if std::fs::create_dir_all(&dump).is_err() {
-                panic!("Failed to create lirdump directory: {}", dump.display())
-            }
+        if !dump.exists() && std::fs::create_dir_all(&dump).is_err() {
+            panic!("Failed to create lirdump directory: {}", dump.display())
         }
         assert!(
             dump.is_dir(),
@@ -92,7 +88,7 @@ impl LwCB {
         for firm in &mut self.firms {
             firm.attach()?;
         }
-        return Ok(());
+        Ok(())
     }
 
     /// Attach the source program to target kprobe in linux kernel

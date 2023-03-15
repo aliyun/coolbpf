@@ -1,6 +1,5 @@
 use super::{info_kind_flag, info_vlen};
 use crate::btf::BtfReader;
-use std::fmt;
 
 #[derive(Debug, Clone)]
 pub enum EnumItem {
@@ -27,7 +26,7 @@ impl Enum {
         let vlen = info_vlen!(info);
         let mut enums = Vec::new();
 
-        for i in 0..vlen {
+        for _ in 0..vlen {
             let item_name = reader.read_name();
             let item;
             if signed {
