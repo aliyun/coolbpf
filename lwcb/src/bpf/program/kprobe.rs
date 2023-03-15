@@ -23,7 +23,7 @@ fn determine_kprobe_perf_type() -> Result<i32> {
 fn determine_kprobe_retprobe_bit() -> Result<i32> {
     let mut content = read_to_string("/sys/bus/event_source/devices/kprobe/format/retprobe")?;
     let skip_len = "config:".len();
-    Ok(content[skip_len..skip_len+1].parse::<i32>()?)
+    Ok(content[skip_len..skip_len + 1].parse::<i32>()?)
 }
 
 pub struct KprobeProgram {
@@ -73,7 +73,6 @@ impl KprobeProgram {
         if self.kretprobe {
             attr.config = 1 << determine_kprobe_retprobe_bit()?;
         }
-        
 
         let pfd = unsafe { perf_event_open(&mut attr, -1, 0, -1, PERF_FLAG_FD_CLOEXEC as u64) };
         if pfd < 0 {
@@ -90,7 +89,6 @@ impl KprobeProgram {
 
         return Ok(());
     }
-
 }
 
 impl Program for KprobeProgram {

@@ -1,7 +1,3 @@
-
-
-
-
 #[derive(Clone, Copy)]
 pub enum SymbolKind {
     Method,
@@ -9,8 +5,4 @@ pub enum SymbolKind {
     Node,
 }
 
-
-
-pub struct Symbol {
-
-}
+pub struct Symbol {}

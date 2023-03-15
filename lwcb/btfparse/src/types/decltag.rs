@@ -1,4 +1,3 @@
-
 use crate::btf::BtfReader;
 
 // https://docs.kernel.org/bpf/btf.html#btf-kind-decl-tag
@@ -8,7 +7,6 @@ pub struct DeclTag {
     pub type_id: u32,
     pub component_idx: u32,
 }
-
 
 impl DeclTag {
     pub fn from_reader(reader: &mut BtfReader) -> Self {

@@ -1,13 +1,10 @@
 mod ast;
-mod parser;
-mod visit;
-mod print;
 mod attr;
+mod parser;
+mod print;
+mod visit;
 
 pub use {self::ast::*, self::parser::*, self::visit::*};
-
-
-
 
 use crate::token::Tokens;
 

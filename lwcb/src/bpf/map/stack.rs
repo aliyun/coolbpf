@@ -67,7 +67,7 @@ impl Map for StackMap {
     fn key_size(&self) -> usize {
         4
     }
-    fn value_size(&self) -> usize{
+    fn value_size(&self) -> usize {
         4
     }
 

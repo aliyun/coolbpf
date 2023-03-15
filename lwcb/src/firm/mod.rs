@@ -1,18 +1,7 @@
-
-
-
-
-
-
-
-
-
-
-
+mod global;
 mod program;
 mod symbol;
-mod types;
-mod global;
 mod target;
+mod types;
 
 pub use self::program::FirmProgram;

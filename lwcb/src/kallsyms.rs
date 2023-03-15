@@ -1,8 +1,11 @@
-
-
+use anyhow::{bail, Result};
 use lazy_static::lazy_static;
-use anyhow::{Result, bail};
-use std::{sync::Mutex, collections::HashSet, fs::File, io::{self, BufRead}};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{self, BufRead},
+    sync::Mutex,
+};
 
 lazy_static! {
     pub static ref GLOBAL_KALLSYMS: Kallsyms = {
@@ -10,7 +13,6 @@ lazy_static! {
         ksyms
     };
 }
-
 
 #[derive(Debug, Default)]
 pub struct Kallsyms {

@@ -28,7 +28,7 @@ pub fn perf_open_buffer() {
     GLOBAL_PERF_MAP.lock().unwrap().open_buffer();
 }
 
-pub fn perf_read_events() -> Vec<Vec<String>>{
+pub fn perf_read_events() -> Vec<Vec<String>> {
     GLOBAL_PERF_MAP.lock().unwrap().read_events()
 }
 

@@ -148,7 +148,10 @@ pub struct MemberExpression {
 
 impl MemberExpression {
     pub fn new(expression: Expression, identifier: Identifier) -> Self {
-        MemberExpression { expression: Box::new(expression), identifier }
+        MemberExpression {
+            expression: Box::new(expression),
+            identifier,
+        }
     }
 }
 
@@ -215,7 +218,6 @@ impl From<BinaryExpression> for Expression {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnaryExpression {
     pub operator: UnaryOperator,
@@ -235,7 +237,6 @@ impl UnaryExpression {
             operand: Box::new(operand),
         }
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -269,4 +270,3 @@ pub enum Expression {
     /// An expression that contains several, separated with comma.
     Comma(Box<Expression>, Box<Expression>),
 }
-

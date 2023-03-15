@@ -1,8 +1,6 @@
+use anyhow::{bail, Result};
 use libbpf_sys::*;
 use std::ffi::CString;
-use anyhow::{bail, Result};
-
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProgramType {

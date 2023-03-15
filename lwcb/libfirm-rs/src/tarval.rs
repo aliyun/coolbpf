@@ -26,8 +26,6 @@ impl Tarval {
     }
 
     pub fn mode(&self) -> Mode {
-        unsafe {
-            get_tarval_mode(self.raw()).into()
-        }
+        unsafe { get_tarval_mode(self.raw()).into() }
     }
 }

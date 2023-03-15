@@ -1,7 +1,3 @@
-
-
-
-
 use anyhow::{bail, Result};
 
 pub fn bump_memlock_rlimit() -> Result<()> {
@@ -21,14 +17,13 @@ pub fn to_u8_slice<T: Sized>(p: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>()) }
 }
 
-
 mod macros;
 pub(crate) mod tcpstate;
 
 pub(crate) mod align;
 pub(crate) mod btf;
-pub(crate) mod tcpflags;
-pub(crate) mod tracepoint;
 pub(crate) mod kernel_version;
+pub(crate) mod tcpflags;
 pub(crate) mod timestr;
+pub(crate) mod tracepoint;
 pub(crate) mod tstamp;

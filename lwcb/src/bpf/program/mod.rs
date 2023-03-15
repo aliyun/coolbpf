@@ -1,12 +1,9 @@
-
-
 mod kprobe;
 mod program;
 mod tracepoint;
 
-
 pub use {
-    self::program::{ Program, ProgramType},
     self::kprobe::KprobeProgram,
+    self::program::{Program, ProgramType},
     self::tracepoint::TracepointProgram,
 };

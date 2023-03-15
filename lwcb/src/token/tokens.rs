@@ -103,7 +103,7 @@ impl Tokens {
         }
     }
 
-    pub fn error_msg(&self) -> &str{
+    pub fn error_msg(&self) -> &str {
         // let span = &self.span[self.start];
         &self.source[..1]
     }

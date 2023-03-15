@@ -1,7 +1,7 @@
 use cached::proc_macro::cached;
 /// https://linux.die.net/man/3/clock_gettime
 
-/// Monotonically increasing timestamp, incremented by 1 when the clock interrupt 
+/// Monotonically increasing timestamp, incremented by 1 when the clock interrupt
 /// is triggered. This clock source is used by the bpf_ktime_get_ns function.
 pub fn current_monotime() -> u64 {
     let mut ts = libc::timespec {
@@ -13,7 +13,7 @@ pub fn current_monotime() -> u64 {
     (ts.tv_sec as u64) * 1000_000_000 + (ts.tv_nsec as u64)
 }
 
-/// System-wide realtime clock. It is generally synchronized with the clock of 
+/// System-wide realtime clock. It is generally synchronized with the clock of
 /// the master server through the ntp protocol.
 pub fn current_realtime() -> u64 {
     let mut ts = libc::timespec {

@@ -1,7 +1,7 @@
 use logos::{Lexer, Logos};
 
-use crate::types::*;
 use crate::builtin_function::BuiltinFunction;
+use crate::types::*;
 
 #[derive(Logos, Debug, Clone, PartialEq)]
 pub enum Token {

@@ -8,7 +8,7 @@ use crate::bpf::map::StackMap;
 use crate::bpf::program::ProgramType;
 use crate::btf::{btf_find_funcs_by_typename, btf_find_struct, btf_get_func_name};
 use crate::firm::FirmProgram;
-use crate::gperf::{perf_poll, perf_open_buffer, perf_read_events};
+use crate::gperf::{perf_open_buffer, perf_poll, perf_read_events};
 use crate::utils::bump_memlock_rlimit;
 
 // Light-weight eBPF Tracing

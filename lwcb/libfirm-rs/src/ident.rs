@@ -14,7 +14,6 @@ impl From<*mut ident> for Ident {
 unsafe impl Sync for Ident {}
 
 impl Ident {
-
     pub fn raw(&self) -> *mut ident {
         self.0
     }

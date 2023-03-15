@@ -1,6 +1,6 @@
-use super::{info_vlen, BtfMember, info_kind_flag};
+use super::{info_kind_flag, info_vlen, BtfMember};
 use crate::btf::BtfReader;
-use std::{fmt, cmp::Ordering};
+use std::{cmp::Ordering, fmt};
 
 // https://docs.kernel.org/bpf/btf.html#btf-kind-struct
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl Struct {
         None
     }
 
-    pub fn has_bitfield(&self) -> bool{
+    pub fn has_bitfield(&self) -> bool {
         self.has_bitfield
     }
 }

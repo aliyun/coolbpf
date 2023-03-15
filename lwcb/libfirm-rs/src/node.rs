@@ -117,9 +117,7 @@ impl Node {
     }
 
     pub fn call_type(&self) -> Type {
-        unsafe {
-            get_Call_type(self.raw()).into()
-        }
+        unsafe { get_Call_type(self.raw()).into() }
     }
 
     pub fn proj_pred(&self) -> Self {
@@ -151,9 +149,7 @@ impl Node {
     }
 
     pub fn is_call(&self) -> bool {
-        unsafe {
-            is_Call(self.raw()) != 0
-        }
+        unsafe { is_Call(self.raw()) != 0 }
     }
 
     pub fn load_type(&self) -> Type {
@@ -247,9 +243,7 @@ impl Node {
     }
 
     pub fn type_(&self) -> Type {
-        unsafe {
-            (get_irn_dbg_info(self.raw()) as *mut ir_type).into()
-        }
+        unsafe { (get_irn_dbg_info(self.raw()) as *mut ir_type).into() }
     }
 
     pub fn tarval(&self) -> Tarval {
@@ -274,7 +268,7 @@ impl Node {
         raw_args.push(arg.raw());
 
         let method_ty = Type::new_method(&vec![arg.type_()], Some(&arg.type_()));
-        let mut node :Node = unsafe {
+        let mut node: Node = unsafe {
             new_Builtin(
                 memory.raw(),
                 raw_args.len() as i32,
@@ -289,15 +283,11 @@ impl Node {
     }
 
     pub fn builtin_type(&self) -> Type {
-        unsafe {
-            get_Builtin_type(self.raw()).into()
-        }
+        unsafe { get_Builtin_type(self.raw()).into() }
     }
 
     pub fn new_sel(node: &Node, index: &Node, ty: &Type) -> Self {
-        unsafe {
-            new_Sel(node.raw(), index.raw(), ty.raw()).into()
-        }
+        unsafe { new_Sel(node.raw(), index.raw(), ty.raw()).into() }
     }
 }
 

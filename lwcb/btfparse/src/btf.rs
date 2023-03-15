@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
 use std::io::Cursor;
@@ -188,7 +188,7 @@ impl Btf {
         for (id, ty) in self.types().iter().enumerate() {
             if let BtfType::Func(f) = ty {
                 if f.name.as_str().cmp(name) == Ordering::Equal {
-                    return Some(id as u32)
+                    return Some(id as u32);
                 }
             }
         }
@@ -306,7 +306,6 @@ impl BtfReader {
         }
     }
 }
-
 
 #[test]
 fn test_btf_find_func() {

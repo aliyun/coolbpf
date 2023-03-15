@@ -27,7 +27,6 @@ pub fn kernel_version() -> Result<u32> {
         + (if versions[2] > 255 { 255 } else { versions[2] }));
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

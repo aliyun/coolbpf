@@ -59,7 +59,6 @@ impl fmt::Display for TcpFlags {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

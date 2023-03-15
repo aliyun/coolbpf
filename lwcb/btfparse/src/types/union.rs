@@ -1,5 +1,4 @@
-
-use std::{fmt, cmp::Ordering};
+use std::{cmp::Ordering, fmt};
 
 use crate::btf::BtfReader;
 

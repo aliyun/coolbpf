@@ -26,7 +26,6 @@ pub enum BuiltinFunction {
     Reg,
 }
 
-
 impl fmt::Display for BuiltinFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

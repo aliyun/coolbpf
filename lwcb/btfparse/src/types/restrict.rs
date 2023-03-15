@@ -1,8 +1,3 @@
-
-
-
-
-
 use crate::btf::BtfReader;
 
 // https://docs.kernel.org/bpf/btf.html#btf-kind-restrict

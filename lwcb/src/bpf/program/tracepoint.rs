@@ -86,7 +86,6 @@ impl Program for TracepointProgram {
     fn insns_ptr(&self) -> *const bpf_insn {
         self.insns.as_ptr() as *const bpf_insn
     }
-   
 }
 
 #[cfg(test)]
