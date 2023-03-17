@@ -2,10 +2,30 @@ use std::fmt;
 use std::ops;
 
 use anyhow::{bail, Result};
+use btfparse::btf::Btf;
+use btfparse::BtfKind;
+use libfirm_rs::{Mode, Type as IrType};
 
 use crate::btf::btf_find_struct;
 use crate::btf::btf_find_struct_member;
+use crate::btf::btf_get_func_name;
+use crate::btf::btf_get_point_to;
+use crate::btf::btf_get_struct_name;
+use crate::btf::btf_get_struct_size;
+use crate::btf::btf_skip_const;
+use crate::btf::btf_skip_typedef;
+use crate::btf::btf_skip_volatile;
+use crate::btf::btf_type_is_ptr;
+use crate::btf::btf_type_is_struct;
+use crate::btf::btf_type_is_union;
+use crate::btf::btf_type_kind;
+use crate::btf::btf_type_mode;
+use crate::btf::btf_type_resolve;
+use crate::btf::btf_type_size;
+use crate::btf::dump_by_typeid;
 use crate::btf::try_btf_find_func;
+use crate::firm::frame::ident;
+use crate::firm::frame::unique_ident;
 use crate::newast::ast::Ty;
 use crate::newast::ast::TyKind;
 
@@ -232,8 +252,11 @@ mod tests {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TypeId(u32);
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum TypeKind {
-    TypeID(u32), // btf type id
+    TypeId(u32), // btf type id
     Void,
     Char,
     Bool,
@@ -247,43 +270,264 @@ pub enum TypeKind {
     U64,
     String,
     Ptr(Box<Type>),
-    Struct(Box<Type>),
-    Union(Box<Type>),
+    Struct(Vec<Type>),
+    Union(Vec<Type>),
 
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>), // key type and value type
     Func(Option<u32>),         // func proto typeid
     Default,
+
+    Kprobe(Option<u32>),
+    Kretprobe(Option<u32>),
+}
+
+impl TypeKind {
+    pub fn size(&self) -> usize {
+        match self {
+            TypeKind::TypeId(x) => btf_type_size(*x) as usize,
+            TypeKind::Void
+            | TypeKind::String
+            | TypeKind::Default
+            | TypeKind::Map(_, _)
+            | TypeKind::Func(_)
+            | TypeKind::Kprobe(_)
+            | TypeKind::Kretprobe(_) => 0,
+            TypeKind::Char | TypeKind::Bool | TypeKind::I8 | TypeKind::U8 => 1,
+            TypeKind::I16 | TypeKind::U16 => 2,
+            TypeKind::I32 | TypeKind::U32 => 4,
+            TypeKind::I64 | TypeKind::U64 | TypeKind::Ptr(_) => 8,
+            TypeKind::Struct(types) | TypeKind::Tuple(types) => {
+                types.iter().map(|typ| typ.size()).sum()
+            }
+            TypeKind::Union(types) => types.iter().map(|typ| typ.size()).max().map_or(0, |s| s),
+
+            _ => todo!(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Type {
     pub kind: TypeKind,
+    pub size: u16,
+    pub offset: u16,
+    pub name: Option<String>,
+
+    pub kmem: bool,
+    pub param: bool,
+    // if member
 }
 
 impl Default for Type {
     fn default() -> Self {
-        Self {
-            kind: TypeKind::Default,
-        }
+        Self::new(TypeKind::Default)
     }
 }
 
 impl Type {
     pub fn new(kind: TypeKind) -> Self {
-        Self { kind }
+        Self {
+            size: kind.size() as u16,
+            kind,
+            name: None,
+            offset: 0,
+            kmem: false,
+            param: false,
+        }
     }
 
-    pub fn typid(&self) -> u32 {
-        if let TypeKind::TypeID(x) = self.kind {
+    pub fn void() -> Self {
+        Self::new(TypeKind::Void)
+    }
+
+    pub fn i32() -> Self {
+        Self::new(TypeKind::I32)
+    }
+
+    pub fn i64() -> Self {
+        Self::new(TypeKind::I64)
+    }
+
+    pub fn u64() -> Self {
+        Self::new(TypeKind::U64)
+    }
+
+    pub fn string() -> Self {
+        Self::new(TypeKind::String)
+    }
+
+    /// any type to pointer
+    pub fn to_ptr(self) -> Self {
+        Self::new(TypeKind::Ptr(Box::new(self)))
+    }
+
+    pub fn is_struct(&self) -> bool {
+        match self.kind {
+            TypeKind::Struct(_) => true,
+            TypeKind::TypeId(id) => btf_type_is_struct(id),
+            _ => false,
+        }
+    }
+
+    pub fn is_union(&self) -> bool {
+        match self.kind {
+            TypeKind::Struct(_) => true,
+            TypeKind::TypeId(id) => btf_type_is_union(id),
+            _ => false,
+        }
+    }
+
+    /// get function name if it's function type
+    pub fn try_func_name(&self) -> Option<&str> {
+        match &self.kind {
+            TypeKind::Kprobe(x) | TypeKind::Kretprobe(x) => x.map(|x| btf_get_func_name(x)),
+            _ => None,
+        }
+    }
+
+    pub fn set_kmem(&mut self) {
+        self.kmem = true;
+    }
+
+    pub fn clear_kmem(&mut self) {
+        self.kmem = false;
+    }
+
+    /// Does it locate at kernel memory address space
+    pub fn kmem(&self) -> bool {
+        self.kmem
+    }
+
+    pub fn mode(&self) -> Mode {
+        match &self.kind {
+            TypeKind::Bool | TypeKind::Char | TypeKind::I8 => Mode::ModeBs(),
+            TypeKind::U8 => Mode::ModeBu(),
+            TypeKind::U16 => Mode::ModeHu(),
+            TypeKind::I16 => Mode::ModeHs(),
+            TypeKind::I32 => Mode::ModeIs(),
+            TypeKind::U32 => Mode::ModeIu(),
+            TypeKind::U64 => Mode::ModeLu(),
+            TypeKind::I64 => Mode::ModeIu(),
+            TypeKind::Ptr(_) => Mode::ModeLu(),
+            TypeKind::TypeId(typeid) => btf_type_mode(*typeid),
+            _ => todo!("{}", self),
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.size as usize
+    }
+
+    pub fn irtype(&self) -> IrType {
+        match &self.kind {
+            TypeKind::Bool | TypeKind::Char | TypeKind::I8 => {
+                IrType::new_primitive(&Mode::ModeBs())
+            }
+            TypeKind::U8 => IrType::new_primitive(&Mode::ModeBu()),
+            TypeKind::U16 => IrType::new_primitive(&Mode::ModeHu()),
+            TypeKind::I16 => IrType::new_primitive(&Mode::ModeHs()),
+            TypeKind::I32 => IrType::new_primitive(&Mode::ModeIs()),
+            TypeKind::U32 => IrType::new_primitive(&Mode::ModeIu()),
+            TypeKind::U64 => IrType::new_primitive(&Mode::ModeLu()),
+            TypeKind::I64 => IrType::new_primitive(&Mode::ModeIu()),
+            TypeKind::Ptr(p) => IrType::new_pointer(&p.irtype()),
+            TypeKind::Struct(types) => {
+                if let Some(x) = &self.name {
+                    return IrType::new_struct(&unique_ident(x));
+                } else {
+                    panic!("no name")
+                }
+            }
+            TypeKind::TypeId(typeid) => typeid_to_irtype(*typeid),
+            _ => todo!("{}", self),
+        }
+    }
+
+    pub fn member_by_idx(&self, idx: usize) -> &Type {
+        match &self.kind {
+            TypeKind::Struct(types) => &types[idx],
+            _ => todo!(),
+        }
+    }
+    // find member by name
+    pub fn member_type(&self, name: &str) -> Type {
+        let mut new_type = match &self.kind {
+            TypeKind::Struct(types) => {
+                for typ in types {
+                    if typ.is_name(name) {
+                        return typ.clone();
+                    }
+                }
+                panic!("Can't find {}", name)
+            }
+
+            TypeKind::TypeId(typeid) => {
+                Type::from_typeid(btf_find_struct_member(*typeid, name).unwrap().type_id)
+            }
+
+            _ => panic!("Target type is not structure"),
+        };
+        if self.kmem() {
+            new_type.set_kmem();
+        }
+        new_type
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset as usize
+    }
+
+    pub fn set_offset(&mut self, offset: u16) {
+        self.offset = offset
+    }
+
+    pub fn is_bitfield(&self) -> bool {
+        todo!()
+    }
+
+    /// Is it a parameter of tracing function?
+    pub fn param(&self) -> bool {
+        self.param
+    }
+
+    pub fn set_param(&mut self) {
+        self.param = true;
+    }
+
+    pub fn bitfield_offset(&self) -> usize {
+        todo!()
+    }
+
+    pub fn bitfield_size(&self) -> usize {
+        todo!()
+    }
+
+    pub fn typeid(&self) -> u32 {
+        if let TypeKind::TypeId(x) = self.kind {
             return x;
         }
         panic!("is not typeid")
     }
 
+    pub fn set_name(&mut self, name: String) {
+        self.name = Some(name)
+    }
+
+    pub fn is_name(&self, name: &str) -> bool {
+        if let Some(x) = &self.name {
+            return x.eq(name);
+        }
+        false
+    }
+
     pub fn is_ptr(&self) -> bool {
         if let TypeKind::Ptr(_) = &self.kind {
             return true;
+        }
+
+        if let TypeKind::TypeId(id) = &self.kind {
+            return btf_type_is_ptr(*id);
         }
         false
     }
@@ -299,24 +543,36 @@ impl Type {
     pub fn find_member(&self, name: &str) -> Self {
         // must be struct or union
         match &self.kind {
-            TypeKind::Struct(x) | TypeKind::Union(x) => {
-                let typeid = x.typid();
-                return Type::from_typeid(btf_find_struct_member(typeid, name).unwrap().type_id);
+            TypeKind::TypeId(typeid) => {
+                if let Some(member) = btf_find_struct_member(*typeid, name) {
+                    let mut new_type = Type::from_typeid(member.type_id);
+                    new_type.set_offset((member.offset / 8) as u16);
+                    return new_type;
+                }
             }
-            _ => {panic!("target is not struct or union")}
+            _ => {}
         }
-    }
-
-    pub fn update_mapkey(&mut self, key: Type) -> Result<()>{
         todo!()
     }
 
-    pub fn update_mapval(&mut self, val: Type) -> Result<()>{
+    pub fn update_mapkey(&mut self, key: Type) -> Result<()> {
+        todo!()
+    }
+
+    pub fn update_mapval(&mut self, val: Type) -> Result<()> {
         todo!()
     }
 
     pub fn from_typeid(typeid: u32) -> Self {
-        Self::new(TypeKind::TypeID(typeid))
+        Self::new(TypeKind::TypeId(btf_type_resolve(typeid)))
+    }
+
+    // Get type by structure's name
+    pub fn from_struct_name(name: &str) -> Self {
+        let typeid = btf_find_struct(name);
+        let mut typ = Self::from_typeid(typeid);
+        typ.set_name(name.to_owned());
+        typ
     }
 
     pub fn from_func(name: &str) -> Self {
@@ -355,97 +611,106 @@ impl Type {
             TyKind::I64 => TypeKind::I64,
             TyKind::U64 => TypeKind::U64,
             TyKind::String => TypeKind::String,
-            TyKind::Struct(name) => {
-                TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(btf_find_struct(name)))))
-            }
-            TyKind::Union(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
-                btf_find_struct(&name),
-            )))),
+            // TyKind::Struct(name) => {
+            //     TypeKind::Struct(Box::new(Type::new(TypeKind::TypeId(btf_find_struct(name)))))
+            // }
+            // TyKind::Union(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeId(
+            //     btf_find_struct(&name),
+            // )))),
             TyKind::Ptr(t) => TypeKind::Ptr(Box::new(Self::from_tykind(&t.kind))),
 
-            TyKind::Kprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
-            TyKind::Kretprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
+            TyKind::Kprobe(name) => TypeKind::Kprobe(try_btf_find_func(&name)),
+            TyKind::Kretprobe(name) => TypeKind::Kretprobe(try_btf_find_func(&name)),
+            _ => todo!(),
         };
 
         Type::new(type_kind)
     }
 }
 
-// pub fn gen_type(ast: &Ast) -> Result<()> {
-//     let mut tt = HashMap::new();
-//     tt.insert("arg0".to_owned(), Type::new(TypeKind::U64));
-//     tt.insert("arg1".to_owned(), Type::new(TypeKind::U64));
-//     tt.insert("arg2".to_owned(), Type::new(TypeKind::U64));
-//     tt.insert("arg3".to_owned(), Type::new(TypeKind::U64));
-//     tt.insert("arg4".to_owned(), Type::new(TypeKind::U64));
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            TypeKind::TypeId(x) => write!(f, "Typeid")?,
+            TypeKind::Void => write!(f, "Void")?,
+            TypeKind::String => write!(f, "String")?,
+            TypeKind::Default => write!(f, "Invalid")?,
+            TypeKind::Map(_, _) => write!(f, "Map")?,
+            TypeKind::Kprobe(_) => write!(f, "Kprobe")?,
+            TypeKind::Kretprobe(_) => write!(f, "Kretprobe")?,
+            TypeKind::Char => write!(f, "Char")?,
+            TypeKind::Bool => write!(f, "Bool")?,
+            TypeKind::I8 => write!(f, "I8")?,
+            TypeKind::U8 => write!(f, "U8")?,
+            TypeKind::I16 => write!(f, "I16")?,
+            TypeKind::U16 => write!(f, "U16")?,
+            TypeKind::I32 => write!(f, "I32")?,
+            TypeKind::U32 => write!(f, "U32")?,
+            TypeKind::I64 => write!(f, "I64")?,
+            TypeKind::U64 => write!(f, "U64")?,
+            TypeKind::Ptr(_) => write!(f, "Pointer")?,
+            TypeKind::Struct(_) => write!(f, "Struct")?,
+            TypeKind::Union(_) => write!(f, "Union")?,
+            TypeKind::Tuple(_) => write!(f, "Map")?,
+            _ => todo!(),
+        }
 
-//     tt.insert("ctx".to_owned(), Type::new(TypeKind::U64));
-//     Ok(())
-// }
+        write!(
+            f,
+            " name={} size={} param={} kmem={}",
+            self.name.as_ref().map_or("none", |x| x.as_str()),
+            self.size(),
+            self.param(),
+            self.kmem(),
+        )
+    }
+}
 
-// fn gen_type_expr(tt: HashMap<String, Type>, expr: &Expr) {
-//     match expr.kind {
-//         ExprKind::Program(tys, e) => {}
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataAction {}
 
-//         ExprKind::Compound(mut c) => {
-//             for mut i in c {
-//                 gen_type_expr(&mut i);
-//             }
-//         }
+pub fn typeid_to_irtype(typeid: u32) -> IrType {
+    loop {
+        match btf_type_kind(typeid) {
+            BtfKind::Ptr => {
+                let tmp = btf_get_point_to(typeid);
+                let point_to = typeid_to_irtype(tmp);
+                let pointer = IrType::new_pointer(&point_to);
+                return pointer;
+            }
+            BtfKind::Struct => {
+                let mut ty = IrType::new_struct(&ident(&btf_get_struct_name(typeid)));
+                // set alignment
+                // set size
+                ty.set_align(8);
+                ty.set_size(btf_get_struct_size(typeid));
+                return ty;
+            }
+            BtfKind::Int => {
+                let mode = btf_type_mode(typeid);
+                let mut ty = IrType::new_primitive(&mode);
+                return ty;
+            }
 
-//         ExprKind::ExprStmt(mut s) => {
-//             gen_type_expr(&mut s);
-//         }
+            BtfKind::Typedef => {
+                return typeid_to_irtype(btf_skip_typedef(typeid));
+            }
 
-//         ExprKind::If(c, t, e) => {}
+            BtfKind::Volatile => {
+                return typeid_to_irtype(btf_skip_volatile(typeid));
+            }
 
-//         ExprKind::Ident(name) => {}
+            BtfKind::Const => {
+                return typeid_to_irtype(btf_skip_const(typeid));
+            }
 
-//         ExprKind::Str(s) => {}
-
-//         ExprKind::Num(n) => {}
-
-//         ExprKind::Const(c) => {}
-
-//         ExprKind::Unary(op, e) => {}
-
-//         ExprKind::Binary(op, l, r) => {}
-
-//         ExprKind::Cast(e, to) => {}
-
-//         ExprKind::BuiltinCall(b, args) => {}
-
-//         ExprKind::Member(p, s) => {}
-
-//         _ => todo!(),
-//     }
-// }
-
-// fn gen_type_ty(ty: &mut Ty) -> Type {
-//     let type_kind = match &mut ty.kind {
-//         TyKind::Void => TypeKind::Void,
-//         TyKind::Char => TypeKind::Char,
-//         TyKind::Bool => TypeKind::Bool,
-//         TyKind::I8 => TypeKind::I8,
-//         TyKind::U8 => TypeKind::U8,
-//         TyKind::I16 => TypeKind::I16,
-//         TyKind::U16 => TypeKind::U16,
-//         TyKind::I32 => TypeKind::I32,
-//         TyKind::U32 => TypeKind::U32,
-//         TyKind::I64 => TypeKind::I64,
-//         TyKind::U64 => TypeKind::U64,
-//         TyKind::String => TypeKind::String,
-//         TyKind::Struct(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
-//             btf_find_struct(name),
-//         )))),
-//         TyKind::Union(name) => TypeKind::Struct(Box::new(Type::new(TypeKind::TypeID(
-//             btf_find_struct(&name),
-//         )))),
-//         TyKind::Ptr(mut t) => TypeKind::Ptr(Box::new(gen_type_ty(&mut t))),
-
-//         TyKind::Kprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
-//         TyKind::Kretprobe(name) => TypeKind::Func(try_btf_find_func(&name)),
-//     };
-
-//     Type::new(type_kind)
-// }
+            BtfKind::Enum => {
+                // todo: fix this
+                return IrType::new_primitive(&Mode::ModeIs());
+            }
+            _ => {
+                panic!("{:?} not yet implemented", dump_by_typeid(typeid));
+            }
+        }
+    }
+}
