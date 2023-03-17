@@ -117,9 +117,7 @@ impl Node {
     }
 
     pub fn call_type(&self) -> Type {
-        unsafe {
-            get_Call_type(self.raw()).into()
-        }
+        unsafe { get_Call_type(self.raw()).into() }
     }
 
     pub fn proj_pred(&self) -> Self {
@@ -151,16 +149,14 @@ impl Node {
     }
 
     pub fn is_call(&self) -> bool {
-        unsafe {
-            is_Call(self.raw()) != 0
-        }
+        unsafe { is_Call(self.raw()) != 0 }
     }
 
     pub fn load_type(&self) -> Type {
         unsafe { get_Load_type(self.raw()).into() }
     }
 
-    pub fn new_call(memory: &Node, ptr: &Node, args: &Vec<&Node>, ty: &Type) -> Self {
+    pub fn new_call(memory: &Node, ptr: &Node, args: &Vec<Node>, ty: &Type) -> Self {
         let mut raw_args = vec![];
         for arg in args {
             raw_args.push(arg.raw());
@@ -197,7 +193,14 @@ impl Node {
         unsafe { new_immBlock().into() }
     }
 
-    pub fn new_add(left: &Node, right: &Node) -> Self {
+    pub fn new_add(mut left: Node, mut right: Node) -> Self {
+        log::debug!("create add node");
+        // todo: It should be decided according to the type corresponding to the mode whether to convert left or right.
+        if left.mode() == Mode::ModeP() {
+            right = node_mode_cast(right, Mode::offset_mode());
+        } else if right.mode() != left.mode() {
+            right = node_mode_cast(right, left.mode());
+        }
         unsafe { new_Add(left.raw(), right.raw()).into() }
     }
 
@@ -247,9 +250,7 @@ impl Node {
     }
 
     pub fn type_(&self) -> Type {
-        unsafe {
-            (get_irn_dbg_info(self.raw()) as *mut ir_type).into()
-        }
+        unsafe { (get_irn_dbg_info(self.raw()) as *mut ir_type).into() }
     }
 
     pub fn tarval(&self) -> Tarval {
@@ -269,12 +270,12 @@ impl Node {
         UsAction::from(ua as u32)
     }
 
-    pub fn new_builtin_bswap(memory: &Node, arg: &Node) -> Self {
+    pub fn new_builtin_bswap(memory: &Node, arg: &Node, ty: &Type) -> Self {
         let mut raw_args = vec![];
         raw_args.push(arg.raw());
 
-        let method_ty = Type::new_method(&vec![arg.type_()], Some(&arg.type_()));
-        let mut node :Node = unsafe {
+        let method_ty = Type::new_method(&vec![*ty], Some(ty));
+        let mut node: Node = unsafe {
             new_Builtin(
                 memory.raw(),
                 raw_args.len() as i32,
@@ -289,15 +290,11 @@ impl Node {
     }
 
     pub fn builtin_type(&self) -> Type {
-        unsafe {
-            get_Builtin_type(self.raw()).into()
-        }
+        unsafe { get_Builtin_type(self.raw()).into() }
     }
 
     pub fn new_sel(node: &Node, index: &Node, ty: &Type) -> Self {
-        unsafe {
-            new_Sel(node.raw(), index.raw(), ty.raw()).into()
-        }
+        unsafe { new_Sel(node.raw(), index.raw(), ty.raw()).into() }
     }
 }
 
@@ -341,4 +338,23 @@ impl std::fmt::Display for Node {
         let cstr = unsafe { CStr::from_ptr(opname) };
         write!(f, "{}", cstr.to_str().unwrap())
     }
+}
+
+/// casting mode
+pub fn node_mode_cast(node: Node, mode: Mode) -> Node {
+    if node.mode() == mode {
+        return node;
+    }
+    log::debug!("casting node mode: {} -> {}", node.mode(), mode);
+    return Node::new_conv(&node, &mode);
+}
+
+/// perform casting of args of method node
+pub fn node_adress_mode_cast(address: &Node, args: Vec<Node>) -> Vec<Node> {
+    let mut casted_args = vec![];
+    let typ = address.address_entity().type_();
+    for (idx, arg) in args.iter().enumerate() {
+        casted_args.push(node_mode_cast(*arg, typ.param(idx as u64).mode()));
+    }
+    casted_args
 }
