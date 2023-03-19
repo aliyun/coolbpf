@@ -22,12 +22,13 @@ use crate::btf::btf_type_kind;
 use crate::btf::btf_type_mode;
 use crate::btf::btf_type_resolve;
 use crate::btf::btf_type_size;
+use crate::btf::btf_type_to_type;
 use crate::btf::dump_by_typeid;
 use crate::btf::try_btf_find_func;
+use crate::builtin::UBuiltin;
 use crate::firm::frame::ident;
 use crate::firm::frame::unique_ident;
-use crate::newast::ast::Ty;
-use crate::newast::ast::TyKind;
+use crate::ast::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -280,6 +281,8 @@ pub enum TypeKind {
 
     Kprobe(Option<u32>),
     Kretprobe(Option<u32>),
+
+    UBuiltin(UBuiltin, Box<Type>),
 }
 
 impl TypeKind {
@@ -301,7 +304,6 @@ impl TypeKind {
                 types.iter().map(|typ| typ.size()).sum()
             }
             TypeKind::Union(types) => types.iter().map(|typ| typ.size()).max().map_or(0, |s| s),
-
             _ => todo!(),
         }
     }
@@ -316,6 +318,7 @@ pub struct Type {
 
     pub kmem: bool,
     pub param: bool,
+    pub ub: Option<UBuiltin>,
     // if member
 }
 
@@ -334,6 +337,7 @@ impl Type {
             offset: 0,
             kmem: false,
             param: false,
+            ub: None,
         }
     }
 
@@ -341,8 +345,28 @@ impl Type {
         Self::new(TypeKind::Void)
     }
 
+    pub fn i8() -> Self {
+        Self::new(TypeKind::I8)
+    }
+
+    pub fn u8() -> Self {
+        Self::new(TypeKind::U8)
+    }
+
+    pub fn i16() -> Self {
+        Self::new(TypeKind::I16)
+    }
+
+    pub fn u16() -> Self {
+        Self::new(TypeKind::U16)
+    }
+
     pub fn i32() -> Self {
         Self::new(TypeKind::I32)
+    }
+
+    pub fn u32() -> Self {
+        Self::new(TypeKind::U32)
     }
 
     pub fn i64() -> Self {
@@ -353,8 +377,16 @@ impl Type {
         Self::new(TypeKind::U64)
     }
 
+    pub fn ptr(to: Type) -> Self {
+        Self::new(TypeKind::Ptr(Box::new(to)))
+    }
+
     pub fn string() -> Self {
         Self::new(TypeKind::String)
+    }
+
+    pub fn ubuiltin(ub: UBuiltin, typ: Type) -> Self {
+        Self::new(TypeKind::UBuiltin(ub, Box::new(typ)))
     }
 
     /// any type to pointer
@@ -417,6 +449,10 @@ impl Type {
 
     pub fn size(&self) -> usize {
         self.size as usize
+    }
+
+    pub fn set_size(&mut self, size: u16) {
+        self.size = size
     }
 
     pub fn irtype(&self) -> IrType {
@@ -563,8 +599,12 @@ impl Type {
         todo!()
     }
 
-    pub fn from_typeid(typeid: u32) -> Self {
+    pub fn __from_typeid(typeid: u32) -> Self {
         Self::new(TypeKind::TypeId(btf_type_resolve(typeid)))
+    }
+
+    pub fn from_typeid(typeid: u32) -> Self {
+        btf_type_to_type(btf_type_resolve(typeid))
     }
 
     // Get type by structure's name
@@ -597,6 +637,9 @@ impl Type {
         Self::new(type_kind)
     }
 
+    pub fn set_ubuiltin(&mut self, ub: UBuiltin) {
+        self.ub = Some(ub)
+    }
     pub fn from_tykind(ty_kind: &TyKind) -> Self {
         let type_kind = match &ty_kind {
             TyKind::Void => TypeKind::Void,
@@ -657,9 +700,10 @@ impl fmt::Display for Type {
 
         write!(
             f,
-            " name={} size={} param={} kmem={}",
+            " name={} size={} offset={} param={} kmem={}",
             self.name.as_ref().map_or("none", |x| x.as_str()),
             self.size(),
+            self.offset(),
             self.param(),
             self.kmem(),
         )

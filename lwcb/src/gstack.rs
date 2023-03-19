@@ -1,6 +1,6 @@
 // global stackmap
 use crate::{
-    bpf::map::{Map, PerfEvent, PerfMap, StackMap},
+    bpf::map::{Map, PerfMap, StackMap},
     kallsyms::GLOBAL_KALLSYMS,
 };
 use lazy_static::lazy_static;

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use btfparse::btf::{Btf, BtfType};
-use btfparse::{Func, BtfMember, BtfKind, btf_load};
+use btfparse::{btf_load, BtfKind, BtfMember, Func};
 use libfirm_rs::Mode;
 use once_cell::sync::Lazy;
 use std::cmp::Ordering;
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use crate::types::Constant;
+use crate::types::{Constant, Type};
 use crate::utils::btf::btf_locate_path;
 
 pub struct BtfCache {
@@ -234,7 +234,7 @@ pub fn btf_find_funcs_by_typeid(typeid: u32, pos: usize) -> Vec<u32> {
     funcs
 }
 
-pub fn btf_find_funcs_by_typename(name: &str, pointer: usize, pos: usize) -> Vec<u32>{
+pub fn btf_find_funcs_by_typename(name: &str, pointer: usize, pos: usize) -> Vec<u32> {
     let mut typeid = btf_find_struct(name);
     let mut update = false;
     for _ in 0..pointer {
@@ -258,7 +258,7 @@ pub fn btf_find_funcs_by_typename(name: &str, pointer: usize, pos: usize) -> Vec
 }
 
 /// Get all arguments of target function
-/// 
+///
 /// return: (name, typeid)
 pub fn btf_get_func_args(typeid: u32) -> Vec<(String, u32)> {
     let btf = get_btf!();
@@ -275,7 +275,7 @@ pub fn btf_get_func_args(typeid: u32) -> Vec<(String, u32)> {
     panic!("typeid is not Func")
 }
 
-pub fn btf_get_func_returnty(typeid: u32) -> u32{
+pub fn btf_get_func_returnty(typeid: u32) -> u32 {
     let btf = get_btf!();
     if let BtfType::Func(f) = &btf.types()[typeid as usize] {
         let fpid = f.type_id;
@@ -291,27 +291,27 @@ pub fn btf_get_func_argnum(typeid: u32) -> u32 {
 }
 
 /// Get function argument typeid by argument's name
-/// 
+///
 pub fn btf_find_func_arg_by_name(typeid: u32, name: &String) -> Option<u32> {
     todo!()
 }
 
-pub fn btf_get_func_name(typeid: u32) -> String {
+pub fn btf_get_func_name(typeid: u32) -> &'static str {
     if let BtfType::Func(f) = &get_btf!().types()[typeid as usize] {
-        return f.name.clone();
+        return f.name.as_str();
     }
     panic!("typeid is not Func")
 }
 
 /// Get function argument typeid by argument's position
-/// 
+///
 /// Position counts from 1
 pub fn btf_find_func_arg_by_pos(typeid: u32, pos: usize) -> Option<u32> {
     todo!()
 }
 
 /// Get function argument typeid by type's name of that argument.
-/// 
+///
 /// For example, type's name is sock
 pub fn btf_find_func_arg_by_typename(typeid: u32, type_name: &String) -> Option<u32> {
     todo!()
@@ -319,16 +319,15 @@ pub fn btf_find_func_arg_by_typename(typeid: u32, type_name: &String) -> Option<
 
 pub fn btf_struct_has_bitfield(typeid: u32) -> bool {
     if let BtfType::Struct(s) = &get_btf!().types()[typeid as usize] {
-        return s.has_bitfield()
+        return s.has_bitfield();
     }
     log::warn!("Expect struct or union, found other type");
     panic!()
 }
 
-
 pub fn btf_find_union_or_struct_member(typeid: u32, name: &str) -> Option<BtfMember> {
-     // need to get offset and check if it is bitfield
-     if let BtfType::Union(u) = &get_btf!().types()[typeid as usize] {
+    // need to get offset and check if it is bitfield
+    if let BtfType::Union(u) = &get_btf!().types()[typeid as usize] {
         for mem in &u.members {
             if let Ordering::Equal = mem.name.as_str().cmp(name) {
                 return Some(mem.clone());
@@ -360,10 +359,13 @@ pub fn btf_find_union_or_struct_member(typeid: u32, name: &str) -> Option<BtfMem
         }
     }
     return None;
-    panic!("Expect struct or union, found other type: {:?}", btf_type_kind(typeid));
+    panic!(
+        "Expect struct or union, found other type: {:?}",
+        btf_type_kind(typeid)
+    );
 }
 
-/// Get field typeid from struct or union 
+/// Get field typeid from struct or union
 pub fn btf_find_struct_member(typeid: u32, name: &str) -> Option<BtfMember> {
     // need to get offset and check if it is bitfield
     if let BtfType::Struct(s) = &get_btf!().types()[typeid as usize] {
@@ -396,24 +398,98 @@ pub fn btf_struct_size(typeid: u32) -> u32 {
     if let BtfType::Struct(s) = &get_btf!().types()[typeid as usize] {
         return s.size;
     }
-    panic!("{} is not struct", typeid)   
+    panic!("{} is not struct", typeid)
 }
 
-pub fn btf_type_size(typeid: u32) -> u32 {
-    match  &get_btf!().types()[typeid as usize] {
+pub fn btf_type_resolve(typeid: u32) -> u32 {
+    match &get_btf!().types()[typeid as usize] {
+        BtfType::Const(c) => btf_type_resolve(c.type_id),
+        BtfType::Typedef(t) => btf_type_resolve(t.type_id),
+        BtfType::Restrict(r) => btf_type_resolve(r.type_id),
+        BtfType::Volatile(v) => btf_type_resolve(v.type_id),
+
+        _ => typeid,
+    }
+}
+
+
+pub fn btf_type_size(mut typeid: u32) -> u32 {
+    loop {
+        let resolve_typeid = btf_type_resolve(typeid);
+        if resolve_typeid == typeid {
+            break;
+        } else {
+            typeid = resolve_typeid;
+        }
+    }
+
+    match &get_btf!().types()[typeid as usize] {
         BtfType::Int(i) => {
             return i.size();
         }
-        _ => {}
+        BtfType::Struct(s) => {
+            return s.size;
+        }
+        BtfType::Ptr(_) => {
+            return 8;
+        }
+        _ => {
+            todo!("{:?}", get_btf!().types()[typeid as usize]);
+        }
     }
+}
 
-    todo!()
+
+pub fn btf_type_to_type(typeid: u32) -> Type {
+    match &get_btf!().types()[typeid as usize] {
+        BtfType::Int(i) => {
+            if i.is_bool() || i.is_char() || i.is_i8() {
+                return Type::i8();
+            }
+
+            if i.is_u8() {
+                return Type::u8();
+            }
+
+            if i.is_i16() {
+                return Type::i16();
+            }
+
+            if i.is_u16() {
+                return Type::u16();
+            }
+
+            if i.is_i32() {
+                return Type::i32();
+            }
+
+            if i.is_u32() {
+                return Type::u32();
+            }
+
+            if i.is_i64() {
+                return Type::i64();
+            }
+
+            if i.is_u64() {
+                return Type::u64();
+            }
+
+            todo!()
+        }
+
+        BtfType::Ptr(p) => {
+            return Type::ptr(Type::__from_typeid(p.type_id));
+        }
+
+        _ => Type::__from_typeid(typeid)
+    }
 }
 
 pub fn btf_type_mode(typeid: u32) -> Mode {
-    match  &get_btf!().types()[typeid as usize] {
+    match &get_btf!().types()[typeid as usize] {
         BtfType::Int(i) => {
-            if i.is_bool() || i.is_char() || i.is_i8(){
+            if i.is_bool() || i.is_char() || i.is_i8() {
                 return Mode::ModeBs();
             }
 
@@ -445,10 +521,14 @@ pub fn btf_type_mode(typeid: u32) -> Mode {
                 return Mode::ModeLu();
             }
         }
+
+        BtfType::Ptr(_) => {
+            return Mode::ModeP();
+        }
         _ => {}
     }
 
-    todo!()
+    todo!("{:?}", get_btf!().types()[typeid as usize])
 }
 
 pub fn btf_find_struct(name: &str) -> u32 {
@@ -471,14 +551,8 @@ pub fn btf_find_struct_pointer(typeid: u32, name: &String) -> Option<u32> {
     todo!()
 }
 
-
-pub fn btf_type_is_pointer(typeid: u32) -> bool {
-    // get_btf!().types()[typeid as usize].is_pointer()
-    todo!()
-}
-
-
 pub fn dump_by_typeid(typeid: u32) {
+    let a: f32 = 2.22;
     println!("{:?}", get_btf!().types()[typeid as usize]);
 }
 // /// short lived
@@ -487,6 +561,37 @@ macro_rules! get_btf {
         &GLOBAL_BTF
     };
 }
+
+use paste::paste;
+
+macro_rules! get_mode {
+    ($($name: ident), *) => {
+        paste! {
+            $(
+                pub fn [<Mode $name>]() -> Self {
+                    Mode(unsafe {[<get_mode $name>]() } )
+                }
+            )*
+        }
+    };
+}
+
+macro_rules! btf_type_is_xxx {
+    ($name: ident, $kind: ident) => {
+        paste! {
+            pub fn [<btf_type_is_ $name>](typeid: u32) -> bool {
+                if let BtfType::$kind(_) = &GLOBAL_BTF.types()[typeid as usize] {
+                    return true;
+                }
+                false
+            }
+        }
+    };
+}
+
+btf_type_is_xxx!(struct, Struct);
+btf_type_is_xxx!(union, Union);
+btf_type_is_xxx!(ptr, Ptr);
 
 // /// short lived
 // macro_rules! get_btfcache {
@@ -497,8 +602,6 @@ macro_rules! get_btf {
 
 pub(crate) use get_btf;
 // pub(crate) use get_btfcache;
-
-
 
 #[test]
 fn test_btf_find_struct() {

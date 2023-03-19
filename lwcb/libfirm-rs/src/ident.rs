@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::ffi::{CString, CStr};
 
 use libfirm_sys::*;
 
@@ -25,5 +25,10 @@ impl Ident {
 
     pub fn new(name: &CString) -> Self {
         unsafe { new_id_from_str(name.as_ptr()).into() }
+    }
+
+    pub fn str(&self) -> &str {
+        let str = unsafe {CStr::from_ptr(self.raw() as *const i8)};
+        str.to_str().unwrap()
     }
 }

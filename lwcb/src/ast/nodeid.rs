@@ -1,13 +1,21 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{Ordering, AtomicUsize};
 
-static GLOBAL_NODE_COUNTER: AtomicU32 = AtomicU32::new(0);
+static GLOBAL_NODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, Copy, PartialEq)]
-pub struct NodeId(u32);
+pub struct NodeId(usize);
 
 impl NodeId {
     pub fn get() -> Self {
         Self(GLOBAL_NODE_COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+
+    pub fn id(&self) -> usize {
+        self.0
+    }
+
+    pub fn current() -> usize {
+        GLOBAL_NODE_COUNTER.load(Ordering::Relaxed)
     }
 }
 

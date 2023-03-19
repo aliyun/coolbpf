@@ -1,8 +1,8 @@
+use crate::{Ident, Type};
 use libfirm_sys::*;
 use paste::paste;
 use std::ffi::CStr;
-
-use crate::Type;
+use std::fmt;
 
 macro_rules! get_mode {
     ($($name: ident), *) => {
@@ -25,7 +25,6 @@ impl From<*mut ir_mode> for Mode {
     }
 }
 
-
 impl Mode {
     get_mode!(ANY, BAD, BB, Bs, Bu, D, F, Hs, Hu, Is, Iu, Ls, Lu, M, P, T, X, b);
 
@@ -34,9 +33,7 @@ impl Mode {
     // }
 
     pub fn offset_mode() -> Self {
-        unsafe {
-            get_reference_offset_mode(Mode::ModeP().raw()).into()
-        }
+        unsafe { get_reference_offset_mode(Mode::ModeP().raw()).into() }
     }
 
     pub fn raw(&self) -> *mut ir_mode {
@@ -48,8 +45,16 @@ impl Mode {
     }
 
     pub fn type_(&self) -> Type {
-        unsafe {
-            get_type_for_mode(self.raw()).into()
-        }
+        unsafe { get_type_for_mode(self.raw()).into() }
+    }
+
+    pub fn ident(&self) -> Ident {
+        unsafe { get_mode_ident(self.raw()).into() }
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.ident().str())
     }
 }

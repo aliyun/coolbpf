@@ -92,7 +92,7 @@ impl Graph {
         unsafe { get_store().into() }
     }
 
-    pub fn set_store(&self, store: &Node) {
+    pub fn set_store(&mut self, store: &Node) {
         unsafe { set_store(store.raw()) }
     }
 

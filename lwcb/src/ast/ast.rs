@@ -1,108 +1,124 @@
-use crate::builtin_function::BuiltinFunction;
-use crate::types::*;
-use std::time::Duration;
+use crate::{
+    builtin::Builtin,
+    token::{TokenStream, Tokens},
+    types::Constant,
+};
+use logos::Span;
+
+use super::{nodeid::NodeId, parser::generate_ast};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TranslationUnit {
-    pub programs: Vec<BpfProgram>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BpfProgram {
-    pub types: Vec<BpfProgramType>,
-    pub statement: Statement,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DynKprobe {
-    pub tn: TypeName,
-    pub ident: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum BpfProgramType {
-    Begin,
-    End,
-    Interval(Duration),
-    Kprobe(String),
-    // (struct sock*, sk)
-    DynKprobe(DynKprobe),
-    Kretprobe(String),
-    Tracepoint(String, String),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct CompoundStatement {
-    pub statements: Vec<Statement>,
-}
-
-impl CompoundStatement {
-    pub fn new() -> Self {
-        CompoundStatement {
-            statements: Vec::new(),
-        }
-    }
-
-    pub fn push_statement(&mut self, statement: Statement) {
-        self.statements.push(statement);
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct IfStatement {
-    pub condition: Box<Expression>,
-    pub then_statement: Box<Statement>,
-    pub else_statement: Option<Box<Statement>>,
-}
-
-impl IfStatement {
-    pub fn new(condition: Expression, then_statement: Statement) -> Self {
-        IfStatement {
-            condition: Box::new(condition),
-            then_statement: Box::new(then_statement),
-            else_statement: None,
-        }
-    }
-
-    pub fn set_else_statement(&mut self, else_statement: Statement) {
-        self.else_statement = Some(Box::new(else_statement));
-    }
-}
-
-/// Statement.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Statement {
-    Compound(Box<CompoundStatement>),
-    Expression(ExpressionStatement),
-    If(IfStatement),
+pub enum ExprKind {
+    Compound(Vec<Expr>), // compound statement
+    ExprStmt(Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Option<Box<Expr>>), // condition, then, else
     Return,
+
+    Ident(String),  // identifier
+    LitStr(String), // string literal
+    Num(i64),       // number
+    Const(Constant),
+    Unary(UnaryOp, Box<Expr>),              // unary expression
+    Binary(BinaryOp, Box<Expr>, Box<Expr>), // binary expression
+    Cast(Box<Expr>, Ty),
+    BuiltinCall(Builtin, Vec<Expr>), // builtin call exression: callee, arguments
+    Member(Box<Expr>, Box<Expr>),            //member access
+    Program(Vec<Ty>, Box<Expr>), // bpf program, tracing point definition and program body
 }
 
-/// Expression statement.
-pub type ExpressionStatement = Option<Expression>;
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expr {
+    pub id: NodeId,
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Self {
+            id: NodeId::get(),
+            kind,
+            span,
+        }
+    }
+
+    pub fn new_binary(op: BinaryOp, l: Expr, r: Expr, span: Span) -> Self {
+        Self::new(ExprKind::Binary(op, Box::new(l), Box::new(r)), span)
+    }
+
+    pub fn new_unary(op: UnaryOp, e: Expr, span: Span) -> Self {
+        Self::new(ExprKind::Unary(op, Box::new(e)), span)
+    }
+
+    pub fn new_builtincall(builtin: Builtin, args: Vec<Expr>, span: Span) -> Self {
+        Self::new(ExprKind::BuiltinCall(builtin, args), span)
+    }
+
+    pub fn new_num(num: i64, span: Span) -> Self {
+        Self::new(ExprKind::Num(num), span)
+    }
+
+    pub fn new_const(c: Constant, span: Span) -> Self {
+        Self::new(ExprKind::Const(c), span)
+    }
+
+    pub fn new_ident(ident: String, span: Span) -> Self {
+        Self::new(ExprKind::Ident(ident), span)
+    }
+
+    pub fn new_litstr(str: String, span: Span) -> Self {
+        Self::new(ExprKind::LitStr(str), span)
+    }
+
+    pub fn new_member(expr1: Expr, expr2: Expr, span: Span) -> Self {
+        Self::new(ExprKind::Member(Box::new(expr1), Box::new(expr2)), span)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum UnaryOperator {
-    /// `operand++`
-    PostIncrement,
-    /// `operand--`
-    PostDecrement,
-    /// `++operand`
-    PreIncrement,
-    /// `--operand`
-    PreDecrement,
-    /// `&operand`
-    Address,
-    /// `*operand`
-    Indirection,
-    /// `+operand`
-    Plus,
-    /// `-operand`
-    Minus,
-    /// `~operand`
-    Complement,
-    /// `!operand`
-    Negate,
+pub enum TyKind {
+    Void,
+    Char,
+    Bool,
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    String,
+    Struct(String),
+    Union(String),
+    Ptr(Box<Ty>),
+
+    Kprobe(String),
+    Kretprobe(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ty {
+    pub id: NodeId,
+    pub kind: TyKind,
+    pub span: Span,
+}
+
+impl Ty {
+    pub fn new(kind: TyKind, span: Span) -> Self {
+        Ty {
+            id: NodeId::get(),
+            kind,
+            span,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UnaryOp {
+    Deref, // *
+    Not,   // '!'
+    Neg,   // -
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,141 +148,44 @@ pub enum BinaryOp {
     Assign,
 }
 
-pub type StringLiteral = String;
-
 #[derive(Clone, Debug, PartialEq)]
-pub struct CallExpression {
-    pub callee: BuiltinFunction,
-    pub arguments: Vec<Expression>,
+pub struct Ast {
+    pub exprs: Vec<Expr>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct MemberExpression {
-    pub expression: Box<Expression>,
-    pub identifier: Identifier,
-}
-
-impl MemberExpression {
-    pub fn new(expression: Expression, identifier: Identifier) -> Self {
-        MemberExpression { expression: Box::new(expression), identifier }
-    }
-}
-
-impl Into<Expression> for MemberExpression {
-    fn into(self) -> Expression {
-        Expression::Member(self)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum TypeSpecifier {
-    Void,
-    Char,
-    Bool,
-    I8,
-    U8,
-    I16,
-    U16,
-    I32,
-    U32,
-    I64,
-    U64,
-    String,
-    Pointer,
-    Struct,
-    Union,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TypeName {
-    pub type_specifier: TypeSpecifier,
-    pub pointers: usize,
-    pub identifier: Option<Identifier>,
-}
-
-// (type) cast
-#[derive(Clone, Debug, PartialEq)]
-pub struct CastExpression {
-    // only support direct(.) opertator
-    pub type_name: TypeName,
-    pub expression: Box<Expression>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BinaryExpression {
-    pub op: BinaryOp,
-    pub left: Box<Expression>,
-    pub right: Box<Expression>,
-}
-
-impl BinaryExpression {
-    pub fn new(op: BinaryOp, left: Expression, right: Expression) -> Self {
-        BinaryExpression {
-            op,
-            left: Box::new(left),
-            right: Box::new(right),
+impl<'text> From<&mut TokenStream<'text>> for Ast {
+    fn from(tokens: &mut TokenStream) -> Self {
+        match generate_ast(tokens) {
+            Ok(ast) => {
+                return ast;
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to parse, left string: {}, error: {}",
+                    tokens.left_str(),
+                    e
+                );
+                panic!();
+            }
         }
     }
 }
 
-impl From<BinaryExpression> for Expression {
-    fn from(b: BinaryExpression) -> Self {
-        Expression::Binary(b)
+impl From<&str> for Ast {
+    fn from(source: &str) -> Self {
+        let mut tokens = TokenStream::from(source);
+        Ast::from(&mut tokens)
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct UnaryExpression {
-    pub operator: UnaryOperator,
-    pub operand: Box<Expression>,
-}
+    #[test]
+    fn test_kprobe() {
+        let ast = Ast::from("kprobe:tcp_rcv_established {}");
 
-impl From<UnaryExpression> for Expression {
-    fn from(b: UnaryExpression) -> Self {
-        Expression::Unary(b)
+        println!("{:#?}", ast);
     }
 }
-
-impl UnaryExpression {
-    pub fn new(operator: UnaryOperator, operand: Expression) -> Self {
-        UnaryExpression {
-            operator,
-            operand: Box::new(operand),
-        }
-    }
-
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Expression {
-    Identifier(Identifier),
-    Constant(Constant),
-    StringLiteral(StringLiteral),
-    /// Integral constant expression.
-    IntConst(i32),
-    /// Unsigned integral constant expression.
-    UIntConst(u32),
-    LongConst(i64),
-    ULongConst(u64),
-    /// Boolean constant expression.
-    BoolConst(bool),
-    /// A unary expression, gathering a single expression and a unary operator.
-    Unary(UnaryExpression),
-    /// A binary expression, gathering two expressions and a binary operator.
-    // Binary(BinaryOp, Box<Expression>, Box<Expression>),
-    Binary(BinaryExpression),
-    Cast(CastExpression),
-    /// A ternary conditional expression, gathering three expressions.
-    Ternary(Box<Expression>, Box<Expression>, Box<Expression>),
-    Call(CallExpression),
-    Member(MemberExpression),
-    /// Post-incrementation of an expression.
-    PostInc(Box<Expression>),
-    /// Post-decrementation of an expression.
-    PostDec(Box<Expression>),
-
-    /// An expression that contains several, separated with comma.
-    Comma(Box<Expression>, Box<Expression>),
-}
-

@@ -118,6 +118,13 @@ pub struct TokenStream<'text> {
     lexer: Lexer<'text, Token>,
     peeks: VecDeque<(Token, Span)>,
     span: Span,
+    source: &'text str,
+}
+
+impl<'text> From<&'text str> for TokenStream<'text> {
+    fn from(source: &'text str) -> Self {
+        TokenStream::new(source)
+    }
 }
 
 impl<'text> TokenStream<'text> {
@@ -126,6 +133,7 @@ impl<'text> TokenStream<'text> {
             lexer: Token::lexer(text),
             peeks: VecDeque::new(),
             span: Span::default(),
+            source: text,
         }
     }
 
@@ -134,7 +142,19 @@ impl<'text> TokenStream<'text> {
     }
 
     pub fn is_eof(&mut self) -> bool {
-        self.peek() == Token::EOF
+        !self.have_token()
+    }
+
+    pub fn have_token(&mut self) -> bool {
+        if self.peeks.is_empty() {
+            if let Some(x) = self.lexer.next() {
+                self.peeks.push_back((x, self.lexer.span()));
+                return true;
+            } else {
+                return false;
+            }
+        }
+        false
     }
 
     pub fn read(&mut self) -> Token {
@@ -148,7 +168,7 @@ impl<'text> TokenStream<'text> {
     pub fn peek_offset(&mut self, offset: usize) -> Token {
         let mut tokens = vec![];
         for i in 0..(offset + 1) {
-            tokens.push( (self.token().unwrap(), self.span()) );
+            tokens.push((self.token().unwrap(), self.span()));
         }
         loop {
             if let Some(token) = tokens.pop() {
@@ -162,7 +182,7 @@ impl<'text> TokenStream<'text> {
 
     pub fn try_eat(&mut self, token: Token) -> bool {
         if self.peek() == token {
-            self.token();
+            self.token().unwrap();
             return true;
         }
         false
@@ -209,6 +229,19 @@ impl<'text> TokenStream<'text> {
             }
         }
     }
+
+
+    pub fn span_string(&self, span: Span) -> &str{
+        &self.source[span]
+    }
+
+    pub fn span_str(&self, span: Span) -> &str {
+        &self.source[span]
+    }
+
+    pub fn left_str(&self) -> &str {
+        &self.source[self.span.start..]
+    }
 }
 
 #[test]
@@ -222,4 +255,18 @@ fn test_tokens() {
     tokens.eat(Token::Comma).unwrap();
     tokens.eat_string_literal().unwrap();
     tokens.eat(Token::RightParen).unwrap();
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_kprobe() {
+
+        let tokens = TokenStream::from("kprobe:tcp_rcv_established {}");
+
+        println!("{:?}", tokens);
+    }
 }

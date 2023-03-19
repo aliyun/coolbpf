@@ -1,5 +1,4 @@
 mod ast;
-mod builtin_function;
 mod btf;
 mod token;
 mod types;
@@ -11,10 +10,11 @@ mod gstack;
 mod kallsyms;
 mod lwcb;
 mod utils;
-mod newast;
-mod typer;
 mod symbol;
-
+mod perf_event;
+mod context;
+mod builtin;
+mod event;
 
 pub static mut IS_IN_PYTHON: bool = false;
 
