@@ -18,7 +18,7 @@ pub fn method_entity(prog_type: &Type) -> Entity {
     let func_ident = unique_ident(func_name);
 
     // tracing function has default parameter: struct pt_regs *
-    let ctx_type = Type::u64();
+    let ctx_type = Type::ptr(Type::u64());
 
     // don't care return type of tracing function
     Entity::new_global(

@@ -1,22 +1,14 @@
 use std::collections::HashMap;
 
 use crate::{
-    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, btf_find_struct},
-    types::{typeid_to_irtype, Constant, Type, TypeId, TypeKind},
+    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, btf_find_struct, btf_find_struct_member},
+    types::{typeid_to_irtype, Constant, Type, TypeId, TypeKind, pt_regs_type},
     utils::btf::btf_locate_path,
 };
 
 use super::{ast::*, nodeid::NodeId};
 use anyhow::{bail, Result};
 use btfparse::{btf::Btf, btf_load};
-
-use cached::proc_macro::cached;
-
-/// get Type of `struct pt_regs`
-#[cached(size = 1)]
-pub fn pt_regs_type() -> Type {
-    Type::from_struct_name("pt_regs")
-}
 
 
 pub struct TypeBinding {
@@ -173,12 +165,15 @@ fn typer_inferring_program(tb: &mut TypeBinding, expr: &Expr) -> Result<()> {
                 match tb.type_by_idx(idx).kind {
                     TypeKind::Kprobe(id) => {
                         id.map(|x| {
+                            let pt_regs = pt_regs_type();
+                            let tmp = vec!["di", "si", "dx", "cx", "r8", "sp"];
                             let mut count = 0;
                             for (name, typeid) in btf_get_func_args(x) {
                                 let mut typ = get_param_type_by_typeid(typeid);
                                 typ.set_param();
-                                typ.set_offset(offset);
+                                typ.set_offset(pt_regs.member_offset(tmp[count]));
                                 tb.bind_lident(name, typ);
+                                count += 1;
                             }
                             set_param = true;
                         });

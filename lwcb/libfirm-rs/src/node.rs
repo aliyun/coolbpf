@@ -194,10 +194,11 @@ impl Node {
     }
 
     pub fn new_add(mut left: Node, mut right: Node) -> Self {
-        log::debug!("create add node");
         // todo: It should be decided according to the type corresponding to the mode whether to convert left or right.
         if left.mode() == Mode::ModeP() {
-            right = node_mode_cast(right, Mode::offset_mode());
+            if right.mode() != Mode::offset_mode() {
+                right = node_mode_cast(right, Mode::offset_mode());
+            }
         } else if right.mode() != left.mode() {
             right = node_mode_cast(right, left.mode());
         }

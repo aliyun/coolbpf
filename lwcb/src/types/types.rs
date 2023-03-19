@@ -6,6 +6,7 @@ use btfparse::btf::Btf;
 use btfparse::BtfKind;
 use libfirm_rs::{Mode, Type as IrType};
 
+use crate::ast::*;
 use crate::btf::btf_find_struct;
 use crate::btf::btf_find_struct_member;
 use crate::btf::btf_get_func_name;
@@ -28,7 +29,6 @@ use crate::btf::try_btf_find_func;
 use crate::builtin::UBuiltin;
 use crate::firm::frame::ident;
 use crate::firm::frame::unique_ident;
-use crate::ast::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -304,6 +304,7 @@ impl TypeKind {
                 types.iter().map(|typ| typ.size()).sum()
             }
             TypeKind::Union(types) => types.iter().map(|typ| typ.size()).max().map_or(0, |s| s),
+            TypeKind::UBuiltin(_, typ) => typ.size(),
             _ => todo!(),
         }
     }
@@ -476,6 +477,7 @@ impl Type {
                 }
             }
             TypeKind::TypeId(typeid) => typeid_to_irtype(*typeid),
+            TypeKind::UBuiltin(_, typ) => typ.irtype(),
             _ => todo!("{}", self),
         }
     }
@@ -499,7 +501,10 @@ impl Type {
             }
 
             TypeKind::TypeId(typeid) => {
-                Type::from_typeid(btf_find_struct_member(*typeid, name).unwrap().type_id)
+                let member = btf_find_struct_member(*typeid, name).unwrap();
+                let mut member_type = Type::from_typeid(member.type_id);
+                member_type.set_offset((member.offset() / 8) as u16);
+                member_type
             }
 
             _ => panic!("Target type is not structure"),
@@ -508,6 +513,10 @@ impl Type {
             new_type.set_kmem();
         }
         new_type
+    }
+
+    pub fn member_offset(&self, name: &str) -> u16 {
+        self.member_type(name).offset() as u16
     }
 
     pub fn offset(&self) -> usize {
@@ -695,6 +704,7 @@ impl fmt::Display for Type {
             TypeKind::Struct(_) => write!(f, "Struct")?,
             TypeKind::Union(_) => write!(f, "Union")?,
             TypeKind::Tuple(_) => write!(f, "Map")?,
+            TypeKind::UBuiltin(_, _) => write!(f, "Ubuiltin")?,
             _ => todo!(),
         }
 

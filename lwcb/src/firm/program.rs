@@ -489,7 +489,7 @@ impl FirmProgram {
     /// generate tracing function default parameters: `struct pt_regs *`
     fn gen_params(&mut self) {
         let args = self.graph.args();
-        let ctx_node = Node::new_prog(&args, &Mode::ModeLu(), 0);
+        let ctx_node = Node::new_prog(&args, &Mode::ModeP(), 0);
         self.add_rvalue("ctx", &ctx_node);
     }
 

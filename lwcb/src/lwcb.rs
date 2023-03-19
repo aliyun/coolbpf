@@ -9,10 +9,10 @@ use crate::ast::*;
 use crate::bpf::map::StackMap;
 use crate::bpf::program::ProgramType;
 use crate::btf::{btf_find_funcs_by_typename, btf_find_struct, btf_get_func_name};
+use crate::event::ComplexString;
 use crate::firm::FirmProgram;
-use crate::gperf::{perf_poll, perf_open_buffer, perf_read_events};
+use crate::gperf::{perf_open_buffer, perf_poll, perf_read_events};
 use crate::utils::bump_memlock_rlimit;
-
 
 // Light-weight eBPF Tracing
 pub struct LwCB {
@@ -76,7 +76,9 @@ impl LwCB {
         self.astdump = dump;
     }
 
-    fn compile_program(&mut self, ctx: &mut Context, expr: &Expr) -> Result<()>{
+    fn dump_optimized_ir(&mut self, firm: &mut FirmProgram) {}
+
+    fn compile_program(&mut self, ctx: &mut Context, expr: &Expr) -> Result<()> {
         if let ExprKind::Program(ty, e) = &expr.kind {
             for i in ty {
                 let mut fp = FirmProgram::new();
@@ -89,9 +91,10 @@ impl LwCB {
                         fp.set_func_name(name.clone());
                         fp.set_kretprobe();
                     }
-                    _ => todo!()
+                    _ => todo!(),
                 }
                 fp.gen(ctx, i.id, e, 100)?;
+                fp.optimize();
                 self.firms.push(fp);
             }
         }
@@ -141,26 +144,35 @@ impl LwCB {
         bail!("Can't find source program named: {}", src)
     }
 
-    pub fn poll(&mut self) {
-        let mut ctx = self.ctx.take().unwrap();
-        if !self.open_buffer {
-            ctx.perf.open_buffer();
-            self.open_buffer = true;
-        }
+    pub fn open_buffer(&mut self) {
+        self.ctx.as_mut().map(|ctx| ctx.perf.open_buffer());
+    }
+
+    pub fn poll(&mut self) -> Vec<Vec<u8>> {
+        self.ctx.as_mut().map_or(vec![], |ctx| ctx.perf.poll())
+    }
+
+    pub fn poll_print(&mut self) {
         loop {
-            let raw_data = ctx.perf.poll();
-            for data in raw_data {
-                // ctx.handle_data(data);
-            }
+            self.ctx.as_mut().map(|ctx| {
+                let rawdata = ctx.perf.poll();
+                for data in rawdata {
+                    ctx.handle_data(data);
+                }
+            });
         }
     }
 
-    pub fn read_events(&mut self) -> Vec<Vec<String>> {
-        if !self.open_buffer {
-            perf_open_buffer();
-            self.open_buffer = true;
-        }
-
-        perf_read_events()
+    pub fn poll_stringify(&mut self) -> Vec<Vec<String>> {
+        self.ctx.as_mut().map_or(vec![], |ctx| {
+            let mut ret = vec![];
+            let rawdata = ctx.perf.poll();
+            for data in rawdata {
+                if !data.is_empty() {
+                    ret.push(ctx.stringify(data));
+                }
+            }
+            ret
+        })
     }
 }

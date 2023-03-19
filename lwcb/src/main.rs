@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         lwbt.generate_bytecode()?;
 
         lwbt.attach()?;
+        lwbt.open_buffer();
 
         lwbt.poll();
     }

@@ -45,6 +45,7 @@ pub fn parse_fmt(fmt: String) -> Vec<CString> {
 }
 
 fn __printer(fmt: &CString, typ: &Type, data: &[u8]) {
+    log::debug!("fmt: {:?}, type: {}", fmt, typ);
     match &typ.kind {
         TypeKind::U8 => print_number(fmt, data[0]),
         TypeKind::I8 => print_number(fmt, data[0] as i8),
@@ -52,7 +53,7 @@ fn __printer(fmt: &CString, typ: &Type, data: &[u8]) {
         TypeKind::I16 => print_number(fmt, readi16!(data)),
         TypeKind::U32 => print_number(fmt, readu32!(data)),
         TypeKind::I32 => print_number(fmt, readi32!(data)),
-        TypeKind::U64 => print_number(fmt, readu64!(data)),
+        TypeKind::U64 | TypeKind::Ptr(_) => print_number(fmt, readu64!(data)),
         TypeKind::I64 => print_number(fmt, readi64!(data)),
         TypeKind::UBuiltin(ub, _) => ub.print(fmt, data),
         _ => todo!("{}", typ),
@@ -61,8 +62,9 @@ fn __printer(fmt: &CString, typ: &Type, data: &[u8]) {
 
 pub fn printer(fmts: &Vec<CString>, typ: &Type, data: &[u8]) {
     if let TypeKind::Struct(types) = &typ.kind {
-        for (idx, typ) in types.iter().enumerate() {
-            __printer(&fmts[idx], typ, &data[typ.offset()..])
+        print_string(&fmts[0], "".to_owned());
+        for (idx, typ) in types[1..].iter().enumerate() {
+            __printer(&fmts[idx + 1], typ, &data[typ.offset()..])
         }
     }
 }

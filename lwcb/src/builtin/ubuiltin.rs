@@ -24,8 +24,7 @@ pub enum UBuiltin {
 impl UBuiltin {
     pub fn return_type(&self, args: &Vec<&Type>) -> Type {
         let mut typ = args[0].clone();
-        typ.set_ubuiltin(self.clone());
-        typ
+        Type::ubuiltin(self.clone(), typ)
     }
 
     pub fn print(&self, fmt: &CString, data: &[u8]) {

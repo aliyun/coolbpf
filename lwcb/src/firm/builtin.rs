@@ -191,7 +191,7 @@ fn gen_builtin_print(ctx: &mut Context, ctx_node: &Node, args: &Vec<(Node, NodeI
         &perf_frame,
         perf_type.member_by_idx(idx).offset(),
         &Node::new_const(&Tarval::new_long(event_id as i64, &Mode::ModeLu())),
-        perf_type.member_by_idx(idx),
+        perf_type.member_by_idx(0),
     );
     for (node, _) in args {
         if !first {
