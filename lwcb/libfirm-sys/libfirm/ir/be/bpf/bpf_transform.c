@@ -288,7 +288,8 @@ typedef struct address_t
 static void match_address(ir_node *addr, address_t *address)
 {
 	uint16_t offset = 0;
-
+	ir_entity *entity = NULL;
+	
 	if (is_Add(addr))
 	{
 		ir_node *right = get_Add_right(addr);
@@ -298,8 +299,7 @@ static void match_address(ir_node *addr, address_t *address)
 			offset = get_Const_long(right);
 		}
 	}
-	// todo: handle Member node
-	ir_entity *entity = NULL;
+	
 	if (is_Member(addr))
 	{
 		entity = get_Member_entity(addr);
@@ -309,9 +309,7 @@ static void match_address(ir_node *addr, address_t *address)
 		assert(is_Proj(addr) && is_Start(get_Proj_pred(addr)));
 	}
 
-	ir_node *const base = be_transform_node(addr);
-
-	address->base = base;
+	address->base = be_transform_node(addr);
 	address->offset = offset;
 	address->entity = entity;
 	address->is_frame_entity = entity != NULL;
@@ -319,7 +317,7 @@ static void match_address(ir_node *addr, address_t *address)
 
 static ir_node *gen_Load(ir_node *node)
 {
-	address_t address;
+	address_t address = {};
 	ir_node *new_block = be_transform_nodes_block(node);
 	dbg_info *dbgi = get_irn_dbg_info(node);
 	ir_node *ptr = get_Load_ptr(node);
@@ -356,7 +354,7 @@ static ir_node *gen_Store(ir_node *node)
 	ir_node *mem = get_Store_mem(node);
 	ir_node *new_mem = be_transform_node(mem);
 	ir_mode *mode = get_irn_mode(val);
-	address_t address;
+	address_t address = {};
 	match_address(ptr, &address);
 
 	val = be_skip_downconv(val, false);
@@ -611,7 +609,6 @@ static void bpf_register_transformers(void)
 
 	be_set_transform_function(op_Add, gen_Add);
 	be_set_transform_function(op_And, gen_And);
-	// be_set_transform_function(op_Address, gen_Address);
 	be_set_transform_function(op_Const, gen_Const);
 	be_set_transform_function(op_Conv, gen_Conv);
 	be_set_transform_function(op_Call, gen_Call);
@@ -670,7 +667,6 @@ void bpf_transform_graph(ir_graph *irg)
 	assure_irg_properties(irg, IR_GRAPH_PROPERTY_NO_TUPLES | IR_GRAPH_PROPERTY_NO_BADS);
 
 	bpf_register_transformers();
-
 
 	be_stack_init(&stack_env);
 	ir_entity *entity = get_irg_entity(irg);

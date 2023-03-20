@@ -64,12 +64,7 @@ static void bpf_collect_frame_entity_nodes(ir_node *node, void *data)
 		return;
 	if (!attr->is_frame_entity)
 		return;
-	// unsigned size     = get_mode_size_bytes(mode);
-	// unsigned po2align = log2_floor(size);
-	// if (arch_get_irn_flags(node) & bpf_arch_irn_flag_needs_64bit_spillslot) {
-	// 	size     = 8;
-	// 	po2align = 3;
-	// }
+
 	be_load_needs_frame_entity(env, node, 8, 3);
 }
 
@@ -127,40 +122,10 @@ void bpf_finish_graph(ir_graph *irg)
 	unsigned const misalign = 0;
 	be_layout_frame_type(frame, 0, misalign);
 
-	// bpf_introduce_prolog_epilog(irg, false);
-
 	/* fix stack entity offsets */
 	be_fix_stack_nodes(irg, &bpf_registers[REG_R10]);
 	be_birg_from_irg(irg)->non_ssa_regs = NULL;
 	be_sim_stack_pointer(irg, misalign, 3, bpf_sp_sim);
 
-	// heights = heights_new(irg);
-
-	// /* perform peephole optimizations */
-	// ir_clear_opcodes_generic_func();
-	// register_peephole_optimization(op_be_IncSP,        peephole_be_IncSP);
-	// register_peephole_optimization(op_sparc_FrameAddr, peephole_sparc_FrameAddr);
-	// register_peephole_optimization(op_sparc_RestoreZero,
-	//                                peephole_sparc_RestoreZero);
-	// register_peephole_optimization(op_sparc_Ldf, split_sparc_ldf);
-	// register_peephole_optimization(op_sparc_AddCC, peephole_sparc_AddCC);
-	// register_peephole_optimization(op_sparc_SubCC, peephole_sparc_SubCC);
-	// be_peephole_opt(irg);
-
-	// /* perform legalizations (mostly fix nodes with too big immediates) */
-	// ir_clear_opcodes_generic_func();
-	// register_peephole_optimization(op_be_IncSP,        finish_be_IncSP);
-	// register_peephole_optimization(op_sparc_FrameAddr, finish_sparc_FrameAddr);
-	// register_peephole_optimization(op_sparc_Ld,        finish_sparc_Ld);
-	// register_peephole_optimization(op_sparc_Ldf,       finish_sparc_Ldf);
-	// register_peephole_optimization(op_sparc_Save,      finish_sparc_Save);
-	// register_peephole_optimization(op_sparc_St,        finish_sparc_St);
-	// register_peephole_optimization(op_sparc_Stf,       finish_sparc_Stf);
-	// be_peephole_opt(irg);
-
-	// heights_free(heights);
-
 	be_handle_2addr(irg, NULL);
-
-	// be_remove_dead_nodes_from_schedule(irg);
 }

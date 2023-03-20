@@ -82,18 +82,6 @@ static const regalloc_if_t bpf_regalloc_if = {
 	.new_reload  = bpf_new_reload,
 };
 
-// static void introduce_prologue(ir_graph *const irg)
-// {
-// 	ir_node  *const start      = get_irg_start(irg);
-// 	ir_node  *const block      = get_nodes_block(start);
-// 	ir_node  *const initial_sp = be_get_Start_proj(irg, &bpf_registers[REG_SP]);
-// 	ir_type  *const frame_type = get_irg_frame_type(irg);
-// 	unsigned  const frame_size = get_type_size(frame_type);
-// 	ir_node  *const incsp      = be_new_IncSP(block, initial_sp, frame_size, false);
-// 	edges_reroute_except(initial_sp, incsp, incsp);
-// 	sched_add_after(start, incsp);
-// }
-
 static void bpf_generate_code(FILE *output, const char *cup_name)
 {
 	be_begin(output, cup_name);
@@ -114,8 +102,6 @@ static void bpf_generate_code(FILE *output, const char *cup_name)
 		be_sched_fix_flags(irg, &bpf_reg_classes[CLASS_bpf_flags], NULL, NULL, NULL);
 
 		be_step_regalloc(irg, &bpf_regalloc_if);
-
-		// introduce_prologue(irg);
 
 		be_fix_stack_nodes(irg, &bpf_registers[REG_R10]);
 		be_birg_from_irg(irg)->non_ssa_regs = NULL;

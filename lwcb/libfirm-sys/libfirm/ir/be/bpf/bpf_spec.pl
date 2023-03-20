@@ -53,7 +53,6 @@ $mode_flags = "mode_Iu";
 	},
 );
 
-# 定义一些私有的attr类型
 %init_attr = (
 	bpf_attr_t => "",
 	bpf_const_attr_t => "",
@@ -68,7 +67,6 @@ $mode_flags = "mode_Iu";
 	bpf_bswap_attr_t => "",
 );
 
-# rematerializable: 表示是否可以重新计算，而不用spill/reload
 my $binop = {
 	irn_flags => [ "rematerializable" ],
 	out_reqs  => [ "gp" ],
@@ -126,8 +124,6 @@ Shr => { template => $binop },
 # todo: change Minus to Neg
 Minus => { template => $unop },
 
-# Not => { template => $unop },
-
 Const => {
 	op_flags   => [ "constlike" ],
 	irn_flags  => [ "rematerializable" ],
@@ -138,7 +134,6 @@ Const => {
 },
 
 # Control Flow
-
 Jmp => {
 	state     => "pinned",
 	op_flags  => [ "cfopcode" ],
@@ -168,7 +163,6 @@ FrameAddr => {
 },
 
 # Load / Store
-
 # BPF_LD_IMM64 macro encodes single 'load 64-bit immediate' insn
 # pseudo BPF_LD_IMM64 insn used to refer to process-local map_fd
 # Memory load, dst_reg = *(uint *) (src_reg + off16)
@@ -176,12 +170,6 @@ Load => {
 	state     => "exc_pinned",
 
 	constructors => {
-		# imm => {
-		# 	in_reqs => [ "mem", "gp"],
-		# 	ins  => ["mem", "ptr"],
-		# 	attr => "int64_t offset",
-		# 	init => "init_bpf_load_store_attributes(res, ls_mode, entity, offset, is_frame_entity, false);",
-		# },
 		reg => {
 			in_reqs => ["mem", "gp"],
 			ins => ["mem", "ptr"],
@@ -190,7 +178,6 @@ Load => {
 		},
 	},
 
-	# ins   => [ "mem", "ptr" ],
 	out_reqs  => [ "gp", "mem" ],
 	outs      => [ "res", "M" ],
 	attr_type => "bpf_load_attr_t",
@@ -204,19 +191,10 @@ MapFd => {
 	init     => "init_bpf_mapfd_attr(res, fd);",
 },
 
-# Memory store, *(uint *) (dst_reg + off16) = src_reg
-# Memory store, *(uint *) (dst_reg + off16) = imm32
 Store => {
 	state     => "exc_pinned",
 
 	constructors => {
-		# imm => {
-		# 	in_reqs => ["mem", "gp"],
-		# 	ins => ["mem", "ptr"],
-		# 	attr => "int16_t offset, int32_t imm",
-		# 	init => "init_bpf_store_attr(res, offset, imm, true);",
-		# },
-
 		reg => {
 			in_reqs => ["mem", "gp", "gp"],
 			ins => ["mem", "val", "ptr"],
@@ -237,7 +215,6 @@ Call => {
 	in_reqs => "...",
 	out_reqs  => "...",
 	outs      => [ "M", "first_result" ],
-	# fixed     => "if (aggregate_return) arch_add_irn_flags(res, (arch_irn_flags_t)sparc_arch_irn_flag_aggregate_return);",
 	constructors => {
 		imm => {
 			attr => "ir_entity *entity, int32_t func_id",

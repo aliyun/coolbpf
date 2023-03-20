@@ -157,20 +157,12 @@ void set_bpf_value(ir_node *const node, ir_entity *const entity,
 	(void)node;
 	(void)value;
 	(void)entity;
-	
-	// bpf_attr_t *attr = get_bpf_attr(node);
-	// attr->entity = entity;
-	// attr->value  = value;
 }
 
 int bpf_attrs_equal(const ir_node *a, const ir_node *b)
 {
 	(void)a;
 	(void)b;
-	// const bpf_attr_t *attr_a = get_bpf_attr_const(a);
-	// const bpf_attr_t *attr_b = get_bpf_attr_const(b);
-	// return attr_a->value == attr_b->value
-	//     && attr_a->entity == attr_b->entity;
 	return 0;
 }
 

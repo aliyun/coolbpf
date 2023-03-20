@@ -21,7 +21,6 @@
 
 static const unsigned ignore_regs[] = {
 	REG_R10,
-	// REG_R0,
 };
 
 static const arch_register_t* const param_regs[] = {

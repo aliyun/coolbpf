@@ -19,7 +19,6 @@ bpf_attr_t *get_bpf_attr(ir_node *node);
 
 const bpf_attr_t *get_bpf_attr_const(const ir_node *node);
 
-
 const bpf_bswap_attr_t *get_bpf_bswap_attr_const(const ir_node *node);
 const bpf_condjmp_attr_t *get_bpf_condjmp_attr_const(const ir_node *node);
 const bpf_cmp_attr_t *get_bpf_cmp_attr_const(const ir_node *node);

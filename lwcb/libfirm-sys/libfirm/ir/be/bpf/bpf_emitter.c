@@ -367,7 +367,7 @@ void bpf_emitter_fix_jmp(unsigned short src, unsigned short dst)
 	assert(src <= dst);
 	assert(dst != 0xffff);
 	global_emitter->insns[src - 1].off = dst - src;
-	printf("%d -> %d fix jmp: %d\n", src - 1, dst, dst - src);
+	
 }
 
 static void emit(struct bpf_insn insn)
@@ -387,17 +387,17 @@ static void emit2(struct bpf_insn insn1, struct bpf_insn insn2)
  */
 static void emit_bpf_Jmp(const ir_node *node)
 {
-	printf("todo: emit_bpf_Jmp\n");
+	
 }
 
 static void emit_be_IncSP(const ir_node *node)
 {
-	printf("todo: emit_be_IncSP\n");
+	
 }
 
 static void emit_Return(const ir_node *node)
 {
-	printf("%d: goto pc+0\n", global_emitter->pos);
+	
 	emit(BPF_JMP_A(0));
 	bpf_emitter_add_ret(global_emitter->pos);
 }
@@ -410,19 +410,19 @@ static void emit_bpf_add(const ir_node *node)
 
 	if (left_reg->index == dest_reg->index)
 	{
-		printf("%d: r%d += r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
+		
 		emit(BPF_ALU64_REG(BPF_ADD, dest_reg->index, right_reg->index));
 	}
 	else if (right_reg->index == dest_reg->index)
 	{
-		printf("%d: r%d += r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+		
 		emit(BPF_ALU64_REG(BPF_ADD, dest_reg->index, left_reg->index));
 	}
 	else
 	{
-		printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+		
 		emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-		printf("%d: r%d += r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
+		
 		emit(BPF_ALU64_REG(BPF_ADD, dest_reg->index, right_reg->index));
 	}
 }
@@ -433,9 +433,9 @@ static void emit_bpf_and(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d &= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
+	
 	emit(BPF_ALU64_REG(BPF_AND, dest_reg->index, right_reg->index));
 }
 
@@ -453,7 +453,7 @@ static void emit_be_Copy(const ir_node *irn)
 	if (cls != &bpf_reg_classes[CLASS_bpf_gp])
 		panic("Wrong register class\n");
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, out->index, in->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, out->index, in->index));
 }
 
@@ -463,10 +463,8 @@ static void emit_bpf_FrameAddr(const ir_node *node)
 	int32_t offset = attr->offset;
 	arch_register_t const *const in = arch_get_irn_register_in(node, 0);
 	arch_register_t const *const out = arch_get_irn_register_out(node, 0);
-
-	printf("%d: r%d = r%d\n", global_emitter->pos, out->index, in->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, out->index, in->index));
-	printf("%d: r%d += %d\n", global_emitter->pos, out->index, offset);
 	emit(BPF_ALU64_IMM(BPF_ADD, out->index, offset));
 }
 
@@ -477,24 +475,20 @@ static void emit_bpf_const(const ir_node *node)
 
 	if (attr->is_mapfd)
 	{
-		printf("%d: r%d = map[%lld]\n", global_emitter->pos, dest_reg->index, attr->value);
 		emit2(BPF_LD_MAP_FD(dest_reg->index, attr->value));
 	}
 	else
 	{
-
 		if (attr->mode == mode_Lu)
 		{
 			if (attr->value >= 0xffffffff)
 			{
-				printf("%d: r%d = %lld\n", global_emitter->pos, dest_reg->index, attr->value);
+				
 				emit2(BPF_LD_IMM64(dest_reg->index, attr->value));
 				return;
 			}
-			// printf("constant is %llu\n", attr->value);
+			// 
 		}
-
-		printf("%d: r%d = %lld\n", global_emitter->pos, dest_reg->index, attr->value);
 		emit(BPF_ALU64_IMM(BPF_MOV, dest_reg->index, attr->value));
 	}
 }
@@ -502,10 +496,8 @@ static void emit_bpf_const(const ir_node *node)
 static void emit_bpf_call(const ir_node *node)
 {
 	bpf_call_attr_t *attr = get_bpf_call_attr_const(node);
-
 	ident *id = get_entity_ident(attr->entity);
 
-	printf("%d: call %s\n", global_emitter->pos, id);
 	emit(BPF_EMIT_CALL(attr->func_id));
 }
 
@@ -515,9 +507,7 @@ static void emit_bpf_div(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d /= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_DIV, dest_reg->index, right_reg->index));
 }
 
@@ -527,9 +517,7 @@ static void emit_bpf_xor(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d ^= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_XOR, dest_reg->index, right_reg->index));
 }
 
@@ -539,10 +527,7 @@ static void emit_bpf_load(const ir_node *node)
 	const arch_register_t *ptr_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 	const bpf_load_attr_t *attr = get_bpf_load_attr_const(node);
-
 	int sz = get_mode_size_bits(attr->mode);
-
-	printf("%d: r%d = *(u%d *)(r%d + %d)\n", global_emitter->pos, dest_reg->index, sz, ptr_reg->index, attr->offset);
 
 	switch (sz)
 	{
@@ -565,7 +550,7 @@ static void emit_bpf_load(const ir_node *node)
 
 static void emit_bpf_minus(const ir_node *node)
 {
-	printf("minus todo\n");
+	
 }
 
 static void emit_bpf_mul(const ir_node *node)
@@ -574,9 +559,7 @@ static void emit_bpf_mul(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d *= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_MUL, dest_reg->index, right_reg->index));
 }
 
@@ -586,9 +569,8 @@ static void emit_bpf_or(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d |= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_OR, dest_reg->index, right_reg->index));
 }
 
@@ -598,9 +580,8 @@ static void emit_bpf_shl(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d >>= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_LSH, dest_reg->index, right_reg->index));
 }
 
@@ -610,22 +591,16 @@ static void emit_bpf_shr(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d <<= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
 	emit(BPF_ALU64_REG(BPF_RSH, dest_reg->index, right_reg->index));
 }
 
-// *(size *) (dst_reg + off) = src_reg
 static void emit_bpf_store(const ir_node *node)
 {
 	const arch_register_t *val_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *ptr_reg = arch_get_irn_register_in(node, 2);
 	const bpf_store_attr_t *attr = get_bpf_store_attr_const(node);
-
 	int sz = get_mode_size_bits(attr->mode);
-
-	printf("%d: *(u%d *)(r%d + %d) = r%d\n", global_emitter->pos, sz, ptr_reg->index, attr->offset, val_reg->index);
 
 	switch (sz)
 	{
@@ -652,16 +627,14 @@ static void emit_bpf_sub(const ir_node *node)
 	const arch_register_t *right_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, left_reg->index);
+	
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, left_reg->index));
-	printf("%d: r%d -= r%d\n", global_emitter->pos, dest_reg->index, right_reg->index);
-
 	emit(BPF_ALU64_REG(BPF_SUB, dest_reg->index, right_reg->index));
 }
 
 static void emit_bpf_cmp(const ir_node *irn)
 {
-	// printf("emit cmp\n");
+	// 
 }
 
 static void emit_bpf_condjmp(const ir_node *irn)
@@ -725,19 +698,17 @@ static void emit_bpf_condjmp(const ir_node *irn)
 	if (cmp_attr->is_imm)
 	{
 		const arch_register_t *left_reg = arch_get_irn_register_in(op1, 0);
-		printf("%d: if r%d %s %d goto pc+0\n", global_emitter->pos, left_reg->index, op_str, cmp_attr->imm32);
 		emit(BPF_JMP_IMM(op, left_reg->index, cmp_attr->imm32, 0));
 	}
 	else
 	{
 		const arch_register_t *left_reg = arch_get_irn_register_in(op1, 0);
 		const arch_register_t *right_reg = arch_get_irn_register_in(op1, 1);
-		printf("%d: if r%d %s r%d goto pc+0\n", global_emitter->pos, left_reg->index, right_reg->index, cmp_attr->imm32);
+		
 		emit(BPF_JMP_REG(op, left_reg->index, right_reg->index, 0));
 	}
 
 	add_Block_fix_jmp(be_emit_get_cfop_target(projs.t), global_emitter->pos);
-	printf("%d: goto pc+0\n", global_emitter->pos);
 	emit(BPF_JMP_A(0));
 	add_Block_fix_jmp(be_emit_get_cfop_target(projs.f), global_emitter->pos);
 }
@@ -749,10 +720,7 @@ static void emit_bpf_bswap(const ir_node *irn)
 	const arch_register_t *src_reg = arch_get_irn_register_in(irn, 0);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(irn, 0);
 
-	printf("%d: r%d = r%d\n", global_emitter->pos, dest_reg->index, src_reg->index);
 	emit(BPF_ALU64_REG(BPF_MOV, dest_reg->index, src_reg->index));
-	
-	printf("%d: bswap%d r%d\n", global_emitter->pos, attr->size, dest_reg->index);
 	emit(BPF_ENDIAN(attr->type, dest_reg->index, attr->size));
 }
 
@@ -808,34 +776,18 @@ static void bpf_emit_block(ir_node *block)
 
 void bpf_emit_function(ir_graph *irg)
 {
-
+	size_t stack_size = 0;
 	global_emitter = be_birg_from_irg(irg)->isa_link;
-
 	global_emitter->ret_jmp = NEW_ARR_F(struct bpf_insn, 0);
 
 	global_emitter->pos = 0;
 
+	ir_type *const frame = get_irg_frame_type(irg);
+	stack_size = get_type_size(frame);
+
 	emit(BPF_ALU64_IMM(BPF_MOV, 2, 0));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -8));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -16));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -24));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -32));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -40));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -48));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -56));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -64));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -72));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -80));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -88));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -96));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -104));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -112));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -120));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -128));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -136));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -144));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -152));
-	emit(BPF_STX_MEM(BPF_DW, 10, 2, -160));
+	for(size_t i = 8; i <= stack_size; i += 8)
+		emit(BPF_STX_MEM(BPF_DW, 10, 2, -i));
 
 	/* register all emitter functions */
 	bpf_register_emitters();
@@ -876,16 +828,10 @@ void bpf_emit_function(ir_graph *irg)
 	}
 
 	for (size_t i = 0, n = bpf_emitter_ret_size(); i < n; i++)
-	{
 		bpf_emitter_fix_jmp(get_bpf_emitter_ret(i), global_emitter->pos);
-	}
 
-	printf("%d: r0 = 0\n", global_emitter->pos);
 	emit(BPF_ALU64_IMM(BPF_MOV, 0, 0));
-	printf("%d: exit\n", global_emitter->pos);
 	emit(BPF_EXIT_INSN());
-
 	ir_free_resources(irg, IR_RESOURCE_IRN_LINK);
-
 	be_gas_emit_function_epilog(entity);
 }
