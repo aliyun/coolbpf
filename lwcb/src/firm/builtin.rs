@@ -241,12 +241,12 @@ fn gen_builtin_print(ctx: &mut Context, ctx_node: &Node, args: &Vec<(Node, NodeI
 fn gen_builtin_iphdr(skb: &Node, typ: &Type) -> Node {
     let skb_type = typ.ptr_to();
     let head_node = gen_member_by_name(skb, &skb_type, "head");
-    let transport_header_node = gen_member_by_name(skb, &skb_type, "network_header");
+    let network_header_node = gen_member_by_name(skb, &skb_type, "network_header");
 
-    let addr = Node::new_add(head_node, transport_header_node);
+    let addr = Node::new_add(head_node, network_header_node);
 
     let mut iphdr_type = Type::from_struct_name("iphdr");
     iphdr_type.set_kmem();
 
-    gen_deref(addr, &iphdr_type)
+    gen_deref(addr, &iphdr_type.to_ptr())
 }
