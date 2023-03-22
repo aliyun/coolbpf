@@ -382,6 +382,23 @@ static void emit2(struct bpf_insn insn1, struct bpf_insn insn2)
 	emit(insn2);
 }
 
+static int size_to_bpfsize(int size)
+{
+    switch (size)
+    {
+    case 8:
+        return BPF_B;
+    case 16:
+        return BPF_H;
+    case 32:
+        return BPF_W;
+    case 64:
+        return BPF_DW;
+    default:
+        panic("wrong size: %d, expect: 8, 16, 32 or 64", size);
+    }
+}
+
 /**
  * Emits code for a unconditional jump.
  */
@@ -527,25 +544,9 @@ static void emit_bpf_load(const ir_node *node)
 	const arch_register_t *ptr_reg = arch_get_irn_register_in(node, 1);
 	const arch_register_t *dest_reg = arch_get_irn_register_out(node, 0);
 	const bpf_load_attr_t *attr = get_bpf_load_attr_const(node);
-	int sz = get_mode_size_bits(attr->mode);
+	int size = get_mode_size_bits(attr->mode);
 
-	switch (sz)
-	{
-	case 8:
-		emit(BPF_LDX_MEM(BPF_B, dest_reg->index, ptr_reg->index, attr->offset));
-		break;
-	case 16:
-		emit(BPF_LDX_MEM(BPF_H, dest_reg->index, ptr_reg->index, attr->offset));
-		break;
-	case 32:
-		emit(BPF_LDX_MEM(BPF_W, dest_reg->index, ptr_reg->index, attr->offset));
-		break;
-	case 64:
-		emit(BPF_LDX_MEM(BPF_DW, dest_reg->index, ptr_reg->index, attr->offset));
-		break;
-	default:
-		panic("load size is wrong: %d", sz);
-	}
+	emit(BPF_LDX_MEM(size_to_bpfsize(size), dest_reg->index, ptr_reg->index, attr->offset));
 }
 
 static void emit_bpf_minus(const ir_node *node)
@@ -597,28 +598,12 @@ static void emit_bpf_shr(const ir_node *node)
 
 static void emit_bpf_store(const ir_node *node)
 {
-	const arch_register_t *val_reg = arch_get_irn_register_in(node, 1);
-	const arch_register_t *ptr_reg = arch_get_irn_register_in(node, 2);
-	const bpf_store_attr_t *attr = get_bpf_store_attr_const(node);
-	int sz = get_mode_size_bits(attr->mode);
+    const arch_register_t *val_reg = arch_get_irn_register_in(node, 1);
+    const arch_register_t *ptr_reg = arch_get_irn_register_in(node, 2);
+    const bpf_store_attr_t *attr = get_bpf_store_attr_const(node);
+    int size = get_mode_size_bits(attr->mode);
 
-	switch (sz)
-	{
-	case 8:
-		emit(BPF_STX_MEM(BPF_B, ptr_reg->index, val_reg->index, attr->offset));
-		break;
-	case 16:
-		emit(BPF_STX_MEM(BPF_H, ptr_reg->index, val_reg->index, attr->offset));
-		break;
-	case 32:
-		emit(BPF_STX_MEM(BPF_W, ptr_reg->index, val_reg->index, attr->offset));
-		break;
-	case 64:
-		emit(BPF_STX_MEM(BPF_DW, ptr_reg->index, val_reg->index, attr->offset));
-		break;
-	default:
-		panic("store size is wrong: %d", sz);
-	}
+    emit(BPF_STX_MEM(size_to_bpfsize(size), ptr_reg->index, val_reg->index, attr->offset));
 }
 
 static void emit_bpf_sub(const ir_node *node)
