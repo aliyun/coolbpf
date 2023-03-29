@@ -8,7 +8,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
-#include "trace_helpers.h"
+#include "kallsyms.h"
 
 struct ksyms
 {

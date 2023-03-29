@@ -1,12 +1,12 @@
-#include <linux/btf.h>
+
+#include <bpf/btf.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
-#include <bpf/btf.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 
-#include "btf.h"
+#include "btfparse.h"
 
 #define DEBUG 0
 
@@ -69,6 +69,7 @@ const struct btf_type *btf_type_skip_ptr(const struct btf *btf, uint32_t id)
 }
 
 /* Similar to btf_type_skip_modifiers() but does not skip typedefs. */
+#if 0
 static const struct btf_type *btf_type_skip_qualifiers(const struct btf *btf,
                                                        uint32_t id)
 {
@@ -82,6 +83,7 @@ static const struct btf_type *btf_type_skip_qualifiers(const struct btf *btf,
 
     return t;
 }
+#endif
 
 // skip modifiers and pointer to find real type
 static const struct btf_type *btf_type_find_realtype(struct btf *btf, int typeid)

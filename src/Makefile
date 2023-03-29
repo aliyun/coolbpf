@@ -12,13 +12,14 @@ COOLBPF_MAJOR_VERSION := $(firstword $(subst ., ,$(COOLBPF_VERSION)))
 OBJDIR ?= .
 SHARED_OBJDIR := $(OBJDIR)/sharedobjs
 STATIC_OBJDIR := $(OBJDIR)/staticobjs
-OBJS := coolbpf.o 
+OBJS := coolbpf.o btfparse.o fastksym.o kallsyms.o
 SHARED_OBJS := $(addprefix $(SHARED_OBJDIR)/,$(OBJS))
 STATIC_OBJS := $(addprefix $(STATIC_OBJDIR)/,$(OBJS))
 
 DESTDIR ?=
 
-INCLUDES := -I. -I$(DESTDIR)
+PROJECT_DIR = ..
+INCLUDES := -I.  -I$(PROJECT_DIR)/third/libbpf/include -I$(PROJECT_DIR)/third/libbpf/include/uapi -I$(DESTDIR)
 ALL_CFLAGS := $(INCLUDES)
 
 SHARED_CFLAGS += -fPIC -fvisibility=hidden -DSHARED
