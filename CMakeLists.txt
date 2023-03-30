@@ -1,4 +1,4 @@
-project(lcc C)
+project(coolbpf C)
 cmake_minimum_required(VERSION 2.8.12)
 
 INCLUDE_DIRECTORIES(
@@ -8,6 +8,5 @@ INCLUDE_DIRECTORIES(
     ${CMAKE_CURRENT_SOURCE_DIR}/third/libbpf/include/uapi
 )
 
-add_subdirectory(btf)
-add_subdirectory(lcc)
-add_subdirectory(third)
+# compile coolbpf library
+add_subdirectory(src)
