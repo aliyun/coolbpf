@@ -1,12 +1,4 @@
-
-
-
 mod token;
 mod tokens;
 
-pub use {
-    token::Token,
-    tokens::Tokens,
-};
-
-
+pub use {token::Token, tokens::Tokens};

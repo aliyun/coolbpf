@@ -1,4 +1,4 @@
-use crate::{is_python, IS_IN_PYTHON};
+use crate::is_python;
 
 use super::{
     layout::Layout,
@@ -77,7 +77,7 @@ impl PrintHandler {
         }
     }
 
-    pub fn pyret(&mut self) -> Vec<String>{
+    pub fn pyret(&mut self) -> Vec<String> {
         let mut ret = vec![];
         std::mem::swap(&mut ret, &mut self.pyret);
         ret
@@ -111,7 +111,7 @@ impl PerfEvent {
         self.lo = lo
     }
 
-    pub fn handle_data(&mut self, data: &[u8]) -> Option<Vec<String>>{
+    pub fn handle_data(&mut self, data: &[u8]) -> Option<Vec<String>> {
         if let Some(p) = &mut self.print {
             p.reset();
             self.lo.print(p, data);

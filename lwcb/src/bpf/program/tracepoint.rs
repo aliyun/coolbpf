@@ -1,7 +1,7 @@
 use super::program::Program;
 use anyhow::{bail, Result};
 use libbpf_sys::*;
-use std::{ffi::CString, fs::read_to_string};
+use std::fs::read_to_string;
 
 use perf_event_open_sys::bindings::perf_event_attr;
 use perf_event_open_sys::bindings::PERF_FLAG_FD_CLOEXEC;
@@ -13,7 +13,7 @@ fn determine_tracepoint_id(category: &str, name: &str) -> Result<i32> {
     let mut content = read_to_string(path)?;
 
     for (i, c) in content.chars().enumerate() {
-        if c < '0' || c > '9' {
+        if !c.is_ascii_digit() {
             content.truncate(i);
             break;
         }
@@ -62,7 +62,7 @@ impl TracepointProgram {
             bail!("Failed to enable bpf program in perf event")
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -86,7 +86,6 @@ impl Program for TracepointProgram {
     fn insns_ptr(&self) -> *const bpf_insn {
         self.insns.as_ptr() as *const bpf_insn
     }
-   
 }
 
 #[cfg(test)]

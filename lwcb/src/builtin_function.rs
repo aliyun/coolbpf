@@ -1,5 +1,4 @@
 use anyhow::bail;
-use libfirm_rs::{Node, Type};
 
 use crate::types::Types;
 use std::fmt;
@@ -25,7 +24,6 @@ pub enum BuiltinFunction {
     Ksym,
     Reg,
 }
-
 
 impl fmt::Display for BuiltinFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

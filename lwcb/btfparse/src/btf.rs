@@ -2,10 +2,8 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
-use std::ffi::{CString, CStr};
 use std::fmt;
 use std::fs::File;
-use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 
@@ -144,7 +142,7 @@ impl Btf {
             if reader.is_empty() {
                 break;
             }
-            let kind = (reader.peek_u32(4) >> 24) & 0xf;
+            let kind = (reader.peek_u32(4) >> 24) & 0x1f;
             let ty = match kind {
                 1 => BtfType::Int(Int::from_reader(&mut reader)),
                 2 => BtfType::Ptr(Ptr::from_reader(&mut reader)),
@@ -188,7 +186,7 @@ impl Btf {
         for (id, ty) in self.types().iter().enumerate() {
             if let BtfType::Func(f) = ty {
                 if f.name.as_str().cmp(name) == Ordering::Equal {
-                    return Some(id as u32)
+                    return Some(id as u32);
                 }
             }
         }
@@ -307,7 +305,6 @@ impl BtfReader {
     }
 }
 
-
 #[test]
 fn test_btf_find_func() {
     let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
@@ -322,7 +319,7 @@ fn test_btf_get_func_proto() {
 
     if let BtfType::Func(f) = &btf.types()[id as usize] {
         let fpid = f.type_id - 1;
-        if let BtfType::FuncProto(fp) = &btf.types()[fpid as usize] {
+        if let BtfType::FuncProto(_) = &btf.types()[fpid as usize] {
             return;
         }
     }

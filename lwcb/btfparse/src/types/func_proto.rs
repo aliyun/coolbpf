@@ -34,7 +34,6 @@ impl FuncProto {
             params.push(FuncParam::from_reader(reader));
         }
 
-
         FuncProto {
             params,
             return_type_id,

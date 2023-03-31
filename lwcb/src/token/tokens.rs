@@ -83,7 +83,7 @@ impl Tokens {
         match &self.tokens[self.start] {
             Token::Identifier(i) => {
                 self.start += 1;
-                return Ok(i.clone());
+                Ok(i.clone())
             }
             _ => {
                 bail!("Found {:?} expect identifer", self.tokens[self.start])
@@ -95,7 +95,7 @@ impl Tokens {
         match self.tokens[self.start] {
             Token::StringLiteral(_) => {
                 self.start += 1;
-                return Ok(());
+                Ok(())
             }
             _ => {
                 bail!("Not a string literal token")
@@ -103,7 +103,7 @@ impl Tokens {
         }
     }
 
-    pub fn error_msg(&self) -> &str{
+    pub fn error_msg(&self) -> &str {
         // let span = &self.span[self.start];
         &self.source[..1]
     }

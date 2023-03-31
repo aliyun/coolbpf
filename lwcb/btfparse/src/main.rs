@@ -1,5 +1,3 @@
-
-
 use btfparse::btf::Btf;
 
 fn main() {
@@ -8,5 +6,4 @@ fn main() {
     for ty in btf.types() {
         println!("{:?}", ty);
     }
-
 }

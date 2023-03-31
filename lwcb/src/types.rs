@@ -102,7 +102,7 @@ impl fmt::Display for Constant {
 }
 
 impl Constant {
-    pub fn number(radix: usize, value_str: &str) -> Self {
+    pub fn number(_radix: usize, value_str: &str) -> Self {
         /*
          * todo: default type is i32, but we need to infer type in some cases.
          * For example, 0xffffffff should be u32
@@ -175,7 +175,7 @@ fn constant_op(op: char, lhs: Constant, rhs: Constant) -> Constant {
 
 impl ops::Sub<&Constant> for &Constant {
     type Output = Constant;
-    fn sub(self, rhs: &Constant) -> Self::Output {
+    fn sub(self, _rhs: &Constant) -> Self::Output {
         todo!()
     }
 }
@@ -193,7 +193,7 @@ impl ops::Add<Constant> for Constant {
 
 impl ops::Div<&Constant> for &Constant {
     type Output = Constant;
-    fn div(self, rhs: &Constant) -> Self::Output {
+    fn div(self, _rhs: &Constant) -> Self::Output {
         todo!()
     }
 }

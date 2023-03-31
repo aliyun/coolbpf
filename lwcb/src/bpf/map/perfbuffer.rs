@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     os::unix::prelude::{AsRawFd, RawFd},
     sync::atomic::{self, AtomicPtr, Ordering},
 };
@@ -7,9 +6,9 @@ use std::{
 use anyhow::{bail, Result};
 use perf_event_open_sys::{
     bindings::{
-        perf_event_attr, perf_event_header, perf_event_ioctls, perf_event_mmap_page,
+        perf_event_attr, perf_event_header, perf_event_mmap_page,
         perf_event_sample_format_PERF_SAMPLE_RAW, perf_sw_ids_PERF_COUNT_SW_BPF_OUTPUT,
-        perf_type_id_PERF_TYPE_SOFTWARE, perf_type_id_PERF_TYPE_TRACEPOINT, PERF_FLAG_FD_CLOEXEC,
+        perf_type_id_PERF_TYPE_SOFTWARE, PERF_FLAG_FD_CLOEXEC,
     },
     perf_event_open,
 };
@@ -110,7 +109,7 @@ impl PerfBuffer {
             buf.clear();
 
             if end < start {
-                let len = (raw_size as usize - start) as usize;
+                let len = raw_size as usize - start;
                 let ptr = base.add(start);
                 buf.extend_from_slice(std::slice::from_raw_parts(ptr, len));
 
@@ -127,12 +126,12 @@ impl PerfBuffer {
             (*header).data_tail += (*event).size as u64;
 
             match (*event).type_ {
-                perf_event_type_PERF_RECORD_SAMPLE => {
+                _perf_event_type_PERF_RECORD_SAMPLE => {
                     // header + size
                     let offset = std::mem::size_of::<perf_event_header>() + 4;
                     Some(buf[offset..].to_vec())
                 }
-                perf_event_type_PERF_RECORD_LOST => {
+                _perf_event_type_PERF_RECORD_LOST => {
                     let ls = &*(buf.as_ptr() as *const LostSample);
                     println!("cpu {} lost {} events", ls.id, ls.count);
                     None

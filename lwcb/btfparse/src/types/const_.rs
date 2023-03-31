@@ -1,7 +1,5 @@
 use crate::btf::BtfReader;
 
-
-
 // https://docs.kernel.org/bpf/btf.html#btf-kind-const
 #[derive(Debug, Clone)]
 pub struct Const {

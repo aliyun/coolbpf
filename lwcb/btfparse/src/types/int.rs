@@ -78,14 +78,14 @@ impl Int {
 
     pub fn is_bool(&self) -> bool {
         if let IntEncoding::Bool = self.encoding {
-            return true
+            return true;
         }
         false
     }
 
     pub fn is_char(&self) -> bool {
         if let IntEncoding::Char = self.encoding {
-            return true
+            return true;
         }
         false
     }
@@ -121,8 +121,6 @@ impl Int {
     pub fn is_i64(&self) -> bool {
         !self.is_bitfield() && self.size == 8 && self.is_signed()
     }
-
-    
 }
 
 impl fmt::Display for Int {

@@ -1,9 +1,6 @@
 use std::path::PathBuf;
 
-use libc::strlen;
 use libfirm_rs::{Mode, Type};
-
-use anyhow::Result;
 
 fn tracepoint_path(category: &str, name: &str) -> PathBuf {
     PathBuf::from(format!(
@@ -83,10 +80,8 @@ impl TracepointField {
         let mut start = None;
         let mut end = None;
         for (i, c) in field[off..].chars().enumerate() {
-            if c >= 'a' && c <= 'z' {
-                if start.is_none() {
-                    start = Some(off + i);
-                }
+            if c.is_ascii_lowercase() && start.is_none() {
+                start = Some(off + i);
             }
 
             if c == '*' {

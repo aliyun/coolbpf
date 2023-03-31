@@ -1,13 +1,10 @@
 mod ast;
-mod parser;
-mod visit;
-mod print;
 mod attr;
+mod parser;
+mod print;
+mod visit;
 
 pub use {self::ast::*, self::parser::*, self::visit::*};
-
-
-
 
 use crate::token::Tokens;
 
@@ -20,7 +17,7 @@ impl From<&mut Tokens> for Ast {
     fn from(tokens: &mut Tokens) -> Self {
         Ast {
             translation_unit: translation_unit(tokens)
-                .expect(&format!("failed to parse tokens: {}", tokens.error_msg())),
+                .unwrap_or_else(|_| panic!("failed to parse tokens: {}", tokens.error_msg())),
         }
     }
 }

@@ -148,9 +148,7 @@ impl Graph {
     }
 
     pub fn entity(&self) -> Entity {
-        unsafe {
-            unsafe { get_irg_entity(self.raw()).into()}
-        }
+        unsafe { unsafe { get_irg_entity(self.raw()).into() } }
     }
 }
 

@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use anyhow::Result;
 use lwcb::LwCB;
 
-use libfirm_rs::init_libfirm;
 use structopt::StructOpt;
 mod utils;
 
@@ -43,9 +42,9 @@ fn main() -> Result<()> {
     let opts = Command::from_args();
     let content;
     if let Some(p) = opts.script {
-        content = Some(read_to_string(&p)?);
+        content = Some(read_to_string(p)?);
     } else if let Some(t) = opts.text {
-        content = Some(t.clone());
+        content = Some(t);
     } else {
         content = None;
     }
