@@ -8,5 +8,8 @@ INCLUDE_DIRECTORIES(
     ${CMAKE_CURRENT_SOURCE_DIR}/third/libbpf/include/uapi
 )
 
+
 # compile coolbpf library
 add_subdirectory(src)
+# test cases
+add_subdirectory(tests)
