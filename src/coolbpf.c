@@ -102,14 +102,14 @@ void *perf_thread_worker(void *ctx)
     err = libbpf_get_error(pb);
     if (err)
     {
-        fprintf(stderr, "error new perf buffer: %s\n", strerror(-err));
+        error("error new perf buffer: %s\n", strerror(-err));
         return NULL;
     }
 
     if (!pb)
     {
         err = -errno;
-        fprintf(stderr, "failed to open perf buffer: %d\n", err);
+        error("failed to open perf buffer: %d\n", err);
         return NULL;
     }
 
@@ -118,7 +118,7 @@ void *perf_thread_worker(void *ctx)
         err = perf_buffer__poll(pb, timeout_ms);
         if (err < 0 && err != -EINTR)
         {
-            fprintf(stderr, "error polling perf buffer: %s\n", strerror(-err));
+            error("error polling perf buffer: %s\n", strerror(-err));
             goto cleanup;
         }
 

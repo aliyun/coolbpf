@@ -8,10 +8,12 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include "coolbpf_common.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <time.h>
+
 
 #define LOG_VERSION "0.1.0"
 
@@ -29,6 +31,10 @@ typedef void (*log_LogFn)(log_Event *ev);
 typedef void (*log_LockFn)(bool lock, void *udata);
 
 enum { LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL };
+
+
+
+COOLBPF_API void coolbpf_set_loglevel(int level);
 
 #define trace(...) log_log(LOG_TRACE, __FILE__, __LINE__, __VA_ARGS__)
 #define debug(...) log_log(LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)

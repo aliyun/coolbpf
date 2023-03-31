@@ -24,6 +24,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include <pthread.h>
+#include "log.h"
 
 typedef int (*pre_load)(void *ctx, void *skel_object);
 typedef int (*pre_attach)(void *ctx, void *skel_object);
@@ -50,13 +51,13 @@ struct coolbpf_object
             struct coolbpf_object *__cb = calloc(1, sizeof(struct coolbpf_object)); \
             if (!__cb)                                                              \
             {                                                                       \
-                printf("failed to allocate memory for coolbpf_object\n");           \
+                error("failed to allocate memory for coolbpf_object\n");           \
                 goto __real_out;                                                    \
             }                                                                       \
             struct skel##_bpf *skel_obj = skel##_bpf__open();                       \
             if (!skel_obj)                                                          \
             {                                                                       \
-                printf("failed to open CoolBPF object\n");                          \
+                error("failed to open CoolBPF object\n");                          \
                 goto __failed_out;                                                  \
             }                                                                       \
             __cb->skel_load = skel##_bpf__load;                                     \
@@ -69,14 +70,14 @@ struct coolbpf_object
             __err = coolbpf_object_load(__cb);                                      \
             if (__err)                                                              \
             {                                                                       \
-                printf("failed to load CoolBPF object: %d\n", __err);               \
+                error("failed to load CoolBPF object: %d\n", __err);               \
                 coolbpf_object_destroy(__cb);                                       \
                 goto __failed_out;                                                  \
             }                                                                       \
             __err = coolbpf_object_attach(__cb);                                    \
             if (__err)                                                              \
             {                                                                       \
-                printf("failed to attach CoolBPF object: %d\n", __err);             \
+                error("failed to attach CoolBPF object: %d\n", __err);             \
                 coolbpf_object_destroy(__cb);                                       \
                 goto __failed_out;                                                  \
             }                                                                       \
