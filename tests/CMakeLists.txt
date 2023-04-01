@@ -15,7 +15,7 @@ add_test(testapi testapi)
 
 
 add_executable(testbpf testbpf.c)
-add_dependencies(testbpf test_skel)
+add_dependencies(testbpf test_skel test_map_skel)
 target_include_directories(testbpf PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/bpf)
 target_link_libraries(testbpf PRIVATE coolbpf ${CRITERION_LIBRARIES} z elf)
 add_test(testbpf testbpf)
