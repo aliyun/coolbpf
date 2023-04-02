@@ -22,6 +22,8 @@ file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOU
 
 add_library(coolbpf STATIC SHARED ${sources})
 
+set_target_properties(coolbpf PROPERTIES VERSION 1.0.0 SOVERSION 1.0.0)
+
 
 install(TARGETS coolbpf
     LIBRARY DESTINATION lib
