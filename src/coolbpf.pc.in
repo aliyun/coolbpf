@@ -1,0 +1,9 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: coolbpf
+Description: eBPF library
+Version: @VERSION@
+Libs: -L${libdir} -lcoolbpf
+Cflags: -I${includedir}

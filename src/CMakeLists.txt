@@ -1,4 +1,4 @@
-set(CMAKE_INSTALL_PREFIX "/root/coolbpf/build/tmp")
+set(VERSION 1.0.0)
 
 find_library(ELF_LIBRARY
     NAMES elf
@@ -16,18 +16,20 @@ else (ELF_LIBRARY)
         message("Not found libelf library: ${ELF_LIBRARY}")
 endif(ELF_LIBRARY)
 
-
-
-file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
-
-add_library(coolbpf STATIC SHARED ${sources})
-
-set_target_properties(coolbpf PROPERTIES VERSION 1.0.0 SOVERSION 1.0.0)
-
-
-install(TARGETS coolbpf
-    LIBRARY DESTINATION lib
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
+  ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc
+  @ONLY
 )
 
+set (INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
+set (INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include/coolbpf)
+
+file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
+add_library(coolbpf SHARED ${sources})
+set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION ${VERSION})
+install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
+
 file(GLOB headers "*.h" )
-install(FILES ${headers} DESTINATION include/coolbpf)
+install(FILES ${headers} DESTINATION ${INSTALL_INCLUDE_DIR})
+install (FILES ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc DESTINATION ${INSTALL_LIB_DIR}/pkgconfig)
