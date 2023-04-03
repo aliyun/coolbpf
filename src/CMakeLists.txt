@@ -27,7 +27,7 @@ if(NOT DEFINED INSTALL_LIB_DIR)
 endif()
 
 if(NOT DEFINED INSTALL_INCLUDE_DIR)
-  set (INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include/coolbpf)
+  set (INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include)
 endif()
 
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
@@ -36,5 +36,5 @@ set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION ${VERSION}
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
 
 file(GLOB headers "*.h" )
-install(FILES ${headers} DESTINATION ${INSTALL_INCLUDE_DIR})
+install(FILES ${headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 install (FILES ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc DESTINATION ${INSTALL_LIB_DIR}/pkgconfig)
