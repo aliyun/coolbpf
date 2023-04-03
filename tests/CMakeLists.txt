@@ -27,4 +27,4 @@ target_link_libraries(bpf_core PRIVATE coolbpf ${CRITERION_LIBRARIES} z elf)
 add_test(bpf_core bpf_core)
 
 add_custom_target(test COMMAND ${CMAKE_CTEST_COMMAND}
-                  DEPENDS testapi testbpf)
+                  DEPENDS testapi testbpf bpf_core)
