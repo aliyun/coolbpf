@@ -3,7 +3,7 @@
 #include <coolbpf/log.h>
 #include "bpf_core.skel.h"
 
-Test(bpf, bpf_core_task_struct_state)
+Test(bpf, bpf_core)
 {
     bump_memlock_rlimit();
     struct coolbpf_object  *cb = coolbpf_object_new(bpf_core);
