@@ -1,4 +1,6 @@
 
+include(${PROJECT_SOURCE_DIR}/scripts/cmake/arch.cmake)
+message(STATUS "ARCH: ${ARCH}")
 
 find_program(BPFTOOL NAMES bpftool)
 message(STATUS "Found bpftool: ${BPFTOOL}")
@@ -23,7 +25,7 @@ macro(genskel name)
 
     add_custom_command(
         OUTPUT ${BPF_O_FILE}
-        COMMAND ${CLANG} -g -O2 -target bpf -D__TARGET_ARCH_${CMAKE_SYSTEM_PROCESSOR} -I${include_dirs} -c ${BPF_C_FILE} -o ${BPF_O_FILE}
+        COMMAND ${CLANG} -g -O2 -target bpf -D__TARGET_ARCH_${ARCH} -I${include_dirs} -c ${BPF_C_FILE} -o ${BPF_O_FILE}
         DEPENDS ${BPF_C_FILE}
         COMMENT "Generating BPF object: ${BPF_O_FILE}"
     )

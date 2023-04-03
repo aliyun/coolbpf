@@ -16,6 +16,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
+#include "bpf_core.h"
 
 #define MAX_STACK_DEPTH     20 
 
