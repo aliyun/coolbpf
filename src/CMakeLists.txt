@@ -22,8 +22,13 @@ configure_file(
   @ONLY
 )
 
-set (INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
-set (INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include/coolbpf)
+if(NOT DEFINED INSTALL_LIB_DIR)
+  set (INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
+endif()
+
+if(NOT DEFINED INSTALL_INCLUDE_DIR)
+  set (INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include/coolbpf)
+endif()
 
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
 add_library(coolbpf SHARED ${sources})
