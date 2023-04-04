@@ -9,6 +9,9 @@ INCLUDE_DIRECTORIES(
     ${CMAKE_CURRENT_SOURCE_DIR}/third/libbpf/include/uapi
 )
 
+
+option(BUILD_TESTING "Build test cases" OFF)
+
 # compile coolbpf library
 add_subdirectory(src)
 # test cases
