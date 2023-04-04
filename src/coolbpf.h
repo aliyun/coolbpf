@@ -23,6 +23,7 @@
 #include "coolbpf_common.h"
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 #include <pthread.h>
 #include "log.h"
 

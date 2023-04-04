@@ -1,10 +1,8 @@
 
-#include <bpf/btf.h>
-#include <bpf/libbpf.h>
-#include <bpf/bpf.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include "coolbpf.h"
 
 #include "btfparse.h"
 
