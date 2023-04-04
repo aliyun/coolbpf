@@ -6,4 +6,4 @@ Name: coolbpf
 Description: eBPF library
 Version: @VERSION@
 Libs: -L${libdir} -lcoolbpf
-Cflags: -I${includedir}
+Cflags: -I${includedir} -I${includedir}/coolbpf

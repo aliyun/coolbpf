@@ -36,5 +36,16 @@ set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION ${VERSION}
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
 
 file(GLOB headers "*.h" )
+message(STATUS "Installing coolbpf headers")
 install(FILES ${headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 install (FILES ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc DESTINATION ${INSTALL_LIB_DIR}/pkgconfig)
+
+file(GLOB bpf_headers ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.h)
+message(STATUS "Installing eBPF headers")
+install(FILES ${bpf_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/bpf)
+
+
+set(UAPI_DIR ${PROJECT_SOURCE_DIR}/third/libbpf/include/uapi/linux/)
+file(GLOB uapi_headers ${UAPI_DIR}/bpf_common.h ${UAPI_DIR}/btf.h ${UAPI_DIR}/bpf.h)
+message(STATUS "Installing eBPF UAPI headers")
+install(FILES ${uapi_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/linux)
