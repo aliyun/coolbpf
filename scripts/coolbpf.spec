@@ -1,4 +1,4 @@
-%define anolis_release 3
+%define anolis_release 1
 %define debug_package %{nil}
 %global libver       1.0.0
 
@@ -12,11 +12,6 @@ URL:            https://gitee.com/anolis/%{name}
 Source:         https://gitee.com/anolis/%{name}/archive/coolbpf-v%{version}.tar.gz
 BuildRequires:  gcc elfutils-libelf-devel elfutils-devel
 BuildRequires:  cmake
-
-# This package supersedes libbpf from kernel-tools,
-# which has default Epoch: 0. By having Epoch: > 0
-# this libbpf will take over smoothly
-Epoch:          2
 
 %description
 coolbpf's target is to build a platform for bpf compile collection,
@@ -60,5 +55,5 @@ make install
 %{_libdir}/pkgconfig/coolbpf.pc
 
 %changelog
-* Mon Apr 03 2023 Shuyi Cheng <chengshuyi.csy@linux.alibaba.com> - 1.0.0
+* Mon Apr 03 2023 Shuyi Cheng <chengshuyi.csy@linux.alibaba.com> - 1.0.0-1
 - Init for Anolis OS 23
