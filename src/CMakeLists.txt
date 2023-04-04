@@ -38,7 +38,8 @@ set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION ${VERSION}
 add_library(coolbpf_static STATIC ${sources})
 set_target_properties(coolbpf_static PROPERTIES OUTPUT_NAME "coolbpf")
 
-install(TARGETS coolbpf coolbpf_static LIBRARY DESTINATION ${INSTALL_LIB_DIR})
+install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
+install(TARGETS coolbpf_static ARCHIVE DESTINATION ${INSTALL_LIB_DIR})
 
 # install coolbpf headers
 file(GLOB headers "*.h" )
