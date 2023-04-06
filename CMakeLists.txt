@@ -16,3 +16,5 @@ option(BUILD_TESTING "Build test cases" OFF)
 add_subdirectory(src)
 # test cases
 add_subdirectory(tests)
+
+add_subdirectory(tools)

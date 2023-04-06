@@ -33,11 +33,11 @@ endif()
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
 # share library
 add_library(coolbpf SHARED ${sources})
-target_link_libraries(coolbpf PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY})
+target_link_libraries(coolbpf PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY} pthread)
 set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION ${VERSION})
 # static library
 add_library(coolbpf_static STATIC ${sources})
-target_link_libraries(coolbpf_static PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY})
+target_link_libraries(coolbpf_static PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY} pthread)
 set_target_properties(coolbpf_static PROPERTIES OUTPUT_NAME "coolbpf")
 
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
