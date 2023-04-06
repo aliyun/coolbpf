@@ -35,61 +35,6 @@ typedef int (*libbpf_print_fn_t)(enum libbpf_print_level level,
                                  const char *, va_list ap);
 extern libbpf_print_fn_t libbpf_set_print(libbpf_print_fn_t fn);
 
-static int log_libbpf_log(enum libbpf_print_level level, const char *fmt, va_list ap)
-{
-    int real_level = LOG_FATAL;
-    switch (level)
-    {
-    case LIBBPF_WARN:
-        real_level = LOG_WARN;
-        break;
-    case LIBBPF_INFO:
-        real_level = LOG_INFO;
-        break;
-    case LIBBPF_DEBUG:
-        real_level = LOG_DEBUG;
-        break;
-    }
-
-    log_Event ev = {
-        .fmt = fmt,
-        .file = __FILE__,
-        .line = __LINE__,
-        .level = level,
-    };
-
-    // lock();
-
-    // if (!L.quiet && level >= L.level)
-    // {
-    //     init_event(&ev, stderr);
-    //     stdout_callback(&ev);
-    // }
-
-    // for (int i = 0; i < MAX_CALLBACKS && L.callbacks[i].fn; i++)
-    // {
-    //     Callback *cb = &L.callbacks[i];
-    //     if (level >= cb->level)
-    //     {
-    //         init_event(&ev, cb->udata);
-    //         // va_start(ev.ap, fmt);
-    //         ev.ap = ap;
-    //         cb->fn(&ev);
-    //         // va_end(ev.ap);
-    //     }
-    // }
-
-    // unlock();
-    return 0;
-}
-
-void coolbpf_set_loglevel(int level)
-{
-    log_set_level(level);
-    libbpf_set_print(log_libbpf_log);
-}
-
-
 typedef struct
 {
     log_LogFn fn;
@@ -242,4 +187,36 @@ void log_log(int level, const char *file, int line, const char *fmt, ...)
     }
 
     unlock();
+}
+
+static int log_libbpf_log(enum libbpf_print_level level, const char *fmt, va_list ap)
+{
+    int real_level = LOG_FATAL;
+    switch (level)
+    {
+    case LIBBPF_WARN:
+        real_level = LOG_WARN;
+        break;
+    case LIBBPF_INFO:
+        real_level = LOG_INFO;
+        break;
+    case LIBBPF_DEBUG:
+        real_level = LOG_DEBUG;
+        break;
+    }
+
+    lock();
+
+    if (!L.quiet && real_level >= L.level)
+    {
+        vfprintf(stderr, fmt, ap);
+    }
+    unlock();
+    return 0;
+}
+
+void coolbpf_set_loglevel(int level)
+{
+    log_set_level(level);
+    libbpf_set_print(log_libbpf_log);
 }
