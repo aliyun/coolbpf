@@ -3,7 +3,7 @@
 
 以编译 example 为例
 
-1. 运行命令 `mkdir build & cd build` 创建编译目录
+1. 在 coolbpf 根目录运行命令 `mkdir build & cd build` 创建编译目录
 
 2. 运行命令 `cmake ..` 生成 Makefile 文件
 
