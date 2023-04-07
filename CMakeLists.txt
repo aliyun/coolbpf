@@ -11,6 +11,7 @@ INCLUDE_DIRECTORIES(
 
 
 option(BUILD_TESTING "Build test cases" OFF)
+option(BUILD_EXAMPLE "Build example cases" OFF)
 
 # compile coolbpf library
 add_subdirectory(src)
