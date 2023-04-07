@@ -129,7 +129,8 @@ void log_set_quiet(bool enable)
 
 int log_add_callback(log_LogFn fn, void *udata, int level)
 {
-    for (int i = 0; i < MAX_CALLBACKS; i++)
+    int i = 0;
+    for (i = 0; i < MAX_CALLBACKS; i++)
     {
         if (!L.callbacks[i].fn)
         {
@@ -157,6 +158,7 @@ static void init_event(log_Event *ev, void *udata)
 
 void log_log(int level, const char *file, int line, const char *fmt, ...)
 {
+    int i = 0;
     log_Event ev = {
         .fmt = fmt,
         .file = file,
@@ -174,7 +176,7 @@ void log_log(int level, const char *file, int line, const char *fmt, ...)
         va_end(ev.ap);
     }
 
-    for (int i = 0; i < MAX_CALLBACKS && L.callbacks[i].fn; i++)
+    for (i = 0; i < MAX_CALLBACKS && L.callbacks[i].fn; i++)
     {
         Callback *cb = &L.callbacks[i];
         if (level >= cb->level)
