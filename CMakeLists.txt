@@ -19,3 +19,6 @@ add_subdirectory(src)
 add_subdirectory(tests)
 
 add_subdirectory(tools)
+
+add_subdirectory(lcc)
+add_subdirectory(third)

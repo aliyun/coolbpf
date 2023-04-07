@@ -1,7 +1,7 @@
 ROOT := $(abspath $(shell pwd)../../../)
 OUTPUT ?= $(ROOT)/build/apps
 BPFTOOL ?= $(abspath bpftool)
-INCLUDES := -I$(ROOT)/build/third -I$(ROOT)/build/third/libbpf
+INCLUDES := -I$(ROOT)/build/third -I$(ROOT)/build/third/libbpf -I${ROOT}/arch/x86_64
 ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 BPF_CORE_SRC ?= $(wildcard $(ROOT)/apps/*.bpf.c)
 
