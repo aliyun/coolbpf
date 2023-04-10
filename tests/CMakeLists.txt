@@ -28,7 +28,11 @@ if(BUILD_TESTING)
     target_link_libraries(bpf_core PRIVATE coolbpf ${CRITERION_LIBRARIES})
     add_test(bpf_core bpf_core)
 
+    add_executable(testbtfparse testbtfparse.c)
+    target_link_libraries(testbtfparse PRIVATE coolbpf ${CRITERION_LIBRARIES})
+    add_test(testbtfparse testbtfparse)
+
     add_custom_target(test COMMAND ${CMAKE_CTEST_COMMAND}
-                    DEPENDS testapi testbpf bpf_core)
+                    DEPENDS testapi testbpf bpf_core testbtfparse)
 
 endif()
