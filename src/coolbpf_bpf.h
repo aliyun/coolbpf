@@ -11,7 +11,7 @@
 
 #ifndef COOLBPF_BPF_H
 #define COOLBPF_BPF_H
-
+#define BPF_NO_GLOBAL_DATA
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
