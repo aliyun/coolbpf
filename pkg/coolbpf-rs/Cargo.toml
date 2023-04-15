@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "coolbpf-rs",
+    "coolbpf-builder",
+
+    "examples/tcpconnect",
+]

@@ -1,0 +1,13 @@
+[package]
+name = "tcpconnect"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+metrics = "0.20.1"
+coolbpf-rs = { path = "../../coolbpf-rs" }
+
+[build-dependencies]
+coolbpf-builder = { path = "../../coolbpf-builder" }
