@@ -1,3 +1,7 @@
 [submodule "third/eunomia-bpf"]
 	path = third/eunomia-bpf
 	url = https://gitee.com/anolis/eunomia
+[submodule "pkg/coolbpf-rs/libbpf-rs"]
+	path = pkg/coolbpf-rs/libbpf-rs
+	url = https://gitee.com/cheng-shuyi/libbpf-rs.git
+	branch = coolbpf
