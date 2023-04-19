@@ -31,4 +31,5 @@ struct member_attribute
 struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_name, char *member_name);
 
 
+int btf_type_size(struct btf *btf, char *typename);
 #endif 

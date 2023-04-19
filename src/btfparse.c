@@ -193,3 +193,23 @@ struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_na
 free_ma:
     return NULL;
 }
+
+int btf_type_find_struct(struct btf *btf, char *name) {
+    return btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
+}
+
+int btf_type_struct_size(struct btf *btf, char *name) {
+    int typeid = btf_type_find_struct(btf, name);
+    if (typeid < 0)
+        return typeid;
+    
+    return btf__resolve_size(btf, typeid);
+}
+
+int btf_type_size(struct btf *btf, char *typename)
+{
+    if (strncmp(typename, "struct", strlen("struct"))) {
+        return btf_type_struct_size(btf, &typename[strlen("struct ")]);
+    }
+    return -ENOTSUP;
+}
