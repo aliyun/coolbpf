@@ -208,7 +208,7 @@ int btf_type_struct_size(struct btf *btf, char *name) {
 
 int btf_type_size(struct btf *btf, char *typename)
 {
-    if (strncmp(typename, "struct", strlen("struct"))) {
+    if (strncmp(typename, "struct", strlen("struct")) == 0) {
         return btf_type_struct_size(btf, &typename[strlen("struct ")]);
     }
     return -ENOTSUP;

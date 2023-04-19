@@ -22,5 +22,5 @@ Test(btfparse, btf_find_struct_member)
 Test(btfparse, btf_type_size)
 {
     struct btf *btf = btf_load(NULL);
-    cr_assert_lt(btf_type_size(btf, "struct sock"), 0);
+    cr_assert_gt(btf_type_size(btf, "struct sock"), 0);
 }
