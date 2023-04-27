@@ -24,3 +24,10 @@ Test(btfparse, btf_type_size)
     struct btf *btf = btf_load(NULL);
     cr_assert_gt(btf_type_size(btf, "struct sock"), 0);
 }
+
+Test(btfparse, btf_get_member_offset)
+{
+    struct btf *btf = btf_load(NULL);
+    cr_assert_eq(btf_get_member_offset(btf, "struct sock", "__sk_common"), 0);
+    cr_assert_gt(btf_get_member_offset(btf, "struct sock", "sk_sndbuf"), 0);
+}

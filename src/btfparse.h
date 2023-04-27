@@ -32,4 +32,7 @@ struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_na
 
 
 int btf_type_size(struct btf *btf, char *typename);
+
+
+int btf_get_member_offset(struct btf *btf, char *name, char *member_name);
 #endif 

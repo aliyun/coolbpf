@@ -213,3 +213,34 @@ int btf_type_size(struct btf *btf, char *typename)
     }
     return -ENOTSUP;
 }
+
+int btf_type_by_name(struct btf *btf, char *name)
+{
+    if (strncmp(name, "struct", strlen("struct")) == 0) {
+        return btf_type_find_struct(btf, &name[strlen("struct ")]);
+    }
+    return -ENOTSUP;
+}
+
+int btf_get_member_offset(struct btf *btf, char *name, char *member_name)
+{
+    int typeid = btf_type_by_name(btf, name);
+    const struct btf_type *t;
+    const struct btf_member *m;
+    char *tmp_member_name;
+    int i;
+    
+    if (typeid < 0)
+        return typeid;
+    
+    t = btf__type_by_id(btf, typeid);
+    m = btf_members(t);
+    for (i = 0; i < btf_vlen(t); i++, m++)
+    {
+        tmp_member_name = btf__name_by_offset(btf, m->name_off);
+        if (tmp_member_name && tmp_member_name[0] && strcmp(tmp_member_name, member_name) == 0)
+            return m->offset;
+    }
+
+    return -ENOENT;
+}
