@@ -1,5 +1,5 @@
-use logos::Logos;
 use crate::types::*;
+use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq)]
 pub enum Token {
@@ -159,6 +159,8 @@ pub enum Token {
     // #[token("true")]
     // #[token("false")]
     // #[regex(r"'.'")]
+    #[regex(r"0[bB][01]+", |x| Constant::number(2, x.slice()))]
+    #[regex(r"0[oO][0-7]+", |x| Constant::number(8, x.slice()))]
     #[regex(r"0[xX][0-9a-fA-F]+", |x| Constant::number(16, x.slice()))]
     #[regex(r"[0-9]+", |x| Constant::number(10, x.slice()))]
     Constant(Constant),

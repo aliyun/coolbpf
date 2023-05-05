@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use logos::{Lexer, Logos, Span};
 
 use crate::token::Token;
-use crate::types::Identifier;
+use crate::types::{Constant, Identifier};
 
 #[derive(Debug, Clone)]
 pub struct Tokens {
@@ -89,6 +89,18 @@ impl Tokens {
             }
             _ => {
                 bail!("Found {:?} expect identifer", self.tokens[self.start])
+            }
+        }
+    }
+
+    pub fn eat_constant(&mut self) -> Result<Constant> {
+        match &self.tokens[self.start] {
+            Token::Constant(c) => {
+                self.start += 1;
+                return Ok(*c);
+            }
+            _ => {
+                bail!("Found {:?} expect constant", self.tokens[self.start])
             }
         }
     }
@@ -219,6 +231,17 @@ impl<'text> TokenStream<'text> {
         }
     }
 
+    pub fn eat_constant(&mut self) -> Result<Constant> {
+        match &self.token()? {
+            Token::Constant(c) => {
+                return Ok(*c);
+            }
+            _ => {
+                bail!("Not constant")
+            }
+        }
+    }
+
     pub fn eat_string_literal(&mut self) -> Result<()> {
         match self.token()? {
             Token::StringLiteral(_) => {
@@ -230,8 +253,7 @@ impl<'text> TokenStream<'text> {
         }
     }
 
-
-    pub fn span_string(&self, span: Span) -> &str{
+    pub fn span_string(&self, span: Span) -> &str {
         &self.source[span]
     }
 
@@ -244,29 +266,63 @@ impl<'text> TokenStream<'text> {
     }
 }
 
-#[test]
-fn test_tokens() {
-    let mut tokens = Tokens::from("printf(\"test %s\", \"test\")");
-    println!("{:?}", tokens);
-
-    tokens.eat_identifier().unwrap();
-    tokens.eat(Token::LeftParen).unwrap();
-    tokens.eat_string_literal().unwrap();
-    tokens.eat(Token::Comma).unwrap();
-    tokens.eat_string_literal().unwrap();
-    tokens.eat(Token::RightParen).unwrap();
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_token_kprobe() {
-
         let tokens = TokenStream::from("kprobe:tcp_rcv_established {}");
 
         println!("{:?}", tokens);
+    }
+
+    #[test]
+    fn test_tokens() {
+        let mut tokens = Tokens::from("printf(\"test %s\", \"test\")");
+        println!("{:?}", tokens);
+
+        tokens.eat_identifier().unwrap();
+        tokens.eat(Token::LeftParen).unwrap();
+        tokens.eat_string_literal().unwrap();
+        tokens.eat(Token::Comma).unwrap();
+        tokens.eat_string_literal().unwrap();
+        tokens.eat(Token::RightParen).unwrap();
+    }
+
+    #[test]
+    fn test_constant_binary_tokens() {
+        let mut tokens = Tokens::from("0b1010");
+        println!("{:?}", tokens);
+
+        let value: i32 = tokens.eat_constant().unwrap().into();
+        assert_eq!(value, 0b1010 as i32);
+    }
+
+    #[test]
+    fn test_constant_hex_tokens() {
+        let mut tokens = Tokens::from("0x1010");
+        println!("{:?}", tokens);
+
+        let value: i32 = tokens.eat_constant().unwrap().into();
+        assert_eq!(value, 0x1010 as i32);
+    }
+
+    #[test]
+    fn test_constant_decimal_tokens() {
+        let mut tokens = Tokens::from("1010");
+        println!("{:?}", tokens);
+
+        let value: i32 = tokens.eat_constant().unwrap().into();
+        assert_eq!(value, 1010 as i32);
+    }
+
+    #[test]
+    fn test_constant_octonary_tokens2() {
+        let mut tokens = Tokens::from("0o1010");
+        println!("{:?}", tokens);
+
+        let value: i32 = tokens.eat_constant().unwrap().into();
+        assert_eq!(value, 0o1010 as i32);
     }
 }

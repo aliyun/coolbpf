@@ -666,6 +666,7 @@ dependencies = [
  "anyhow",
  "libc",
  "libfirm-sys",
+ "log",
  "paste",
  "tempfile",
 ]
