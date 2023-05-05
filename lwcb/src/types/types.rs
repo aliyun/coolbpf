@@ -136,7 +136,7 @@ impl Constant {
          * todo: default type is i32, but we need to infer type in some cases.
          * For example, 0xffffffff should be u32
          */
-        Constant::I32(value_str.parse().expect("Not a number"))
+        Constant::I32(i32::from_str_radix(value_str, radix as u32).expect("Not a number"))
     }
 
     pub fn type_(&self) -> Types {
