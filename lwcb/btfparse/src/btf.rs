@@ -144,7 +144,7 @@ impl Btf {
             if reader.is_empty() {
                 break;
             }
-            let kind = (reader.peek_u32(4) >> 24) & 0xf;
+            let kind = (reader.peek_u32(4) >> 24) & 0x1f;
             let ty = match kind {
                 1 => BtfType::Int(Int::from_reader(&mut reader)),
                 2 => BtfType::Ptr(Ptr::from_reader(&mut reader)),
