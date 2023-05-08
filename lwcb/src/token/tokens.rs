@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_constant_octonary_tokens2() {
+    fn test_constant_octonary_tokens() {
         let mut tokens = Tokens::from("0o1010");
         println!("{:?}", tokens);
 
