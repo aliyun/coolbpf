@@ -1,16 +1,13 @@
+use crate::ast::ast::*;
 use crate::builtin::Builtin;
 use crate::cmacro::try_enum_to_constant;
-use crate::ast::ast::*;
 use crate::token::{Token, TokenStream};
 use anyhow::{bail, Result};
 use logos::Span;
 
 macro_rules! expr {
     ($kind: expr, $span: expr) => {
-        Expr::new (
-            $kind,
-            $span,
-        )
+        Expr::new($kind, $span)
     };
 }
 
@@ -41,35 +38,36 @@ pub fn generate_ast(tokens: &mut TokenStream) -> Result<Ast> {
 
 pub fn program_expression(tokens: &mut TokenStream) -> Result<Expr> {
     let mut program_types = vec![];
-
-    let left = tokens.span();
+    let base = tokens.span();
 
     match tokens.read() {
         Token::Kprobe => {
             tokens.eat(Token::Colon).unwrap();
             let ident = tokens.eat_identifier().unwrap();
-            program_types.push(Ty::new(TyKind::Kprobe(ident.name), tokens.span()));
+            program_types.push(Ty::new(
+                TyKind::Kprobe(ident.name),
+                merge_span(&base, &tokens.span()),
+            ));
         }
         Token::Kretprobe => {
             tokens.eat(Token::Colon).unwrap();
             let ident = tokens.eat_identifier().unwrap();
-            program_types.push(Ty::new(TyKind::Kretprobe(ident.name), tokens.span()));
+            program_types.push(Ty::new(
+                TyKind::Kretprobe(ident.name),
+                merge_span(&base, &tokens.span()),
+            ));
         }
         _ => {
             bail!("Please specify bpf program type, such as begin, end, k(ret)probe or tracepoint")
         }
     }
 
-    let right = tokens.span();
-
-    parsed_debug!(tokens, &left, &right);
-
     loop {
         if tokens.peek() == Token::LeftBrace {
             let expression = Box::new(statement(tokens)?);
             return Ok(expr!(
                 ExprKind::Program(program_types, expression),
-                tokens.span()
+                merge_span(&base, &tokens.span())
             ));
         }
 
@@ -128,6 +126,8 @@ pub fn postfix_expression(tokens: &mut TokenStream) -> Result<Expr> {
     // }
 
     loop {
+        let base = tokens.span();
+
         if tokens.try_eat(Token::LeftBracket) {
             let expression = expression(tokens)?;
 
@@ -137,7 +137,7 @@ pub fn postfix_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 BinaryOp::Index,
                 rename_expression,
                 expression,
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
             continue;
         }
@@ -147,18 +147,22 @@ pub fn postfix_expression(tokens: &mut TokenStream) -> Result<Expr> {
             rename_expression = Expr::new_member(
                 rename_expression,
                 Expr::new_ident(tokens.eat_identifier()?.name, tokens.span()),
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
             continue;
         }
 
         if tokens.try_eat(Token::Deref) {
             // replace "->" with an unary expression
-            rename_expression = Expr::new_unary(UnaryOp::Deref, rename_expression, tokens.span());
+            rename_expression = Expr::new_unary(
+                UnaryOp::Deref,
+                rename_expression,
+                merge_span(&base, &tokens.span()),
+            );
             rename_expression = Expr::new_member(
                 rename_expression,
                 Expr::new_ident(tokens.eat_identifier()?.name, tokens.span()),
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
             continue;
         }
@@ -181,6 +185,8 @@ pub fn postfix_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///	    ;
 /// ```
 pub fn primary_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
+
     if tokens.try_eat(Token::LeftParen) {
         let expression = expression(tokens);
         tokens.eat(Token::RightParen)?;
@@ -194,20 +200,23 @@ pub fn primary_expression(tokens: &mut TokenStream) -> Result<Expr> {
                     return Ok(Expr::new_builtincall(
                         func,
                         argument_expression_list(tokens)?,
-                        tokens.span(),
+                        merge_span(&base, &tokens.span()),
                     ));
                 }
             }
 
             if let Ok(constant) = try_enum_to_constant(&i.name) {
-                return Ok(Expr::new_const(constant, tokens.span()));
+                return Ok(Expr::new_const(constant, merge_span(&base, &tokens.span())));
             }
 
-            return Ok(Expr::new_ident(i.name.clone(), tokens.span()));
+            return Ok(Expr::new_ident(
+                i.name.clone(),
+                merge_span(&base, &tokens.span()),
+            ));
         }
-        Token::Constant(c) => Ok(Expr::new_const(c, tokens.span())),
+        Token::Constant(c) => Ok(Expr::new_const(c, merge_span(&base, &tokens.span()))),
         // Token::
-        Token::StringLiteral(s) => Ok(Expr::new_litstr(s, tokens.span())),
+        Token::StringLiteral(s) => Ok(Expr::new_litstr(s, merge_span(&base, &tokens.span()))),
         _ => bail!("wrong params {:?}", tokens),
     }
 }
@@ -219,6 +228,8 @@ pub fn primary_expression(tokens: &mut TokenStream) -> Result<Expr> {
 /// 	;
 /// ```
 pub fn argument_expression_list(tokens: &mut TokenStream) -> Result<Vec<Expr>> {
+    let _ = tokens.span();
+
     if tokens.try_eat(Token::RightParen) {
         return Ok(vec![]);
     }
@@ -240,6 +251,7 @@ pub fn argument_expression_list(tokens: &mut TokenStream) -> Result<Vec<Expr>> {
 /// 	;
 /// ```
 pub fn multiplicative_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let mut expression = cast_expression(tokens)?;
 
     loop {
@@ -248,14 +260,14 @@ pub fn multiplicative_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 BinaryOp::Mult,
                 expression,
                 cast_expression(tokens)?,
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
         } else if tokens.try_eat(Token::Slash) {
             expression = Expr::new_binary(
                 BinaryOp::Div,
                 expression,
                 cast_expression(tokens)?,
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
         } else {
             return Ok(expression);
@@ -273,6 +285,7 @@ pub fn multiplicative_expression(tokens: &mut TokenStream) -> Result<Expr> {
 /// ```
 ///
 pub fn additive_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let mut expression = multiplicative_expression(tokens)?;
     loop {
         if tokens.try_eat(Token::Plus) {
@@ -280,14 +293,14 @@ pub fn additive_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 BinaryOp::Add,
                 expression,
                 multiplicative_expression(tokens)?,
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
         } else if tokens.try_eat(Token::Minus) {
             expression = Expr::new_binary(
                 BinaryOp::Sub,
                 expression,
                 multiplicative_expression(tokens)?,
-                tokens.span(),
+                merge_span(&base, &tokens.span()),
             );
         } else {
             return Ok(expression);
@@ -309,6 +322,7 @@ pub fn additive_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///
 ///
 pub fn unary_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     if tokens.try_eat(Token::Plus) {
         return cast_expression(tokens);
     }
@@ -317,7 +331,7 @@ pub fn unary_expression(tokens: &mut TokenStream) -> Result<Expr> {
         return Ok(Expr::new_unary(
             UnaryOp::Neg,
             cast_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -325,7 +339,7 @@ pub fn unary_expression(tokens: &mut TokenStream) -> Result<Expr> {
         return Ok(Expr::new_unary(
             UnaryOp::Deref,
             cast_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -339,13 +353,15 @@ pub fn unary_expression(tokens: &mut TokenStream) -> Result<Expr> {
 /// 	;
 /// ```
 pub fn cast_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
+
     if tokens.peek() == Token::LeftParen && tokens.peek_offset(1).is_type_name() {
         tokens.eat(Token::LeftParen)?;
         let ty = ty(tokens)?;
 
         return Ok(expr!(
             ExprKind::Cast(Box::new(cast_expression(tokens)?), ty),
-            tokens.span()
+            merge_span(&base, &tokens.span())
         ));
     }
 
@@ -361,6 +377,7 @@ pub fn cast_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///	    ;
 /// ```
 pub fn equality_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let expression = relational_expression(tokens)?;
 
     if tokens.try_eat(Token::TwoEqual) {
@@ -368,7 +385,7 @@ pub fn equality_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::Equal,
             expression,
             relational_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -377,7 +394,7 @@ pub fn equality_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::NonEqual,
             expression,
             relational_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
     return Ok(expression);
@@ -394,6 +411,7 @@ pub fn equality_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///	;
 /// ```
 pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let expression = shift_expression(tokens)?;
 
     if tokens.try_eat(Token::LessThan) {
@@ -401,7 +419,7 @@ pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::LT,
             expression,
             shift_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -410,7 +428,7 @@ pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::GT,
             expression,
             shift_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -419,7 +437,7 @@ pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::LTE,
             expression,
             shift_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -428,7 +446,7 @@ pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
             BinaryOp::GTE,
             expression,
             shift_expression(tokens)?,
-            tokens.span(),
+            merge_span(&base, &tokens.span()),
         ));
     }
 
@@ -444,6 +462,7 @@ pub fn relational_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///	    ;
 /// ```
 pub fn shift_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let expression = additive_expression(tokens)?;
 
     if tokens.try_eat(Token::LShift) {
@@ -453,7 +472,7 @@ pub fn shift_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 Box::new(expression),
                 Box::new(additive_expression(tokens)?)
             ),
-            tokens.span()
+            merge_span(&base, &tokens.span())
         ));
     }
 
@@ -464,7 +483,7 @@ pub fn shift_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 Box::new(expression),
                 Box::new(additive_expression(tokens)?)
             ),
-            tokens.span()
+            merge_span(&base, &tokens.span())
         ));
     }
     return Ok(expression);
@@ -477,6 +496,7 @@ pub fn shift_expression(tokens: &mut TokenStream) -> Result<Expr> {
 ///	    ;
 /// ```
 pub fn assignment_expression(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
     let expression = equality_expression(tokens)?;
 
     if tokens.try_eat(Token::Equal) {
@@ -486,7 +506,7 @@ pub fn assignment_expression(tokens: &mut TokenStream) -> Result<Expr> {
                 Box::new(expression),
                 Box::new(assignment_expression(tokens)?)
             ),
-            tokens.span()
+            merge_span(&base, &tokens.span())
         ));
     }
     return Ok(expression);
@@ -510,12 +530,15 @@ pub fn expression(tokens: &mut TokenStream) -> Result<Expr> {
 /// 	;
 /// ```
 pub fn expression_statement(tokens: &mut TokenStream) -> Result<Expr> {
-    let left = tokens.span();
+    let base = tokens.span();
     let expression = Box::new(expression(tokens)?);
-    let right = tokens.span();
+
     tokens.eat(Token::Semicolon)?;
-    parsed_debug!(tokens, &left, &right);
-    return Ok(expr!(ExprKind::ExprStmt(expression), tokens.span()));
+    parsed_debug!(tokens, &base, &tokens.span());
+    return Ok(expr!(
+        ExprKind::ExprStmt(expression),
+        merge_span(&base, &tokens.span())
+    ));
 }
 
 ///
@@ -531,9 +554,11 @@ pub fn expression_statement(tokens: &mut TokenStream) -> Result<Expr> {
 /// ```
 ///
 pub fn statement(tokens: &mut TokenStream) -> Result<Expr> {
+    let base = tokens.span();
+
     if tokens.try_eat(Token::Return) {
         tokens.eat(Token::Semicolon)?;
-        return Ok(expr!(ExprKind::Return, tokens.span()));
+        return Ok(expr!(ExprKind::Return, merge_span(&base, &tokens.span())));
     }
 
     if tokens.try_eat(Token::LeftBrace) {
@@ -541,7 +566,10 @@ pub fn statement(tokens: &mut TokenStream) -> Result<Expr> {
         while !tokens.try_eat(Token::RightBrace) {
             stmts.push(statement(tokens)?);
         }
-        return Ok(expr!(ExprKind::Compound(stmts), tokens.span()));
+        return Ok(expr!(
+            ExprKind::Compound(stmts),
+            merge_span(&base, &tokens.span())
+        ));
     }
 
     if tokens.try_eat(Token::If) {
@@ -556,7 +584,7 @@ pub fn statement(tokens: &mut TokenStream) -> Result<Expr> {
         };
         return Ok(expr!(
             ExprKind::If(condition, then_statement, else_statement),
-            tokens.span()
+            merge_span(&base, &tokens.span())
         ));
     }
 
