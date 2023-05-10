@@ -2,10 +2,8 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
-use std::ffi::{CString, CStr};
 use std::fmt;
 use std::fs::File;
-use std::io::Cursor;
 use std::io::Read;
 use std::path::Path;
 
@@ -188,7 +186,7 @@ impl Btf {
         for (id, ty) in self.types().iter().enumerate() {
             if let BtfType::Func(f) = ty {
                 if f.name.as_str().cmp(name) == Ordering::Equal {
-                    return Some(id as u32)
+                    return Some(id as u32);
                 }
             }
         }
@@ -307,24 +305,210 @@ impl BtfReader {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn test_btf_find_func() {
-    let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
-    let id = btf.find_func("tcp_sendmsg").unwrap();
-    assert!(id > 0);
-}
-
-#[test]
-fn test_btf_get_func_proto() {
-    let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
-    let id = btf.find_func("tcp_sendmsg").unwrap();
-
-    if let BtfType::Func(f) = &btf.types()[id as usize] {
-        let fpid = f.type_id - 1;
-        if let BtfType::FuncProto(fp) = &btf.types()[fpid as usize] {
-            return;
-        }
+    #[test]
+    fn test_btf_find_func() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+        let id = btf.find_func("tcp_sendmsg").unwrap();
+        assert!(id > 0);
     }
-    panic!()
+
+    #[test]
+    fn test_btf_get_func_proto() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+        let id = btf.find_func("tcp_sendmsg").unwrap();
+
+        if let BtfType::Func(f) = &btf.types()[id as usize] {
+            let fpid = f.type_id;
+            if let BtfType::FuncProto(_) = &btf.types()[fpid as usize] {
+                return;
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_void() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Void => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_int() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Int(t) = ty {
+                if t.name == "char" && t.size == 1 && t.offset == 0 && t.bits == 8 {
+                    return;
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_ptr() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Ptr(ptr) = ty {
+                if ptr.type_id != 0 {
+                    return;
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_array() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Array(arr) = ty {
+                if arr.elem_type_id != 0 && arr.indx_type_id != 0 {
+                    return;
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_struct() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Struct(s) = ty {
+                if s.name == "list_head" {
+                    let (mut have_next, mut have_prev) = (false, false);
+                    s.members.iter().for_each(|m| {
+                        if m.name == "next" {
+                            have_next = true
+                        } else if m.name == "prev" {
+                            have_prev = true
+                        }
+                    });
+                    if have_next && have_prev {
+                        return;
+                    }
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_union() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Union(_) => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_enum() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Enum(e) = ty {
+                if e.name == "" {
+                    let (mut have_true, mut have_false) = (false, false);
+                    e.enums.iter().for_each(|(enum_name, _)| {
+                        if enum_name == "true" {
+                            have_true = true
+                        } else if enum_name == "false" {
+                            have_false = true
+                        }
+                    });
+                    if have_true && have_false {
+                        return;
+                    }
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_fwd() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Fwd(_) => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_typedef() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            if let BtfType::Typedef(t) = ty {
+                if t.name == "size_t" {
+                    return;
+                }
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_volatile() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Volatile(_) => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_const() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Const(_) => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
+
+    #[test]
+    fn test_btf_type_var() {
+        let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
+
+        for (_, ty) in btf.types().iter().enumerate() {
+            match ty {
+                BtfType::Var(_) => return,
+                _ => {}
+            }
+        }
+        panic!()
+    }
 }
