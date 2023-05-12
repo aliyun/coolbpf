@@ -22,8 +22,8 @@ pub enum ExprKind {
     Binary(BinaryOp, Box<Expr>, Box<Expr>), // binary expression
     Cast(Box<Expr>, Ty),
     BuiltinCall(Builtin, Vec<Expr>), // builtin call exression: callee, arguments
-    Member(Box<Expr>, Box<Expr>),            //member access
-    Program(Vec<Ty>, Box<Expr>), // bpf program, tracing point definition and program body
+    Member(Box<Expr>, Box<Expr>),    //member access
+    Program(Vec<Ty>, Box<Expr>),     // bpf program, tracing point definition and program body
 }
 
 #[derive(Clone, Debug, PartialEq)]

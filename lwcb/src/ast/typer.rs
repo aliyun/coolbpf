@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 
 use crate::{
-    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, btf_find_struct, btf_find_struct_member},
-    types::{typeid_to_irtype, Constant, Type, TypeId, TypeKind, pt_regs_type},
-    utils::btf::btf_locate_path,
+    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr},
+    types::{pt_regs_type, Type, TypeKind},
 };
 
 use super::{ast::*, nodeid::NodeId};
 use anyhow::{bail, Result};
-use btfparse::{btf::Btf, btf_load};
 
-
+#[derive(Debug)]
 pub struct TypeBinding {
     // todo: use typeid as index
     types: Vec<Type>,
@@ -330,4 +328,46 @@ fn typer_inferring_ty(tb: &mut TypeBinding, ty: &Ty) -> usize {
 fn typer_inferring_ident(tb: &mut TypeBinding, ident: &String) -> Result<usize> {
     tb.lookup_ident(ident)
         .map_or_else(|| bail!("Failed to find {}", ident), |x| Ok(x))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn test_typer_symbol() {
+        let ast = Ast::from("kprobe:tcp_sendmsg {print(\"%llx\n\", sk);}");
+
+        let tb = TypeBinding::from(&ast);
+        // Remove the default default and u64 types
+        let types = &tb.types[2..];
+
+        let btf = btfparse::btf_load(&PathBuf::from("/sys/kernel/btf/vmlinux"));
+        let btf_types = btf.types();
+
+        match &types[0].kind {
+            TypeKind::Kprobe(Some(type_id)) => {
+                if let btfparse::btf::BtfType::Func(func) = btf_types[*type_id as usize].clone() {
+                    assert_eq!(func.name, "tcp_sendmsg");
+                } else {
+                    panic!("Failed to find kprobe");
+                }
+            }
+            _ => panic!("Failed to find kprobe"),
+        }
+
+        match &types[1].kind {
+            TypeKind::Ptr(ptr) => {
+                if let btfparse::btf::BtfType::Struct(st) = btf_types[ptr.typeid() as usize].clone()
+                {
+                    assert_eq!(st.name, "sock");
+                } else {
+                    panic!("Failed to find struct sock*");
+                }
+            }
+            _ => panic!("Failed to find ptr"),
+        }
+    }
 }
