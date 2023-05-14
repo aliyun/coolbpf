@@ -7,6 +7,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use crate::func_map::FuncMap;
+
 use super::{
     Array, Const, DataSec, DeclTag, Enum, Enum64, Float, Func, FuncProto, Fwd, Int, Ptr, Restrict,
     Struct, TypeTag, Typedef, Union, Var, Volatile,
@@ -128,6 +130,7 @@ impl BtfHeader {
 
 pub struct Btf {
     pub types: Vec<BtfType>,
+    pub funcs: Option<FuncMap>,
 }
 
 impl Btf {
@@ -175,7 +178,9 @@ impl Btf {
         }
 
         log::debug!("Btf: {} btf types", types.len());
-        Ok(Btf { types })
+        let mut btfObj = Btf{types: types, funcs: None};
+        btfObj.funcs = Some(FuncMap::from_btf(&btfObj));
+        Ok(btfObj)
     }
 
     pub fn types(&self) -> &Vec<BtfType> {
@@ -183,12 +188,8 @@ impl Btf {
     }
 
     pub fn find_func(&self, name: &str) -> Option<u32> {
-        for (id, ty) in self.types().iter().enumerate() {
-            if let BtfType::Func(f) = ty {
-                if f.name.as_str().cmp(name) == Ordering::Equal {
-                    return Some(id as u32);
-                }
-            }
+        if let Some(fp) = self.funcs.as_ref(){
+            return fp.find_func(name)
         }
         None
     }
@@ -314,6 +315,9 @@ mod tests {
         let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
         let id = btf.find_func("tcp_sendmsg").unwrap();
         assert!(id > 0);
+        if let Some(_)= btf.find_func("tcp_sendmsg_wrong_func") {
+            panic!();
+        }
     }
 
     #[test]

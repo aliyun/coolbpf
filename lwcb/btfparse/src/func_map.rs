@@ -5,13 +5,12 @@ use crate::{
     FuncProto,
 };
 
-pub struct FuncMap<'a> {
-    btf: &'a Btf,
+pub struct FuncMap {
     funcs: HashMap<String, usize>,
 }
 
-impl<'a> FuncMap<'a> {
-    pub fn from_btf(btf: &'a Btf) -> Self {
+impl FuncMap {
+    pub fn from_btf(btf: & Btf) -> Self {
         let mut funcs = HashMap::default();
         for (i, t) in btf.types().iter().enumerate() {
             match t {
@@ -27,7 +26,14 @@ impl<'a> FuncMap<'a> {
             }
         }
 
-        FuncMap { btf, funcs }
+        FuncMap { funcs }
+    }
+
+    pub fn find_func(&self, name: &str) -> Option<u32> {
+        if let Some(&id) = self.funcs.get(name) {
+            return Some(id as u32)
+        }
+        None
     }
 }
 
