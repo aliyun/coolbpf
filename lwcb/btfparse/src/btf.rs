@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -128,6 +129,7 @@ impl BtfHeader {
 
 pub struct Btf {
     pub types: Vec<BtfType>,
+    pub funcs: HashMap<String, usize>,
 }
 
 impl Btf {
@@ -137,6 +139,7 @@ impl Btf {
     {
         let mut reader = BtfReader::from_file(path)?;
         let mut types = Vec::new();
+        let mut funcs = HashMap::default();
         types.push(BtfType::Void);
         loop {
             if reader.is_empty() {
@@ -170,12 +173,25 @@ impl Btf {
                     reader
                 ),
             };
+            match &ty {
+                BtfType::Func(f) => {
+                    assert!(
+                        !funcs.contains_key(&f.name),
+                        "function name duplicated: {}",
+                        f.name
+                    );
+                    funcs.insert(f.name.clone(), types.len());
+                }
+                _ => {}
+            }
+
             // log::debug!("{:?}", ty);
             types.push(ty);
         }
 
         log::debug!("Btf: {} btf types", types.len());
-        Ok(Btf { types })
+
+        Ok(Btf { types, funcs })
     }
 
     pub fn types(&self) -> &Vec<BtfType> {
@@ -183,12 +199,8 @@ impl Btf {
     }
 
     pub fn find_func(&self, name: &str) -> Option<u32> {
-        for (id, ty) in self.types().iter().enumerate() {
-            if let BtfType::Func(f) = ty {
-                if f.name.as_str().cmp(name) == Ordering::Equal {
-                    return Some(id as u32);
-                }
-            }
+        if let Some(&id) = self.funcs.get(name) {
+            return Some(id as u32)
         }
         None
     }
@@ -314,6 +326,9 @@ mod tests {
         let btf = Btf::from_file("/sys/kernel/btf/vmlinux").unwrap();
         let id = btf.find_func("tcp_sendmsg").unwrap();
         assert!(id > 0);
+        if let Some(_)= btf.find_func("tcp_sendmsg_wrong_func") {
+            panic!();
+        }
     }
 
     #[test]
