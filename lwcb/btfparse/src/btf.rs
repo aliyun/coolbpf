@@ -2,12 +2,11 @@ use anyhow::{bail, Result};
 use byteorder::ByteOrder;
 use byteorder::{BigEndian, LittleEndian};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-
-use crate::func_map::FuncMap;
 
 use super::{
     Array, Const, DataSec, DeclTag, Enum, Enum64, Float, Func, FuncProto, Fwd, Int, Ptr, Restrict,
@@ -130,7 +129,7 @@ impl BtfHeader {
 
 pub struct Btf {
     pub types: Vec<BtfType>,
-    pub funcs: Option<FuncMap>,
+    pub funcs: HashMap<String, usize>,
 }
 
 impl Btf {
@@ -140,6 +139,7 @@ impl Btf {
     {
         let mut reader = BtfReader::from_file(path)?;
         let mut types = Vec::new();
+        let mut funcs = HashMap::default();
         types.push(BtfType::Void);
         loop {
             if reader.is_empty() {
@@ -173,14 +173,25 @@ impl Btf {
                     reader
                 ),
             };
+            match &ty {
+                BtfType::Func(f) => {
+                    assert!(
+                        !funcs.contains_key(&f.name),
+                        "function name duplicated: {}",
+                        f.name
+                    );
+                    funcs.insert(f.name.clone(), types.len());
+                }
+                _ => {}
+            }
+
             // log::debug!("{:?}", ty);
             types.push(ty);
         }
 
         log::debug!("Btf: {} btf types", types.len());
-        let mut btfObj = Btf{types: types, funcs: None};
-        btfObj.funcs = Some(FuncMap::from_btf(&btfObj));
-        Ok(btfObj)
+
+        Ok(Btf { types, funcs })
     }
 
     pub fn types(&self) -> &Vec<BtfType> {
@@ -188,8 +199,8 @@ impl Btf {
     }
 
     pub fn find_func(&self, name: &str) -> Option<u32> {
-        if let Some(fp) = self.funcs.as_ref(){
-            return fp.find_func(name)
+        if let Some(&id) = self.funcs.get(name) {
+            return Some(id as u32)
         }
         None
     }
