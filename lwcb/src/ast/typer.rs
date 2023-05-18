@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr},
+    btf::{
+        btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, get_btf,
+        GLOBAL_BTF,
+    },
     types::{pt_regs_type, Type, TypeKind},
 };
 
@@ -111,6 +114,25 @@ impl TypeBinding {
 
     pub fn lookup_gident(&self, ident: &String) -> Option<usize> {
         self.gtbl.get(ident).map(|x| *x)
+    }
+
+    pub fn get_param_type(&self, param: &str) -> Option<String> {
+        let btf = get_btf!();
+        // Remove the default default and u64 types
+        let types = &self.types[2..];
+        let params = match types[0].kind {
+            TypeKind::Kprobe(Some(type_id)) => btf_get_func_args(type_id),
+            _ => vec![],
+        };
+
+        for (param_name, type_id) in params.iter() {
+            log::debug!("param_name: {}, type_id: {}", param_name, type_id);
+            if param_name == param {
+                return btf.get_type_name(*type_id);
+            }
+        }
+
+        None
     }
 
     fn add_type(&mut self, ty: Type) -> usize {
@@ -332,8 +354,6 @@ fn typer_inferring_ident(tb: &mut TypeBinding, ident: &String) -> Result<usize> 
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     #[test]
@@ -341,33 +361,9 @@ mod tests {
         let ast = Ast::from("kprobe:tcp_sendmsg {print(\"%llx\n\", sk);}");
 
         let tb = TypeBinding::from(&ast);
-        // Remove the default default and u64 types
-        let types = &tb.types[2..];
 
-        let btf = btfparse::btf_load(&PathBuf::from("/sys/kernel/btf/vmlinux"));
-        let btf_types = btf.types();
-
-        match &types[0].kind {
-            TypeKind::Kprobe(Some(type_id)) => {
-                if let btfparse::btf::BtfType::Func(func) = btf_types[*type_id as usize].clone() {
-                    assert_eq!(func.name, "tcp_sendmsg");
-                } else {
-                    panic!("Failed to find kprobe");
-                }
-            }
-            _ => panic!("Failed to find kprobe"),
-        }
-
-        match &types[1].kind {
-            TypeKind::Ptr(ptr) => {
-                if let btfparse::btf::BtfType::Struct(st) = btf_types[ptr.typeid() as usize].clone()
-                {
-                    assert_eq!(st.name, "sock");
-                } else {
-                    panic!("Failed to find struct sock*");
-                }
-            }
-            _ => panic!("Failed to find ptr"),
-        }
+        assert_eq!(tb.get_param_type("sk").unwrap(), "struct sock *");
+        assert_eq!(tb.get_param_type("msg").unwrap(), "struct msghdr *");
+        assert_eq!(tb.get_param_type("size").unwrap(), "size_t");
     }
 }

@@ -204,6 +204,47 @@ impl Btf {
         }
         None
     }
+
+    pub fn get_type_name(&self, type_id: u32) -> Option<String> {
+        match self.types[type_id as usize] {
+            BtfType::Int(ref ty) => Some(ty.name.clone()),
+            BtfType::Ptr(ref ty) => Some(format!(
+                "{} *",
+                self.get_type_name(ty.type_id).expect("cannot parse ptr")
+            )),
+            BtfType::Array(ref ty) => Some(
+                self.get_type_name(ty.elem_type_id)
+                    .expect("cannot parse array")
+                    + " []",
+            ),
+            BtfType::Struct(ref ty) => Some(format!("struct {}", ty.name)),
+            BtfType::Union(ref ty) => Some(ty.name.clone()),
+            BtfType::Enum(ref ty) => Some(ty.name.clone()),
+            BtfType::Fwd(ref ty) => Some(ty.name.clone()),
+            BtfType::Typedef(ref ty) => Some(ty.name.clone()),
+            BtfType::Volatile(ref ty) => Some(format!(
+                "volatile {}",
+                self.get_type_name(ty.type_id)
+                    .expect("cannot parse volatile")
+            )),
+            BtfType::Const(ref ty) => Some(format!(
+                "const {}",
+                self.get_type_name(ty.type_id).expect("cannot parse const")
+            )),
+            BtfType::Restrict(ref ty) => Some(format!(
+                "{} restrict",
+                self.get_type_name(ty.type_id)
+                    .expect("cannot get name of type restrict")
+            )),
+            BtfType::Func(ref ty) => Some(ty.name.clone()),
+            BtfType::Var(ref ty) => Some(ty.name.clone()),
+            BtfType::DataSec(ref ty) => Some(ty.name.clone()),
+            BtfType::Float(ref ty) => Some(ty.name.clone()),
+            BtfType::DeclTag(ref ty) => Some(ty.name.clone()),
+            BtfType::TypeTag(ref ty) => Some(ty.name.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub struct BtfReader {

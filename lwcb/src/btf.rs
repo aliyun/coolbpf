@@ -1,12 +1,10 @@
 use anyhow::Result;
 use btfparse::btf::{Btf, BtfType};
-use btfparse::{btf_load, BtfKind, BtfMember, Func};
+use btfparse::{btf_load, BtfKind, BtfMember};
 use libfirm_rs::Mode;
 use once_cell::sync::Lazy;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Mutex;
 
 use crate::types::{Constant, Type};
 use crate::utils::btf::btf_locate_path;
@@ -122,7 +120,7 @@ impl BtfCache {
     }
 }
 
-static GLOBAL_BTF: Lazy<Btf> = Lazy::new(|| btf_load(&btf_locate_path().unwrap()));
+pub static GLOBAL_BTF: Lazy<Btf> = Lazy::new(|| btf_load(&btf_locate_path().unwrap()));
 
 pub fn btf_typeid_of_arg(btf: &Btf, func_name: &String, arg_name: &String) -> Option<u32> {
     // for ty in btf.types() {
@@ -412,7 +410,6 @@ pub fn btf_type_resolve(typeid: u32) -> u32 {
     }
 }
 
-
 pub fn btf_type_size(mut typeid: u32) -> u32 {
     loop {
         let resolve_typeid = btf_type_resolve(typeid);
@@ -438,7 +435,6 @@ pub fn btf_type_size(mut typeid: u32) -> u32 {
         }
     }
 }
-
 
 pub fn btf_type_to_type(typeid: u32) -> Type {
     match &get_btf!().types()[typeid as usize] {
@@ -482,7 +478,7 @@ pub fn btf_type_to_type(typeid: u32) -> Type {
             return Type::ptr(Type::__from_typeid(p.type_id));
         }
 
-        _ => Type::__from_typeid(typeid)
+        _ => Type::__from_typeid(typeid),
     }
 }
 

@@ -2,7 +2,6 @@ use std::fmt;
 use std::ops;
 
 use anyhow::{bail, Result};
-use btfparse::btf::Btf;
 use btfparse::BtfKind;
 use libfirm_rs::{Mode, Type as IrType};
 
