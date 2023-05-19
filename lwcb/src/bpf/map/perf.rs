@@ -10,7 +10,6 @@ use libbpf_sys::bpf_map_update_elem;
 use mio::unix::SourceFd;
 use std::ffi::CString;
 
-
 pub struct PerfMap {
     fd: i64,
     buffers: Vec<PerfBuffer>,
@@ -62,7 +61,7 @@ impl PerfMap {
         }
     }
 
-    pub fn poll(&mut self) -> Vec<Vec<u8>>{
+    pub fn poll(&mut self) -> Vec<Vec<u8>> {
         let mut ret_events = vec![];
         let mut events = mio::Events::with_capacity(self.buffers.len());
         self.poll.poll(&mut events, None).expect("failed to poll");
@@ -110,7 +109,6 @@ impl PerfMap {
 
         // ret_events
     }
-
 }
 
 impl Map for PerfMap {

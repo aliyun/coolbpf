@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
 use crate::{
-    btf::{btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, btf_find_struct, btf_find_struct_member},
-    types::{typeid_to_irtype, Constant, Type, TypeId, TypeKind, pt_regs_type},
-    utils::btf::btf_locate_path,
+    btf::{
+        btf_get_func_args, btf_get_func_returnty, btf_get_point_to, btf_type_is_ptr, get_btf,
+        GLOBAL_BTF,
+    },
+    types::{pt_regs_type, Type, TypeKind},
 };
 
 use super::{ast::*, nodeid::NodeId};
 use anyhow::{bail, Result};
-use btfparse::{btf::Btf, btf_load};
 
-
+#[derive(Debug)]
 pub struct TypeBinding {
     // todo: use typeid as index
     types: Vec<Type>,
@@ -113,6 +114,25 @@ impl TypeBinding {
 
     pub fn lookup_gident(&self, ident: &String) -> Option<usize> {
         self.gtbl.get(ident).map(|x| *x)
+    }
+
+    pub fn get_param_type(&self, param: &str) -> Option<String> {
+        let btf = get_btf!();
+        // Remove the default default and u64 types
+        let types = &self.types[2..];
+        let params = match types[0].kind {
+            TypeKind::Kprobe(Some(type_id)) => btf_get_func_args(type_id),
+            _ => vec![],
+        };
+
+        for (param_name, type_id) in params.iter() {
+            log::debug!("param_name: {}, type_id: {}", param_name, type_id);
+            if param_name == param {
+                return btf.get_type_name(*type_id);
+            }
+        }
+
+        None
     }
 
     fn add_type(&mut self, ty: Type) -> usize {
@@ -330,4 +350,20 @@ fn typer_inferring_ty(tb: &mut TypeBinding, ty: &Ty) -> usize {
 fn typer_inferring_ident(tb: &mut TypeBinding, ident: &String) -> Result<usize> {
     tb.lookup_ident(ident)
         .map_or_else(|| bail!("Failed to find {}", ident), |x| Ok(x))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_typer_symbol() {
+        let ast = Ast::from("kprobe:tcp_sendmsg {print(\"%llx\n\", sk);}");
+
+        let tb = TypeBinding::from(&ast);
+
+        assert_eq!(tb.get_param_type("sk").unwrap(), "struct sock *");
+        assert_eq!(tb.get_param_type("msg").unwrap(), "struct msghdr *");
+        assert_eq!(tb.get_param_type("size").unwrap(), "size_t");
+    }
 }
