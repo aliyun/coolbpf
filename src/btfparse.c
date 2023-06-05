@@ -191,6 +191,7 @@ struct member_attribute *btf_find_struct_member(struct btf *btf, char *struct_na
     return ma;
 
 free_ma:
+    free(ma);
     return NULL;
 }
 
