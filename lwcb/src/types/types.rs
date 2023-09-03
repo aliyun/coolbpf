@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use btfparse::BtfKind;
 use libfirm_rs::{Mode, Type as IrType};
 
@@ -272,6 +272,7 @@ pub enum TypeKind {
     Ptr(Box<Type>),
     Struct(Vec<Type>),
     Union(Vec<Type>),
+    Enum(Vec<Type>),
 
     Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>), // key type and value type
@@ -304,7 +305,7 @@ impl TypeKind {
             }
             TypeKind::Union(types) => types.iter().map(|typ| typ.size()).max().map_or(0, |s| s),
             TypeKind::UBuiltin(_, typ) => typ.size(),
-            _ => todo!(),
+            _ => 4, // _ => todo!(),
         }
     }
 }

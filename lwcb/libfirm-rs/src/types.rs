@@ -99,9 +99,7 @@ impl Type {
     }
 
     pub fn set_align(&mut self, align: u32) {
-        unsafe {
-            set_type_alignment(self.raw(), align)
-        }
+        unsafe { set_type_alignment(self.raw(), align) }
     }
 
     /// create pointer type
@@ -159,9 +157,7 @@ impl Type {
     }
 
     pub fn method_res(&self) -> Self {
-        unsafe {
-             get_method_res_type(self.raw(), 0).into()
-        }
+        unsafe { get_method_res_type(self.raw(), 0).into() }
     }
 
     pub fn params_num(&self) -> u64 {
