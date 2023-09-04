@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 pub fn btf_locate_path() -> Option<PathBuf> {
@@ -16,9 +15,6 @@ pub fn btf_locate_path() -> Option<PathBuf> {
 
     None
 }
-
-
-
 
 #[cfg(test)]
 mod tests {

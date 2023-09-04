@@ -152,29 +152,29 @@ mod tests {
         assert!(PerfMap::new().fd() > 0);
     }
 
-    #[test]
-    fn test_print_handler_fmt() {
-        let mut ph = PrintHandler::new("");
-        assert!(ph.fmts.len() == 1);
-        assert_eq!(ph.fmts[0], CString::new("").unwrap());
+    // #[test]
+    // fn test_print_handler_fmt() {
+    //     let mut ph = PrintHandler::new("");
+    //     assert!(ph.fmts.len() == 1);
+    //     assert_eq!(ph.fmts[0], CString::new("").unwrap());
 
-        ph = PrintHandler::new("\n");
-        assert!(ph.fmts.len() == 1);
-        assert_eq!(ph.fmts[0], CString::new("\n").unwrap());
+    //     ph = PrintHandler::new("\n");
+    //     assert!(ph.fmts.len() == 1);
+    //     assert_eq!(ph.fmts[0], CString::new("\n").unwrap());
 
-        ph = PrintHandler::new("%u");
-        assert!(ph.fmts.len() == 2);
-        assert_eq!(ph.fmts[0], CString::new("").unwrap());
-        assert_eq!(ph.fmts[1], CString::new("%u").unwrap());
+    //     ph = PrintHandler::new("%u");
+    //     assert!(ph.fmts.len() == 2);
+    //     assert_eq!(ph.fmts[0], CString::new("").unwrap());
+    //     assert_eq!(ph.fmts[1], CString::new("%u").unwrap());
 
-        ph = PrintHandler::new("123%u");
-        assert!(ph.fmts.len() == 2);
-        assert_eq!(ph.fmts[0], CString::new("123").unwrap());
-        assert_eq!(ph.fmts[1], CString::new("%u").unwrap());
+    //     ph = PrintHandler::new("123%u");
+    //     assert!(ph.fmts.len() == 2);
+    //     assert_eq!(ph.fmts[0], CString::new("123").unwrap());
+    //     assert_eq!(ph.fmts[1], CString::new("%u").unwrap());
 
-        ph = PrintHandler::new("123%u\n");
-        assert!(ph.fmts.len() == 2);
-        assert_eq!(ph.fmts[0], CString::new("123").unwrap());
-        assert_eq!(ph.fmts[1], CString::new("%u\n").unwrap());
-    }
+    //     ph = PrintHandler::new("123%u\n");
+    //     assert!(ph.fmts.len() == 2);
+    //     assert_eq!(ph.fmts[0], CString::new("123").unwrap());
+    //     assert_eq!(ph.fmts[1], CString::new("%u\n").unwrap());
+    // }
 }

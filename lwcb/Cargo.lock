@@ -767,6 +767,7 @@ dependencies = [
  "perf-event-open-sys",
  "qbe",
  "regalloc2",
+ "regex",
  "structopt",
  "strum_macros",
  "tempfile",
