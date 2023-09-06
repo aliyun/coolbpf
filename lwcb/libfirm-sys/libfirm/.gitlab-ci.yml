@@ -1,5 +1,0 @@
-image: firm/unittests:latest
-
-unittests:
-    script:
-        - make test -j

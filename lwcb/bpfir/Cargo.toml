@@ -1,5 +1,5 @@
 [package]
-name = "lwcb"
+name = "bpfir"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,9 +7,10 @@ edition = "2021"
 
 [dependencies]
 generational-arena = "0.2.9"
-blang = { path = "blang" }
-bpfir = { path = "bpfir" }
-
-
-[workspace]
-members = ["blang", "bpfir"]
+paste = "1.0.14"
+logos = "0.12.1"
+regalloc2 = "0.9.2"
+libbpf-sys = "1.2.1"
+libbpf-rs = "0.21.2"
+anyhow = "1.0.57"
+log = "0.4.20"
