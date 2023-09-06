@@ -4,7 +4,6 @@ use regalloc2::MachineEnv;
 use regalloc2::OperandConstraint;
 use regalloc2::PReg;
 use regalloc2::RegClass;
-use regalloc2::VReg;
 
 macro_rules! gen_reg {
     ($($num: expr), *) => {
@@ -48,6 +47,7 @@ impl BPFSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum BinaryOP {
     Add, // +
     Sub, // -
@@ -62,33 +62,34 @@ pub enum BinaryOP {
     Xor, // ^
 }
 
+#[derive(Debug, Clone)]
 pub enum BPFInst {
     // load: dst_reg = *(uint *) (src_reg + off16)
-    LoadX(VReg, VReg, u16), // src, off
+    LoadX(PReg, PReg, u16), // src, off
     // dst_reg = imm64
-    Load64(VReg, i64),
+    Load64(PReg, i64),
     // store: *(uint *) (dst_reg + off16) = src_reg
-    StoreX(VReg, VReg, u16), // dst, src, off
+    StoreX(PReg, PReg, u16), // dst, src, off
     // *(uint *) (dst_reg + off16) = imm32
-    Store(VReg, u16, i32), // dst, off, imm
+    Store(PReg, u16, i32), // dst, off, imm
     // bpf_add|sub|...: dst_reg += src_reg
-    Alu64X(BinaryOP, VReg, VReg), // BinaryOP, l, r
-    Alu32X(BinaryOP, VReg, VReg), // BinaryOP, l, r
-    Alu64(BinaryOP, VReg, VReg),  // BinaryOP, l, r
-    Alu32(BinaryOP, VReg, VReg),  // BinaryOP, l, r
-    Endian(VReg),
+    Alu64X(BinaryOP, PReg, PReg), // BinaryOP, l, r
+    Alu32X(BinaryOP, PReg, PReg), // BinaryOP, l, r
+    Alu64(BinaryOP, PReg, i32),  // BinaryOP, l, r
+    Alu32(BinaryOP, PReg, i32),  // BinaryOP, l, r
+    Endian(PReg),
     // dst_reg = src_reg
-    MovX(VReg),
-    Mov32X(VReg),
+    MovX(PReg, PReg),
+    Mov32X(PReg, PReg),
 
     // dst_reg = imm32
-    Mov(i32),
-    Mov32(i32),
+    Mov(PReg, i32),
+    Mov32(PReg, i32),
     // if (dst_reg 'BinaryOP' src_reg) goto pc + off16
-    JmpX(BinaryOP, VReg, VReg, u16),
-    Jmp(BinaryOP, VReg, i32, u16),
-    Jmp32X(BinaryOP, VReg, VReg, u16),
-    Jmp32(BinaryOP, VReg, i32, u16),
+    JmpX(BinaryOP, PReg, PReg, u16),
+    Jmp(BinaryOP, PReg, i32, u16),
+    Jmp32X(BinaryOP, PReg, PReg, u16),
+    Jmp32(BinaryOP, PReg, i32, u16),
     JmpA(u16),
     Call(i32),
     Exit,
