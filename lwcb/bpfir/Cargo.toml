@@ -14,3 +14,4 @@ libbpf-sys = "1.2.1"
 libbpf-rs = "0.21.2"
 anyhow = "1.0.57"
 log = "0.4.20"
+object = { version = "0.32.1", features = ["write"] }
