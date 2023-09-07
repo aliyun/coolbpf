@@ -1,17 +1,24 @@
 use libbpf_rs::libbpf_sys::bpf_insn;
 use libbpf_sys::{BPF_ALU, BPF_END, BPF_X};
 
-use super::spec::BPFInst;
+use super::{object::BPFObject, spec::BPFInst};
 
-pub fn codegen(insts: &Vec<BPFInst>) -> Vec<bpf_insn>{
+pub fn codegen(insts: &Vec<BPFInst>) -> Vec<bpf_insn> {
     let mut res = vec![];
     for inst in insts {
         let insn = match inst {
             BPFInst::Endian(reg) => codegen_endian(reg.hw_enc() as u8, 64),
-            _ => todo!()
+            _ => todo!(),
         };
     }
     res
+}
+
+// generate memory elf file which represents with bytes
+pub fn codegen_mem_elf(sec_name: &str, func_name: &str, insts: &Vec<BPFInst>) -> Vec<u8> {
+    let mut obj = BPFObject::new();
+    obj.add_function(sec_name, func_name, &codegen(insts));
+    obj.emit()
 }
 
 // reference: include/linux/filter.h in linux code
