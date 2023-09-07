@@ -17,8 +17,8 @@ impl Module {
         }
     }
 
-    pub fn new_func(&mut self, name: &str) -> Func {
-        Func(self.funcs.insert(FuncData::new(name)))
+    pub fn new_func_data(&mut self, fd: FuncData) -> Func {
+        Func(self.funcs.insert(fd))
     }
 
     pub fn mut_func_data(&mut self, func: Func) -> &mut FuncData {

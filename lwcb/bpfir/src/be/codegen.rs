@@ -15,10 +15,8 @@ pub fn codegen(insts: &Vec<BPFInst>) -> Vec<bpf_insn> {
 }
 
 // generate memory elf file which represents with bytes
-pub fn codegen_mem_elf(sec_name: &str, func_name: &str, insts: &Vec<BPFInst>) -> Vec<u8> {
-    let mut obj = BPFObject::new();
-    obj.add_function(sec_name, func_name, &codegen(insts));
-    obj.emit()
+pub fn codegen_object(object: &mut BPFObject, sec_name: &str, func_name: &str, insts: &Vec<BPFInst>) {
+    object.add_function(sec_name, func_name, &codegen(insts));
 }
 
 // reference: include/linux/filter.h in linux code

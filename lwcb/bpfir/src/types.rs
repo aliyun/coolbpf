@@ -41,6 +41,24 @@ pub enum TypeKind {
     Kretprobe(String),
 }
 
+impl TypeKind {
+    pub fn func_sec_name(&self) -> String {
+        match self {
+            TypeKind::Kprobe(n) => format!("kprobe/{n}"),
+            TypeKind::Kretprobe(n) => format!("kretprobe/{n}"),
+            _ => panic!("Not a function type"),
+        }
+    }
+
+    pub fn func_name(&self) -> String {
+        match self {
+            TypeKind::Kprobe(n) => format!("kprobe_{n}"),
+            TypeKind::Kretprobe(n) => format!("kretprobe_{n}"),
+            _ => panic!("Not a function type"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Type {
     pub kind: TypeKind,

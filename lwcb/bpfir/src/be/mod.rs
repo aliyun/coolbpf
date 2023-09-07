@@ -1,5 +1,5 @@
-mod codegen;
-mod isel;
-mod regalloc;
+pub mod codegen;
+pub mod isel;
+pub mod regalloc;
 mod spec;
-mod object;
+pub mod object;

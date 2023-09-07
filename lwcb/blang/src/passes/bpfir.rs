@@ -30,10 +30,8 @@ pub fn gen_bpfir(ast: &Ast) -> Result<Module> {
         } = expr
         {
             log::debug!("generate bpfir for program: {:?}", names);
-            let func = match &names.ty().kind {
-                TypeKind::Kprobe(x) | TypeKind::Kretprobe(x) => module.new_func(x),
-                _ => panic!("{:#?}", 1),
-            };
+            let fd = FuncData::new(names.ty.clone());
+            let func = module.new_func_data(fd);
             gen_stmt(module.mut_func_data(func), body)?;
             // seal others block
             return Ok(module);
