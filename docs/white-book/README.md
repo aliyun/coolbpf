@@ -24,3 +24,12 @@ OpenAnolis 是一个开放包容的社区，因此我们也欢迎志同道合之
 对于文档中您认为不足之处，欢迎新开issue，我们会第一时间进行响应。
 
 另外，若您想更新文档，也同样欢迎提 PR。
+
+
+
+
+### 编译流程
+
+1. 从这里下载mdbook程序：https://github.com/rust-lang/mdBook/releases
+2. 运行`mdbook build`，会生成book目录，里面就是书本的html格式
+3. 也可以运行`mdbook serve`，会创建一个http server，可以在浏览器预览书籍内容
