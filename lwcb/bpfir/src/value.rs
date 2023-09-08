@@ -20,6 +20,7 @@ pub enum ValueKind {
     Assign(Value),
     Exit,
     Jump(BBlock),
+    Argument,
 }
 
 impl ValueKind {
@@ -28,6 +29,18 @@ impl ValueKind {
             Self::Branch(v, _, _) | Self::Load(v) | Self::Member(v, _) | Self::Store(_, v) => vec![*v],
             _ => vec![],
         }
+    }
+
+    pub fn is_argument(&self) -> bool {
+        if let ValueKind::Argument = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn replace_use(&self, old: Value, new: Value) {
+        todo!()
     }
 }
 

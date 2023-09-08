@@ -18,6 +18,8 @@ pub struct BBlockData {
 
     pub defs: HashMap<String, Value>,
     used_by: HashSet<Value>,
+
+    pub args: HashSet<Value>,
 }
 
 impl BBlockData {
@@ -31,10 +33,12 @@ impl BBlockData {
             params: Default::default(),
             defs: Default::default(),
             used_by: Default::default(),
+            args: Default::default(),
         }
     }
 
     pub fn push_inst(&mut self, inst: Value) {
         self.insts.push(inst);
     }
+
 }
