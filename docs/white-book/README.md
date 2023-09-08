@@ -30,6 +30,6 @@ OpenAnolis 是一个开放包容的社区，因此我们也欢迎志同道合之
 
 ### 编译流程
 
-1. 从这里下载mdbook程序：https://github.com/rust-lang/mdBook/releases
+1. 从这里下载mdbook程序：https://github.com/rust-lang/mdBook/releases 。 linux选择 `mdbook-v0.4.34-x86_64-unknown-linux-gnu.tar.gz` 这个版本，windows选择 `mdbook-v0.4.34-x86_64-pc-windows-msvc.zip` 这个版本。
 2. 运行`cd docs/white-book/ && mdbook build`，会生成book目录，里面就是书本的html格式
 3. 也可以运行`mdbook serve`，会创建一个http server，可以在浏览器预览书籍内容
