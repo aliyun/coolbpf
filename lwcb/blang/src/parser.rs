@@ -2,16 +2,14 @@ use crate::call::Call;
 use crate::constant::Constant;
 use crate::lexer::{Token, Tokens};
 use anyhow::{bail, Result};
+use bpfir::types::BinaryOp;
+use bpfir::types::UnaryOp;
 use bpfir::{Type, TypeKind};
 use generational_arena::Arena;
 use logos::Span;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use bpfir::types::BinaryOp;
-use bpfir::types::UnaryOp;
 
 static GLOBAL_NODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
@@ -713,5 +711,31 @@ impl From<&str> for Ast {
     fn from(source: &str) -> Self {
         let mut tokens = Tokens::from(source);
         Ast::from(&mut tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic_statement() {
+        let _ = Ast::from("kprobe:tcp_sendmsg {  }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { a = 0; }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { a = 0; if (a == 0) { a = 2; } }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { a = 0; if (a == 0) { a = 2; } else { a = 3; } }");
+    }
+
+    #[test]
+    fn map_operation() {
+        let _ = Ast::from("kprobe:tcp_sendmsg { a[2] = 0; }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { print(a[2]); }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { print(a[2 + 3]); }");
+    }
+
+    #[test]
+    fn member_access() {
+        let _ = Ast::from("kprobe:tcp_sendmsg { a = skb.head; }");
+        let _ = Ast::from("kprobe:tcp_sendmsg { a = skb->head; }");
     }
 }
