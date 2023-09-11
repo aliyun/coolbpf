@@ -4,3 +4,7 @@ language = "en"
 multilingual = false
 src = "src"
 title = "eBPF技术实践白皮书"
+
+[output.html]
+
+[output.pdf]
