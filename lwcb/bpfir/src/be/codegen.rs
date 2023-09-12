@@ -1,13 +1,16 @@
 use libbpf_rs::libbpf_sys::bpf_insn;
-use libbpf_sys::{BPF_ALU, BPF_END, BPF_X};
+use libbpf_sys::BPF_ALU;
+use libbpf_sys::BPF_END;
+use libbpf_sys::BPF_X;
 
-use super::{object::BPFObject, spec::BPFInst};
+use super::object::BPFObject;
+use super::spec::BPFInst;
 
 pub fn codegen(insts: &Vec<BPFInst>) -> Vec<bpf_insn> {
     let mut res = vec![];
     for inst in insts {
         let insn = match inst {
-            BPFInst::Endian(reg) => codegen_endian(reg.hw_enc() as u8, 64),
+            // BPFInst::Endian(reg) => codegen_endian(reg.hw_enc() as u8, 64),
             _ => todo!(),
         };
     }
@@ -15,7 +18,12 @@ pub fn codegen(insts: &Vec<BPFInst>) -> Vec<bpf_insn> {
 }
 
 // generate memory elf file which represents with bytes
-pub fn codegen_object(object: &mut BPFObject, sec_name: &str, func_name: &str, insts: &Vec<BPFInst>) {
+pub fn codegen_object(
+    object: &mut BPFObject,
+    sec_name: &str,
+    func_name: &str,
+    insts: &Vec<BPFInst>,
+) {
     object.add_function(sec_name, func_name, &codegen(insts));
 }
 

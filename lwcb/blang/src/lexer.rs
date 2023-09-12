@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
-
 use crate::constant::Constant;
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use logos::Logos;
+use std::collections::VecDeque;
 
 #[derive(Logos, Debug, Clone, PartialEq)]
 pub enum Token {

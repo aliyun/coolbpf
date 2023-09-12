@@ -1,67 +1,101 @@
+use super::isel::ISelBlock;
+use super::isel::ISelFunction;
+use super::spec::BPFSpec;
 use crate::be::spec::BPFInst;
-use core::fmt;
+use regalloc2::Allocation;
+use regalloc2::Block;
+use regalloc2::Edit;
+use regalloc2::Function;
+use regalloc2::Inst;
+use regalloc2::InstOrEdit;
+use regalloc2::InstRange;
+use regalloc2::Operand;
+use regalloc2::Output;
+use regalloc2::PReg;
+use regalloc2::PRegSet;
+use regalloc2::RegClass;
+use regalloc2::VReg;
+use std::fmt;
 
-use regalloc2::{
-    Allocation, AllocationKind, Block, Edit, Function, Inst, InstOrEdit, InstRange, MachineEnv,
-    Operand, Output, PRegSet, RegClass, VReg,
-};
-
-use super::{
-    isel::ISelFunction,
-    spec::{BPFSpec, BinaryOP},
-};
-use anyhow::{bail, Result};
-
-#[derive(Debug, Clone)]
-pub enum VBPFInst {
-    // load: dst_reg = *(uint *) (src_reg + off16)
-    LoadX(VReg, VReg, u16), // src, off
-    // dst_reg = imm64
-    Load64(VReg, i64),
-    // store: *(uint *) (dst_reg + off16) = src_reg
-    StoreX(VReg, VReg, u16), // dst, src, off
-    // *(uint *) (dst_reg + off16) = imm32
-    Store(VReg, u16, i32), // dst, off, imm
-    // bpf_add|sub|...: dst_reg += src_reg
-    Alu64X(BinaryOP, VReg, VReg), // BinaryOP, l, r
-    Alu32X(BinaryOP, VReg, VReg), // BinaryOP, l, r
-    Alu64(BinaryOP, VReg, i32),   // BinaryOP, l, r
-    Alu32(BinaryOP, VReg, i32),   // BinaryOP, l, r
-    Endian(VReg),
-    // dst_reg = src_reg
-    MovX(VReg, VReg),
-    Mov32X(VReg, VReg),
-
-    // dst_reg = imm32
-    Mov(VReg, i32),
-    Mov32(VReg, i32),
-    // if (dst_reg 'BinaryOP' src_reg) goto pc + off16
-    JmpX(BinaryOP, VReg, VReg, u16),
-    Jmp(BinaryOP, VReg, i32, u16),
-    Jmp32X(BinaryOP, VReg, VReg, u16),
-    Jmp32(BinaryOP, VReg, i32, u16),
-    JmpA(u16),
-    Call(i32),
-    Exit,
+#[derive(Default)]
+pub struct RAFunction {
+    insts: Vec<BPFInst>,
 }
 
-pub struct RAFunction {
-    entry_block: Block,
-    insts: Vec<VBPFInst>,
+impl fmt::Display for RAFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for inst in &self.insts {
+            writeln!(f, "{inst}")?;
+        }
+        Ok(())
+    }
+}
+
+impl RAFunction {
+    pub fn insts(&self) -> &Vec<BPFInst> {
+        &self.insts
+    }
+
+    fn add_inst(&mut self, inst: BPFInst) -> usize {
+        self.insts.push(inst);
+        self.insts.len()
+    }
+}
+
+#[derive(Default)]
+pub struct RAFunctionBuilder {
+    insts: Vec<BPFInst>,
+    operands: Vec<Vec<Operand>>,
     blocks: Vec<InstRange>,
     block_preds: Vec<Vec<Block>>,
     block_succs: Vec<Vec<Block>>,
     block_params_in: Vec<Vec<VReg>>,
     block_params_out: Vec<Vec<Vec<VReg>>>,
-    num_vregs: usize,
-    reftype_vregs: Vec<VReg>,
-    debug_value_labels: Vec<(VReg, Inst, Inst, u32)>,
-    spillslot_size: Vec<usize>,
-    multi_spillslot_named_by_last_slot: bool,
-    allow_multiple_vreg_defs: bool,
+
+    rf: RAFunction,
 }
 
-impl Function for RAFunction {
+impl RAFunctionBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn build(mut self, isel: ISelFunction) -> RAFunction {
+        let mut rf = RAFunction::default();
+        for ib in isel.blocks {
+            self.build_block(ib)
+        }
+        // regalloc2 would check if entry block has block args.
+        self.block_params_in[0] = vec![];
+        rf.insts = do_regalloc(&self);
+        rf
+    }
+
+    fn build_block(&mut self, block: ISelBlock) {
+        let start = self.insts.len();
+        self.insts.extend(block.insts);
+        let end = self.insts.len();
+        log::debug!(
+            "Block instruction range: {} -> {}, params_in: {}, params_out: {}",
+            start,
+            end,
+            block.params.len(),
+            block.params_out.len()
+        );
+        self.operands.extend(block.operands);
+        self.block_preds
+            .push(block.preds.iter().map(|x| Block(*x as u32)).collect());
+        self.block_succs
+            .push(block.succs.iter().map(|x| Block(*x as u32)).collect());
+
+        self.block_params_in.push(block.params);
+        self.block_params_out.push(block.params_out);
+        self.blocks
+            .push(InstRange::forward(Inst(start as u32), Inst(end as u32)));
+    }
+}
+
+impl Function for RAFunctionBuilder {
     fn num_insts(&self) -> usize {
         self.insts.len()
     }
@@ -71,7 +105,7 @@ impl Function for RAFunction {
     }
 
     fn entry_block(&self) -> Block {
-        self.entry_block
+        Block(0)
     }
 
     fn block_insns(&self, block: Block) -> InstRange {
@@ -91,13 +125,22 @@ impl Function for RAFunction {
     }
 
     fn is_ret(&self, insn: Inst) -> bool {
-        todo!()
-        // self.insts[insn.index()].kind.is_ret()
+        if let BPFInst::Exit = self.insts[insn.index()] {
+            true
+        } else {
+            false
+        }
     }
 
     fn is_branch(&self, insn: Inst) -> bool {
-        todo!()
-        // self.insts[insn.index()].kind.is_branch()
+        match &self.insts[insn.index()] {
+            BPFInst::Jmp(_, _, _, _)
+            | BPFInst::Jmp32(_, _, _, _)
+            | BPFInst::Jmp32X(_, _, _, _)
+            | BPFInst::JmpA(_)
+            | BPFInst::JmpX(..) => true,
+            _ => false,
+        }
     }
 
     fn branch_blockparams(&self, block: Block, _: Inst, succ: usize) -> &[VReg] {
@@ -105,8 +148,7 @@ impl Function for RAFunction {
     }
 
     fn inst_operands(&self, insn: Inst) -> &[Operand] {
-        todo!()
-        // &self.insts[insn.index()].operands[..]
+        &self.operands[insn.index()]
     }
 
     fn inst_clobbers(&self, insn: Inst) -> PRegSet {
@@ -114,81 +156,63 @@ impl Function for RAFunction {
     }
 
     fn num_vregs(&self) -> usize {
-        self.num_vregs
+        20
     }
 
     fn reftype_vregs(&self) -> &[VReg] {
-        &self.reftype_vregs[..]
+        &[]
     }
 
     fn debug_value_labels(&self) -> &[(VReg, Inst, Inst, u32)] {
-        &self.debug_value_labels[..]
+        &[]
     }
 
     fn spillslot_size(&self, regclass: RegClass) -> usize {
-        self.spillslot_size[regclass as usize]
+        8
     }
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {
-        self.multi_spillslot_named_by_last_slot
+        false
     }
 
     fn allow_multiple_vreg_defs(&self) -> bool {
-        self.allow_multiple_vreg_defs
+        false
     }
 }
 
-impl RAFunction {
-    pub fn from_isel_function(isel: &ISelFunction) -> Self {
-        todo!()
-    }
-
-    pub fn do_regalloc(&mut self) -> Result<()> {
-        let env = BPFSpec::env();
-        let opts = regalloc2::RegallocOptions {
-            verbose_log: false,
-            validate_ssa: true,
-        };
-        let mut output =
-            regalloc2::run(self, &env, &opts).expect("failed to run register allocation");
-
-        Ok(())
-    }
-}
-
-pub fn do_regalloc(f: &mut RAFunction) -> Output {
+fn do_regalloc(f: &RAFunctionBuilder) -> Vec<BPFInst> {
     let env = BPFSpec::env();
     let opts = regalloc2::RegallocOptions {
-        verbose_log: false,
+        verbose_log: true,
         validate_ssa: true,
     };
-    regalloc2::run(f, &env, &opts).expect("failed to run register allocation")
+    let output = regalloc2::run(f, &env, &opts).expect("failed to run register allocation");
+
+    regalloc_emit(f, &output)
 }
 
-pub fn regalloc_emit(f: &RAFunction, output: &Output) -> Vec<BPFInst> {
+fn regalloc_emit(f: &RAFunctionBuilder, output: &Output) -> Vec<BPFInst> {
     let mut blocks = vec![];
     let mut total_insts = vec![];
     // todo: emit prologue, that is, the stack space is cleared to 0.
     for (idx, _) in f.blocks.iter().enumerate() {
-        let insts = regalloc_emit_block(f, output, idx as u32);
-        let start = total_insts.len();
-        let end = start + insts.len();
+        let insts = regalloc_emit_block(f, &output, idx as u32);
+        let start = total_insts.len() as u16;
+        let end = start + insts.len() as u16;
         blocks.push((start, end));
         total_insts.extend_from_slice(&insts);
     }
 
     // fix jmp
-    let _ =total_insts.iter().map( |inst| {
-        match inst {
-            // todo: convert block id to instruction offset
-            _ => todo!()
-        }
+    let _ = total_insts.iter_mut().map(|inst| match inst {
+        BPFInst::JmpA(x) => *x = blocks[*x as usize].0,
+        _ => todo!(),
     });
 
     total_insts
 }
 
-fn regalloc_emit_block(f: &RAFunction, output: &Output, block: u32) -> Vec<BPFInst> {
+fn regalloc_emit_block(f: &RAFunctionBuilder, output: &Output, block: u32) -> Vec<BPFInst> {
     let mut res = vec![];
     for inst_or_edit in output.block_insts_and_edits(f, Block(block)) {
         match inst_or_edit {
@@ -203,17 +227,27 @@ fn regalloc_emit_block(f: &RAFunction, output: &Output, block: u32) -> Vec<BPFIn
                 match (from.as_reg(), to.as_reg()) {
                     (Some(from), Some(to)) => {
                         // todo: It should be judged according to the type whether to use MovX or Mov32X
-                        res.push(BPFInst::MovX(to, from));
+                        res.push(BPFInst::MovX(p2v(to), p2v(from)));
                     }
                     (Some(from), None) => {
                         // Spill from register to spillslot.
                         let to = to.as_stack().unwrap();
-                        res.push(BPFInst::StoreX(BPFSpec::R10(), from, to.index() as u16));
+                        res.push(BPFInst::StoreX(
+                            64,
+                            p2v(BPFSpec::R10()),
+                            p2v(from),
+                            to.index() as u16,
+                        ));
                     }
                     (None, Some(to)) => {
                         // Load from spillslot to register.
                         let from = from.as_stack().unwrap();
-                        res.push(BPFInst::LoadX(to, BPFSpec::R10(), from.index() as u16));
+                        res.push(BPFInst::LoadX(
+                            64,
+                            p2v(to),
+                            p2v(BPFSpec::R10()),
+                            from.index() as u16,
+                        ));
                     }
                     (None, None) => {
                         panic!("regalloc2 should have eliminated stack-to-stack moves!");
@@ -225,14 +259,36 @@ fn regalloc_emit_block(f: &RAFunction, output: &Output, block: u32) -> Vec<BPFIn
     res
 }
 
-fn regalloc_emit_inst(vinst: &VBPFInst, allocs: &[Allocation]) -> BPFInst {
-    match vinst {
-        VBPFInst::Alu32(op, _, imm) => {
-            assert!(allocs.len() == 1);
-            assert!(allocs[0].is_reg());
-            return BPFInst::Alu32(*op, allocs[0].as_reg().unwrap(), *imm);
-        }
-        // todo: implement other VBPFInst
-        _ => todo!(),
+fn regalloc_emit_inst(inst: &BPFInst, allocs: &[Allocation]) -> BPFInst {
+    // get the allocated preg and then convert it to vreg
+    let vreg = |idx: usize| p2v(allocs[idx].as_reg().unwrap());
+
+    match inst {
+        BPFInst::LoadX(sz, v1, v2, off) => todo!(),
+        BPFInst::Load64(v, imm) => todo!(),
+        BPFInst::StoreX(sz, v1, v2, off) => todo!(),
+        BPFInst::Store(sz, v, off, imm) => todo!(),
+        BPFInst::Alu64X(op, v1, v2) => todo!(),
+        BPFInst::Alu32X(op, v1, v2) => todo!(),
+        BPFInst::Alu64(op, v1, imm) => todo!(),
+        BPFInst::Alu32(op, v1, imm) => todo!(),
+        BPFInst::Endian(sz, v) => todo!(),
+        BPFInst::MovX(v1, v2) => todo!(),
+        BPFInst::Mov32X(v1, v2) => todo!(),
+        BPFInst::Mov(v1, imm) => BPFInst::Mov(vreg(0), *imm),
+        BPFInst::Mov32(v1, imm) => todo!(),
+        BPFInst::JmpX(rel, v1, v2, off) => todo!(),
+        BPFInst::Jmp(rel, v1, imm, off) => todo!(),
+        BPFInst::Jmp32X(rel, v1, v2, off) => todo!(),
+        BPFInst::Jmp32(rel, v1, imm, off) => todo!(),
+        BPFInst::JmpA(off) => inst.clone(),
+        BPFInst::Call(id) => todo!(),
+        BPFInst::Exit => inst.clone(),
     }
+}
+
+#[inline]
+fn p2v(p: PReg) -> VReg {
+    let no = p.hw_enc();
+    VReg::new(no, RegClass::Int)
 }

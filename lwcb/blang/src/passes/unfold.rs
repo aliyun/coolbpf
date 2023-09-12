@@ -1,9 +1,11 @@
-use crate::{
-    btf::BTF,
-    lexer::Tokens,
-    parser::{statement, Ast, Expr, ExprKind},
-};
-use anyhow::{bail, Result};
+use crate::btf::BTF;
+use crate::lexer::Tokens;
+use crate::parser::statement;
+use crate::parser::Ast;
+use crate::parser::Expr;
+use crate::parser::ExprKind;
+use anyhow::bail;
+use anyhow::Result;
 use bpfir::types::TypeKind;
 
 fn parse_stmts(stmts: &Vec<String>) -> Result<Vec<Expr>> {

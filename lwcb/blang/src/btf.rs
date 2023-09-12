@@ -1,7 +1,12 @@
-use libbpf_rs::btf::{types::*, BtfKind, BtfType};
+use bpfir::Type;
+use libbpf_rs::btf::types::*;
+use libbpf_rs::btf::BtfKind;
+use libbpf_rs::btf::BtfType;
+use libbpf_rs::btf::TypeId;
 use libbpf_rs::Btf;
 use std::cmp::Ordering;
-use std::{ops::Deref, path::Path};
+use std::ops::Deref;
+use std::path::Path;
 
 pub struct BTF<'a> {
     btf: Btf<'a>,
@@ -14,20 +19,25 @@ impl<'a> BTF<'a> {
         }
     }
 
-    pub fn find_member(&self, id: u32, name: &String) -> Option<u32> {
-        self.type_by_id::<Struct>(id.into()).map(|x| {
-            for mem in x.iter() {
-                mem.name.map(|x| {
-                    x.to_str().ok().map(|x| {
-                        if x.cmp(&name) == Ordering::Equal {
+    pub fn find_by_name(&self, name: &str) -> Option<u32> {
+        if let Some(bt) = self.type_by_name::<BtfType>(name) {
+            return Some(bt.type_id().into());
+        }
+        None
+    }
+
+    pub fn find_member(&self, id: u32, name: &str) -> Option<u32> {
+        if let Some(st) = self.type_by_id::<Struct>(id.into()) {
+            for mem in st.iter() {
+                if let Some(x) = mem.name {
+                    if let Some(y) = x.to_str().ok() {
+                        if y.cmp(name) == Ordering::Equal {
                             return Some::<u32>(mem.ty.into());
-                        } else {
-                            return None;
                         }
-                    })
-                });
+                    }
+                }
             }
-        });
+        }
         return None;
     }
 
@@ -97,6 +107,41 @@ impl<'a> BTF<'a> {
             }
         }
     }
+
+    pub fn to_type(&self, id: u32) -> Type {
+        let bt = self.btf.type_by_id::<BtfType>(TypeId::from(id)).unwrap();
+        match bt.kind() {
+            BtfKind::Struct => Type::struct_(to_string(&bt)),
+            BtfKind::Int => {
+                let i = Int::try_from(bt).unwrap();
+                let bits = i.bits;
+                match i.encoding {
+                    IntEncoding::Bool => Type::bool(),
+                    IntEncoding::Char => Type::char(),
+                    IntEncoding::Signed => match bits {
+                        8 => Type::i8(),
+                        16 => Type::i16(),
+                        32 => Type::i32(),
+                        64 => Type::i64(),
+                        _ => unimplemented!(),
+                    },
+                    IntEncoding::None => match bits {
+                        8 => Type::u8(),
+                        16 => Type::u16(),
+                        32 => Type::u32(),
+                        64 => Type::u64(),
+                        _ => unimplemented!(),
+                    },
+                }
+            }
+            _ => todo!("{:?}", bt.kind()),
+        }
+    }
+}
+
+#[inline]
+fn to_string(bt: &BtfType) -> String {
+    bt.name().unwrap().to_str().unwrap().to_owned()
 }
 
 impl<'a> Deref for BTF<'a> {
@@ -129,5 +174,19 @@ mod tests {
         assert_ne!(args.len(), 0);
 
         assert_eq!(btf.type_string(args[0].1), "struct sock*");
+    }
+
+    #[test]
+    fn find_by_name() {
+        let btf = BTF::from_path("/root/easybpf/vmlinux-4.19.91-010.ali4000.alios7.x86_64");
+        let args = btf.find_by_name("sock");
+        assert!(args.is_some());
+    }
+
+    #[test]
+    fn find_member() {
+        let btf = BTF::from_path("/root/easybpf/vmlinux-4.19.91-010.ali4000.alios7.x86_64");
+        let id = btf.find_by_name("sock");
+        assert!(btf.find_member(id.unwrap(), "__sk_common").is_some());
     }
 }

@@ -1,28 +1,27 @@
-use crate::{
-    constant::Constant,
-    parser::{Ast, Expr, ExprKind},
-};
+use crate::constant::Constant;
+use crate::parser::Ast;
+use crate::parser::Expr;
+use crate::parser::ExprKind;
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use bpfir::types::BinaryOp;
 use bpfir::types::UnaryOp;
 use generational_arena::Arena;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{
-    collections::{HashMap, HashSet},
-    default,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::default;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
-use bpfir::FuncData;
-use bpfir::Module;
-use bpfir::Value;
-use bpfir::ValueData;
-use bpfir::ValueKind;
-use bpfir::{tmp_unique_name, unique_name};
-use bpfir::{Type, TypeKind};
+use bpfir::mir::*;
+use bpfir::tmp_unique_name;
+use bpfir::unique_name;
+use bpfir::Type;
+use bpfir::TypeKind;
 
 pub fn gen_bpfir(ast: &Ast) -> Result<Module> {
-    let mut module = Module::new("blang");
+    let mut module = Module::new();
     for expr in &ast.exprs {
         if let Expr {
             kind: ExprKind::Trace(names, body),
@@ -30,18 +29,23 @@ pub fn gen_bpfir(ast: &Ast) -> Result<Module> {
         } = expr
         {
             log::debug!("generate bpfir for program: {:?}", names);
-            let fd = FuncData::new(names.ty.clone());
-            let func = module.new_func_data(fd);
-            gen_stmt(module.mut_func_data(func), body)?;
-            // seal others block
+            let mut fd = FunctionData::new(names.ty.clone());
+
+            let vd = VariableData::new(
+                Type::ptr(Type::struct_("pt_regs".to_owned())),
+                Some("ctx".to_owned()),
+            );
+            let var = fd.new_variable(vd);
+            fd.add_param(var);
+            let func = module.new_function(fd);
+            gen_stmt(module.mut_function_data(func), body)?;
             return Ok(module);
         }
     }
     todo!()
 }
 
-fn gen_stmt(fd: &mut FuncData, e: &Expr) -> Result<()> {
-    let curr_block = fd.curr_block;
+fn gen_stmt(fd: &mut FunctionData, e: &Expr) -> Result<()> {
     match &e.kind {
         ExprKind::ExprStmt(expr) => {
             gen_expr(fd, expr);
@@ -65,69 +69,64 @@ fn gen_stmt(fd: &mut FuncData, e: &Expr) -> Result<()> {
     Ok(())
 }
 
-fn gen_if_stmt(fd: &mut FuncData, c: &Expr, t: &Expr, e: &Option<Expr>) {
+fn gen_if_stmt(fd: &mut FunctionData, c: &Expr, t: &Expr, e: &Option<Expr>) {
     todo!();
 
-    let then_block = fd.cfg.new_bblock(unique_name("IF_THEN").as_str());
+    // let then_block = fd.cfg.new_bblock(unique_name("IF_THEN").as_str());
 
-    fd.set_curr_block(then_block);
+    // fd.set_curr_block(then_block);
 
-    gen_stmt(fd, t);
+    // gen_stmt(fd, t);
 
-    let then_exit = fd.curr_block;
+    // let then_exit = fd.curr_block;
 
     if let Some(x) = e {}
 }
 
-fn gen_expr_cf(fd: &mut FuncData, c: &Expr) {}
+fn gen_expr_cf(fd: &mut FunctionData, c: &Expr) {}
 
-fn gen_expr(fd: &mut FuncData, expr: &Expr) {
+fn gen_expr(fd: &mut FunctionData, expr: &Expr) {
     gen_expr_val(fd, expr).expect("failed to generate ir for expression");
 }
 
-fn gen_expr_val(fd: &mut FuncData, expr: &Expr) -> Result<Value> {
-    let curr_block = fd.curr_block;
+fn gen_expr_val(fd: &mut FunctionData, expr: &Expr) -> Result<Variable> {
+    let current_block = fd.current_block();
     match &expr.kind {
         ExprKind::Unary(op, e) => match op {
             UnaryOp::Deref => {
                 let addr = gen_expr_val(fd, e)?;
                 if let TypeKind::Ptr(x) = &expr.ty.kind {
-                    let vd = ValueData::new(
-                        tmp_unique_name().as_str(),
-                        ValueKind::Load(addr),
-                        expr.ty.clone(),
-                        curr_block,
-                    );
-                    return Ok(fd.cfg.new_value(curr_block, vd));
+                    let vd = VariableData::new(expr.ty.clone(), None);
+                    let dst = fd.new_variable(vd);
+                    fd.mut_block_data(current_block)
+                        .add_instruction(Instruction::Load(dst, addr));
+                    return Ok(dst);
                 }
                 return Ok(addr);
             }
             _ => todo!(),
         },
         ExprKind::Ident(i) => {
-            return Ok(fd.cfg.read_variable(curr_block, i));
+            return Ok(fd.read_variable(i));
         }
         ExprKind::Constant(c) => {
-            let vd = ValueData::new(
-                tmp_unique_name().as_str(),
-                ValueKind::Constant(c.clone()),
-                expr.ty.clone(),
-                curr_block,
-            );
-            return Ok(fd.cfg.new_value(curr_block, vd));
+            let vd = VariableData::new(expr.ty.clone(), None);
+            let var = fd.new_variable(vd);
+            Instruction::AssignImm(var, *c);
+            return Ok(var);
         }
         ExprKind::Binary(op, l, r) => match op {
             BinaryOp::Assign => {
-                let val = gen_expr_val(fd, r)?;
+                let rvar = gen_expr_val(fd, r)?;
                 if let Expr {
                     kind: ExprKind::Ident(i),
                     ..
                 } = l.as_ref()
                 {
-                    let vd = ValueData::new(i, ValueKind::Assign(val), l.ty.clone(), curr_block);
-                    let res = fd.cfg.new_value(curr_block, vd);
-                    fd.cfg.write_variable(curr_block, i, res);
-                    return Ok(res);
+                    let vd = VariableData::new(l.ty.clone(), Some(i.clone()));
+                    let lvar = fd.new_variable(vd);
+                    Instruction::Assign(lvar, rvar);
+                    return Ok(rvar);
                 }
                 todo!()
             }
@@ -139,20 +138,21 @@ fn gen_expr_val(fd: &mut FuncData, expr: &Expr) -> Result<Value> {
         }
         ExprKind::Member(p, s) => {
             let mut addr = gen_expr_addr(fd, expr)?;
-            let vd = ValueData::new(
-                tmp_unique_name().as_str(),
-                ValueKind::Load(addr),
-                expr.ty.clone(),
-                curr_block,
-            );
-            return Ok(fd.cfg.new_value(curr_block, vd));
+            if let TypeKind::Ptr(x) = &expr.ty.kind {
+                let vd = VariableData::new(expr.ty.clone(), None);
+                let dst = fd.new_variable(vd);
+                fd.mut_block_data(current_block)
+                    .add_instruction(Instruction::Load(dst, addr));
+                return Ok(dst);
+            }
+            return Ok(addr);
         }
         _ => todo!(),
     }
 }
 
-fn gen_expr_addr(fd: &mut FuncData, expr: &Expr) -> Result<Value> {
-    let curr_block = fd.curr_block;
+fn gen_expr_addr(fd: &mut FunctionData, expr: &Expr) -> Result<Variable> {
+    let current_block = fd.current_block();
     match &expr.kind {
         ExprKind::Unary(op, e) => match op {
             UnaryOp::Deref => {
@@ -167,19 +167,17 @@ fn gen_expr_addr(fd: &mut FuncData, expr: &Expr) -> Result<Value> {
                 ..
             } = s.as_ref()
             {
-                let vd = ValueData::new(
-                    tmp_unique_name().as_str(),
-                    ValueKind::Member(addr, i.clone()),
-                    expr.ty.clone(),
-                    curr_block,
-                );
-                return Ok(fd.cfg.new_value(curr_block, vd));
+                let vd = VariableData::new(expr.ty.clone(), None);
+                let var = fd.new_variable(vd);
+                let inst = Instruction::Member(var, addr, i.clone());
+                fd.mut_block_data(current_block).add_instruction(inst);
+                return Ok(var);
             }
             bail!("cant not parse")
         }
 
         ExprKind::Ident(i) => {
-            return Ok(fd.cfg.read_variable(curr_block, i));
+            return Ok(fd.read_variable(i));
         }
 
         _ => todo!(),

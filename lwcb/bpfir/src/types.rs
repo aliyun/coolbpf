@@ -1,7 +1,9 @@
-use std::fmt::Display;
-
 use logos::Span;
+use parse_display::Display;
+use parse_display::FromStr;
 use paste::paste;
+use std::fmt;
+
 macro_rules! impl_specified_type {
     ($($func: ident, $ty: ident), *) => {
         paste! {
@@ -63,6 +65,7 @@ impl TypeKind {
 pub struct Type {
     pub kind: TypeKind,
     pub span: Span,
+    pub typeid: u32,
 }
 
 impl Type {
@@ -70,6 +73,7 @@ impl Type {
         Type {
             kind,
             span: Span::default(),
+            typeid: 0,
         }
     }
 
@@ -137,30 +141,73 @@ pub enum UnaryOp {
     Neg,   // -
 }
 
-#[derive(Clone, Debug, PartialEq)]
+macro_rules! match_expand {
+    ($($ty: expr, $char: expr) *) => {
+        $(
+            Self::$ty => $char,
+        )*
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Display, FromStr)]
 pub enum BinaryOp {
-    /// `lhs[rhs]`
+    #[display("[]")]
     Index,
-    /// ||
+    #[display("||")]
     Or,
-    ///
+    #[display("^|")]
     Xor,
+    #[display("&&")]
     And,
-    BitOr,
-    BitXor,
-    BitAnd,
+    #[display("=")]
     Equal,
+    #[display("!=")]
     NonEqual,
+    #[display("=")]
     LT,
+    #[display("=")]
     GT,
+    #[display("=")]
     LTE,
+    #[display("=")]
     GTE,
+    #[display("=")]
     LShift,
+    #[display("=")]
     RShift,
+    #[display("+")]
     Add,
+    #[display("=")]
     Sub,
+    #[display("=")]
     Mult,
+    #[display("=")]
     Div,
+    #[display("=")]
     Mod,
+    #[display("=")]
     Assign,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Relation {
+    NotEqual,
+    Equal,
+    Less,
+    LessEqual,
+    Greater,
+    GreateEqual,
+}
+
+impl fmt::Display for Relation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Relation::NotEqual => write!(f, "!="),
+            Relation::Equal => write!(f, "=="),
+            Relation::Less => write!(f, "<"),
+            Relation::LessEqual => write!(f, "<="),
+            Relation::Greater => write!(f, ">"),
+            Relation::GreateEqual => write!(f, ">="),
+        }
+    }
 }

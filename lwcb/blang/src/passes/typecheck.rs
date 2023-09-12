@@ -1,14 +1,18 @@
 use std::collections::HashMap;
 
-use crate::{
-    btf::BTF,
-    call::Call,
-    parser::{Ast, Expr, ExprKind},
-};
+use crate::btf::BTF;
+use crate::call::Call;
+use crate::parser::Ast;
+use crate::parser::Expr;
+use crate::parser::ExprKind;
 
-use bpfir::types::{BinaryOp, Type, TypeKind, UnaryOp};
+use bpfir::types::BinaryOp;
+use bpfir::types::Type;
+use bpfir::types::TypeKind;
+use bpfir::types::UnaryOp;
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 
 pub struct TypeCheck<'a> {
     btf: &'a BTF<'a>,
@@ -89,10 +93,18 @@ fn type_check_expr(tc: &mut TypeCheck, expr: &mut Expr) -> Result<()> {
                 ..
             } = s.as_ref()
             {
-                // tc.btf.find_member(id, name)
+                if let TypeKind::Struct(x) = &p.ty.kind {
+                    let id = tc
+                        .btf
+                        .find_member(tc.btf.find_by_name(x).unwrap(), i)
+                        .expect("failed to resolve type");
+
+                    expr.ty = tc.btf.to_type(id);
+                    return Ok(());
+                }
             }
 
-            return Ok(());
+            bail!("something wrong")
         }
         ExprKind::Return => Ok(()),
         ExprKind::Type(ty) => {

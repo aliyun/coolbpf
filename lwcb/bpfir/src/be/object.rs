@@ -1,6 +1,12 @@
 use libbpf_rs::libbpf_sys::bpf_insn;
-use object::write::{Object, SectionId, Symbol, SymbolSection};
-use object::{SectionKind, SymbolFlags, SymbolKind, SymbolScope};
+use object::write::Object;
+use object::write::SectionId;
+use object::write::Symbol;
+use object::write::SymbolSection;
+use object::SectionKind;
+use object::SymbolFlags;
+use object::SymbolKind;
+use object::SymbolScope;
 
 pub struct BPFObject {
     obj: Object<'static>,
