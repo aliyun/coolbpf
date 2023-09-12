@@ -1,11 +1,9 @@
-use bpfir::{do_codegen, do_optimize, Func, Module};
-use libbpf_sys::bpf_insn;
-
-use crate::{
-    btf::BTF,
-    parser::Ast,
-    passes::{bpfir::gen_bpfir, typecheck::type_check, unfold},
-};
+use crate::btf::BTF;
+use crate::parser::Ast;
+use crate::passes::bpfir::gen_bpfir;
+use crate::passes::typecheck::type_check;
+use crate::passes::unfold;
+use bpfir::mir::*;
 
 pub struct BLang {
     code: String,
@@ -56,8 +54,7 @@ impl BLangBuilder {
         unfold::unfold(&btf, &mut ast);
         type_check(&btf, &mut ast).expect("Type check error");
         let mut m = gen_bpfir(&ast).expect("Failed to generate bpf ir");
-        do_optimize(&mut m);
-        let object = do_codegen(&m);
+        let object = m.compile().emit();
 
         BLang {
             code: self.code,

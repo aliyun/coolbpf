@@ -1,4 +1,5 @@
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Call {

@@ -1,190 +1,313 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-
-use generational_arena::Arena;
-use regalloc2::{Block, InstRange, OperandConstraint, PReg, RegClass, VReg};
-
-use crate::{bblock::BBlockData, func::FuncData, BBlock, Func, Module, Value, ValueKind};
-
 use super::spec::BPFInst;
-use crate::types::BinaryOp;
+use super::spec::BPFSpec;
+use crate::be::spec::new_vreg;
+use crate::types::Relation;
+use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::Inst;
+use cranelift_codegen::ir::InstructionData;
+use cranelift_codegen::ir::Value;
+use cranelift_codegen::Context;
+use regalloc2::Operand;
+use regalloc2::OperandConstraint;
+use regalloc2::OperandKind;
+use regalloc2::OperandPos;
+use regalloc2::VReg;
+use std::collections::HashMap;
+use std::fmt;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct ISelValue(pub generational_arena::Index);
-
-pub enum ISelValueKind {
-    LoadX(ISelValue, u16), // OrderingMemory, addr, off
-    Load64(i64),           // non-memory
-    // store: *(uint *) (dst_reg + off16) = src_reg
-    StoreX(ISelValue, ISelValue, ISelValue, u16), // OrderingMemory, DST, SRC, off
-    // *(uint *) (dst_reg + off16) = imm32
-    Store(ISelValue, u16, i32), // dst, off, imm
-    // bpf_add|sub|...: dst_reg += src_reg
-    Alu64X(BinaryOp, ISelValue, ISelValue), // BinaryOp, l, r
-    Alu32X(BinaryOp, ISelValue, ISelValue), // BinaryOp, l, r
-    Alu64(BinaryOp, ISelValue, i64),        // BinaryOp, l, r
-    Alu32(BinaryOp, ISelValue, i32),        // BinaryOp, l, r
-    Endian(ISelValue),
-    // dst_reg = src_reg
-    MovX(ISelValue),
-    Mov32X(ISelValue),
-
-    // dst_reg = imm32
-    Mov(i32),
-    Mov32(i32),
-    // if (dst_reg 'BinaryOp' src_reg) goto pc + off16
-    JmpX(BinaryOp, ISelValue, ISelValue, u16),
-    Jmp(BinaryOp, ISelValue, i32, u16),
-    Jmp32X(BinaryOp, ISelValue, ISelValue, u16),
-    Jmp32(BinaryOp, ISelValue, i32, u16),
-    JmpA(Block),
-    Call(i32, Vec<ISelValue>),
-    Exit,
+#[derive(Default)]
+pub struct ISelBlock {
+    pub insts: Vec<BPFInst>,
+    pub operands: Vec<Vec<Operand>>,
+    pub preds: Vec<usize>,
+    pub succs: Vec<usize>,
+    pub params: Vec<VReg>,
+    pub params_out: Vec<Vec<VReg>>,
 }
 
-pub struct ISelValueData {
-    kind: ISelValueKind,
-    vreg: VReg,
-}
-
-pub struct ISelFunction {
-    pub insts: Arena<ISelValueData>,
-    pub blocks: Vec<InstRange>,
-    pub block_preds: Vec<Vec<Block>>,
-    pub block_succs: Vec<Vec<Block>>,
-    pub block_params_in: Vec<Vec<VReg>>,
-    pub block_params_out: Vec<Vec<Vec<VReg>>>,
-}
-
-impl ISelFunction {
-    pub fn new() -> Self {
-        ISelFunction {
-            insts: Default::default(),
-            blocks: Default::default(),
-            block_preds: Default::default(),
-            block_succs: Default::default(),
-            block_params_in: Default::default(),
-            block_params_out: Default::default(),
+impl fmt::Display for ISelBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for inst in &self.insts {
+            writeln!(f, "{inst}")?;
         }
+        Ok(())
     }
+}
 
-    pub fn from_funcdata(fd: &FuncData) -> Self {
-        let mut isel = ISelFunction::new();
-        let mut ctx = ISelContext::default();
-        do_isel(&mut ctx, &mut isel, fd);
-        isel
-    }
+impl ISelBlock {}
 
-    pub fn new_value_data(&mut self, vd: ISelValueData) -> ISelValue {
-        ISelValue(self.insts.insert(vd))
+#[derive(Default)]
+pub struct ISelFunction {
+    pub blocks: Vec<ISelBlock>,
+}
+
+impl fmt::Display for ISelFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (idx, block) in self.blocks.iter().enumerate() {
+            write!(f, "BBlock{idx}:\n{block}")?;
+        }
+        Ok(())
     }
 }
 
 #[derive(Default)]
-struct ISelContext {
-    // record in degree of value
-    in_degree: HashMap<Value, usize>,
-    value_queue: VecDeque<Value>,
-    handled_value: HashMap<Value, ISelValue>,
+pub struct ISelFunctionBuilder {
+    value_regs: HashMap<Value, VReg>,
+    value_uses: HashMap<Value, u16>,
+
+    block_args: HashMap<(Block, Block), Vec<VReg>>,
+
+    block_index: HashMap<Block, usize>,
+    blocks: Vec<ISelBlock>,
 }
 
-fn do_isel(ctx: &mut ISelContext, isel: &mut ISelFunction, fd: &FuncData) {
-    let _ = fd.cfg.values.iter().map(|(idx, vd)| {
-        let tmp = vd.used_by.len();
-        if tmp == 0 {
-            ctx.value_queue.push_back(Value(idx));
+impl ISelFunctionBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn build(mut self, ctx: &Context) -> ISelFunction {
+        for bb in ctx.func.layout.blocks() {
+            for param in ctx.func.dfg.block_params(bb) {
+                self.value_regs.insert(*param, new_vreg());
+            }
+            for inst in ctx.func.layout.block_insts(bb) {
+                let values = ctx.func.dfg.inst_results(inst);
+                assert!(values.len() <= 1);
+                for result in values {
+                    self.value_regs.insert(*result, new_vreg());
+                }
+            }
+        }
+
+        self.compute_block_index(ctx);
+
+        for block in ctx.domtree.cfg_postorder() {
+            let ib = __do_isel_block(&mut self, ctx, *block);
+            self.blocks.push(ib);
+        }
+
+        self.blocks.reverse();
+
+        ISelFunction {
+            blocks: self.blocks,
+        }
+    }
+
+    fn compute_block_index(&mut self, ctx: &Context) {
+        let mut blocks = ctx.domtree.cfg_postorder().to_vec();
+        blocks.reverse();
+        for (idx, &block) in blocks.iter().enumerate() {
+            self.block_index.insert(block, idx);
+        }
+    }
+
+    fn add_out_args(&mut self, from: Block, to: Block, args: Vec<VReg>) {
+        self.block_args.insert((from, to), args);
+    }
+}
+
+fn __do_isel_block(builder: &mut ISelFunctionBuilder, ctx: &Context, block: Block) -> ISelBlock {
+    let mut ib = ISelBlock::default();
+    for inst in ctx.func.layout.block_insts(block).rev() {
+        log::debug!(
+            "Instruction: {:?}, is branch: {}",
+            ctx.func.dfg.insts[inst],
+            ctx.func.dfg.insts[inst].opcode().is_branch()
+        );
+        let last_inst = ctx.func.layout.last_inst(block).unwrap();
+        if ctx.func.dfg.insts[last_inst].opcode().is_branch() {
+            __do_isel_block_branch(builder, ctx, block, last_inst, &mut ib);
+        }
+
+        __do_isel_inst(builder, ctx, inst, &mut ib);
+    }
+
+    // add block parameters
+    for arg in ctx.func.dfg.block_params(block) {
+        ib.params.push(builder.value_regs[arg]);
+    }
+
+    // add predecessors
+    for pred in ctx.cfg.pred_iter(block) {
+        let idx = builder.block_index[&pred.block];
+        ib.preds.push(idx);
+    }
+
+    // add successors
+    for succ in ctx.cfg.succ_iter(block) {
+        let idx = builder.block_index[&succ];
+        ib.succs.push(idx);
+        ib.params_out.push(vec![]);
+    }
+
+    ib
+}
+
+fn __do_isel_block_branch(
+    builder: &mut ISelFunctionBuilder,
+    ctx: &Context,
+    block: Block,
+    br: Inst,
+    iblock: &mut ISelBlock,
+) {
+    let pool = &ctx.func.dfg.value_lists;
+    let data = &ctx.func.dfg.insts[br];
+    match data {
+        InstructionData::Jump {
+            opcode,
+            destination,
+        } => {
+            let target_block = destination.block(pool);
+            let bi = BPFInst::JmpA(builder.block_index[&target_block] as u16);
+            iblock.insts.push(bi);
+            iblock.operands.push(vec![]);
+        }
+        InstructionData::Brif {
+            opcode,
+            arg,
+            blocks,
+        } => {
+            todo!();
+            let then_block = blocks[0].block(pool);
+            let else_block = blocks[1].block(pool);
+
+            let pre_inst = ctx.func.dfg.value_def(*arg).inst().unwrap();
+
+            match &ctx.func.dfg.insts[pre_inst] {
+                InstructionData::IntCompare { opcode, args, cond } => {
+                    let rel = intcc2relation(cond);
+                    todo!()
+                }
+                InstructionData::IntCompareImm {
+                    opcode,
+                    arg,
+                    cond,
+                    imm,
+                } => {}
+
+                _ => panic!("not integer compare instruction"),
+            }
+        }
+        _ => panic!("unexpected branch instruction: {:?}", br),
+    }
+
+    let succs: Vec<Block> = ctx.cfg.succ_iter(block).collect();
+    for (idx, &succ) in succs.iter().enumerate() {
+        let branch = ctx.func.dfg.insts[br].branch_destination(&ctx.func.dfg.jump_tables);
+        let branch_args = branch[idx].args_slice(&ctx.func.dfg.value_lists);
+        let mut vregs = vec![];
+        for &arg in branch_args {
+            let arg = ctx.func.dfg.resolve_aliases(arg);
+            builder.value_uses.get_mut(&arg).map(|x| *x += 1);
+            vregs.push(builder.value_regs[&arg]);
+        }
+        builder.add_out_args(block, succ, vregs);
+    }
+}
+
+fn __do_isel_inst(
+    builder: &mut ISelFunctionBuilder,
+    ctx: &Context,
+    inst: Inst,
+    iblock: &mut ISelBlock,
+) {
+    let vl_pool = &ctx.func.dfg.value_lists;
+    let data = &ctx.func.dfg.insts[inst];
+
+    let op = data.opcode();
+    let mut operands = vec![];
+
+    let is_important = op.is_return()
+        || if ctx.func.dfg.has_results(inst) {
+            let val = ctx.func.dfg.first_result(inst);
+            builder.value_uses.contains_key(&val)
         } else {
-            ctx.in_degree.insert(Value(idx), tmp);
-        }
-    });
+            false
+        };
 
-    while let Some(val) = ctx.value_queue.pop_front() {
-        do_isel_inst(ctx, isel, fd, val);
+    if !is_important {
+        return;
+    }
+
+    match data {
+        InstructionData::StackStore {
+            opcode,
+            arg,
+            stack_slot,
+            offset,
+        } => {
+            todo!()
+        }
+        InstructionData::Call {
+            opcode,
+            args,
+            func_ref,
+        } => {
+            let bi = BPFInst::Call(func_ref.as_u32() as i32);
+
+            for (idx, arg) in args.as_slice(vl_pool).iter().enumerate() {
+                operands.push(use_operand(
+                    builder.value_regs[arg],
+                    cons_fixed_reg((idx + 1) as u8),
+                ));
+            }
+            let tmp = builder.value_regs[&ctx.func.dfg.first_result(inst)];
+            operands.push(def_operand(tmp, cons_fixed_reg(0)));
+        }
+        InstructionData::Brif {
+            opcode,
+            arg,
+            blocks,
+        } => {
+            todo!()
+        }
+        InstructionData::MultiAry { opcode, args } => {
+            assert!(opcode.is_return());
+            assert!(args.len(&vl_pool) == 1);
+            let first = args.first(vl_pool).unwrap();
+            let vreg = builder.value_regs[&first];
+            let bi = BPFInst::Mov(vreg, 0);
+            operands.push(def_operand(vreg, cons_fixed_reg(0)));
+            iblock.insts.push(bi);
+            iblock.insts.push(BPFInst::Exit);
+            iblock.operands.push(operands);
+            iblock.operands.push(vec![]);
+        }
+        _ => todo!(),
     }
 }
 
-fn do_isel_inst(
-    ctx: &mut ISelContext,
-    isel: &mut ISelFunction,
-    fd: &FuncData,
-    val: Value,
-) -> ISelValue {
-    if let Some(ival) = ctx.handled_value.get(&val) {
-        return *ival;
-    }
+#[inline]
+fn use_operand(vreg: VReg, cons: OperandConstraint) -> Operand {
+    Operand::new(vreg, cons, OperandKind::Use, OperandPos::Early)
+}
 
-    let get_constant = |v: Value| {
-        if let ValueKind::Constant(c) = &fd.cfg.values[v.0].kind {
-            return Some(c);
-        }
-        None
-    };
+#[inline]
+fn def_operand(vreg: VReg, cons: OperandConstraint) -> Operand {
+    Operand::new(vreg, cons, OperandKind::Def, OperandPos::Late)
+}
 
-    macro_rules! mark_visited_value {
-        ($val: expr, $ival: expr) => {
-            ctx.handled_value.insert($val, $ival);
-            for u in fd.cfg.values[$val.0].kind.uses() {
-                ctx.in_degree.entry(u).and_modify(|x| {
-                    *x -= 1;
-                    if *x == 0 {
-                        ctx.value_queue.push_back(u);
-                    }
-                });
-            }
-        };
-    }
+#[inline]
+fn cons_fixed_reg(regno: u8) -> OperandConstraint {
+    OperandConstraint::FixedReg(BPFSpec::reg(regno))
+}
 
-    let vd = &fd.cfg.values[val.0];
-    match &vd.kind {
-        ValueKind::Binary(op, l, r) => {
-            let lval = do_isel_inst(ctx, isel, fd, *l);
-            let kind = if let Some(x) = get_constant(*r) {
-                ISelValueKind::Alu64(op.clone(), lval, *x)
-            } else {
-                let rval = do_isel_inst(ctx, isel, fd, *r);
-                ISelValueKind::Alu64X(op.clone(), lval, rval)
-            };
+#[inline]
+fn cons_any() -> OperandConstraint {
+    OperandConstraint::Any
+}
 
-            let ivd = ISelValueData {
-                kind,
-                vreg: VReg::new(1, RegClass::Int),
-            };
-            let ival = isel.new_value_data(ivd);
-            mark_visited_value!(val, ival);
-            return ival;
-        }
-        ValueKind::Branch(c, t, e) => {
-            todo!()
-        }
-        ValueKind::Load(src) => {
-            let src_vd = &fd.cfg.values[src.0];
-            let mut off = 0;
-            let mut addr = *src;
-            if let ValueKind::Binary(op, l, r) = &src_vd.kind {
-                get_constant(*r).map(|x| {
-                    addr = *l;
-                    off = *x as u16;
-                });
-            }
-
-            let isel_val = do_isel_inst(ctx, isel, fd, addr);
-            let ivd = ISelValueData {
-                kind: ISelValueKind::LoadX(isel_val, off as u16),
-                vreg: VReg::new(0, RegClass::Int),
-            };
-            let ival = isel.new_value_data(ivd);
-            mark_visited_value!(val, ival);
-            return ival;
-        }
-
-        ValueKind::Store(dst, src) => {
-            // VBPFInst::Store((), (), ())
-            todo!()
-        }
-
-        ValueKind::Exit => todo!(),
-
-        ValueKind::Jump(b) => todo!(),
-
+#[inline]
+fn intcc2relation(cc: &IntCC) -> Relation {
+    match cc {
+        IntCC::Equal => Relation::Equal,
+        IntCC::NotEqual => Relation::NotEqual,
+        IntCC::UnsignedGreaterThan => Relation::Greater,
+        IntCC::UnsignedGreaterThanOrEqual => Relation::GreateEqual,
+        IntCC::UnsignedLessThan => Relation::Less,
+        IntCC::UnsignedLessThanOrEqual => Relation::LessEqual,
         _ => todo!(),
     }
 }

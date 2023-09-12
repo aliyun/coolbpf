@@ -1,13 +1,15 @@
 use crate::call::Call;
 use crate::constant::Constant;
-use crate::lexer::{Token, Tokens};
-use anyhow::{bail, Result};
+use crate::lexer::Token;
+use crate::lexer::Tokens;
+use anyhow::bail;
+use anyhow::Result;
 use bpfir::types::BinaryOp;
 use bpfir::types::UnaryOp;
-use bpfir::{Type, TypeKind};
-use generational_arena::Arena;
+use bpfir::Type;
+use bpfir::TypeKind;
 use logos::Span;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 static GLOBAL_NODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
