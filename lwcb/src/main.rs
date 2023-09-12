@@ -9,6 +9,8 @@ pub struct Command {
     script: Option<String>,
     #[structopt(long, short, help = "Raw text")]
     text: Option<String>,
+    #[structopt(long, help = "btf file path")]
+    btf: Option<String>,
 }
 
 fn main() {
@@ -16,21 +18,23 @@ fn main() {
     let opts = Command::from_args();
 
     let code_string;
-    if let Some(p) = opts.script {
-        code_string = Some(read_to_string(&p).unwrap());
-    } else if let Some(t) = opts.text {
-        code_string = Some(t.clone());
+    if let Some(p) = &opts.script {
+        code_string = read_to_string(p).unwrap();
+    } else if let Some(t) = &opts.text {
+        code_string = t.clone();
     } else {
-        code_string = None;
+        panic!("code script not found")
     }
 
-    if let Some(code) = code_string {
-        run(code);
-    }
+    run(&opts, code_string);
 }
 
-fn run(code: String) {
-    let blang = BLangBuilder::new(code).build();
+fn run(opts: &Command, code: String) {
+    let mut builder = BLangBuilder::new(code);
+    if let Some(b) = &opts.btf {
+        builder = builder.btf(b);
+    }
+    let blang = builder.build();
     let mut object = load_bpf_object(blang.object());
     let links = attach_program(&mut object);
 }
