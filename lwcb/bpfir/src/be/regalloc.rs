@@ -1,6 +1,8 @@
 use super::isel::ISelBlock;
 use super::isel::ISelFunction;
-use super::spec::BPFSpec;
+use super::spec::BPFMachineEnv;
+use super::spec::BPFReg;
+use super::spec::BPFSize;
 use crate::be::spec::BPFInst;
 use regalloc2::Allocation;
 use regalloc2::Block;
@@ -11,12 +13,13 @@ use regalloc2::InstOrEdit;
 use regalloc2::InstRange;
 use regalloc2::Operand;
 use regalloc2::Output;
-use regalloc2::PReg;
 use regalloc2::PRegSet;
 use regalloc2::RegClass;
 use regalloc2::VReg;
 use std::fmt;
 
+/// As a result of register allocation, the virtual registers of instructions
+/// have been replaced with hardware registers.
 #[derive(Default)]
 pub struct RAFunction {
     insts: Vec<BPFInst>,
@@ -73,14 +76,15 @@ impl RAFunctionBuilder {
 
     fn build_block(&mut self, block: ISelBlock) {
         let start = self.insts.len();
-        self.insts.extend(block.insts);
+        self.insts.extend(block.insts.clone());
         let end = self.insts.len();
         log::debug!(
-            "Block instruction range: {} -> {}, params_in: {}, params_out: {}",
+            "Block instruction range: {} -> {}, params_in: {}, params_out: {}, {}",
             start,
             end,
             block.params.len(),
-            block.params_out.len()
+            block.params_out.len(),
+            block,
         );
         self.operands.extend(block.operands);
         self.block_preds
@@ -88,8 +92,15 @@ impl RAFunctionBuilder {
         self.block_succs
             .push(block.succs.iter().map(|x| Block(*x as u32)).collect());
 
-        self.block_params_in.push(block.params);
-        self.block_params_out.push(block.params_out);
+        self.block_params_in
+            .push(block.params.iter().map(|&x| x.into()).collect());
+        self.block_params_out.push(
+            block
+                .params_out
+                .iter()
+                .map(|xx| xx.clone().iter().map(|&x| x.into()).collect())
+                .collect(),
+        );
         self.blocks
             .push(InstRange::forward(Inst(start as u32), Inst(end as u32)));
     }
@@ -181,7 +192,7 @@ impl Function for RAFunctionBuilder {
 }
 
 fn do_regalloc(f: &RAFunctionBuilder) -> Vec<BPFInst> {
-    let env = BPFSpec::env();
+    let env = BPFMachineEnv();
     let opts = regalloc2::RegallocOptions {
         verbose_log: true,
         validate_ssa: true,
@@ -197,8 +208,8 @@ fn regalloc_emit(f: &RAFunctionBuilder, output: &Output) -> Vec<BPFInst> {
     // todo: emit prologue, that is, the stack space is cleared to 0.
     for (idx, _) in f.blocks.iter().enumerate() {
         let insts = regalloc_emit_block(f, &output, idx as u32);
-        let start = total_insts.len() as u16;
-        let end = start + insts.len() as u16;
+        let start = total_insts.len() as i16;
+        let end = start + insts.len() as i16;
         blocks.push((start, end));
         total_insts.extend_from_slice(&insts);
     }
@@ -217,40 +228,42 @@ fn regalloc_emit_block(f: &RAFunctionBuilder, output: &Output, block: u32) -> Ve
     for inst_or_edit in output.block_insts_and_edits(f, Block(block)) {
         match inst_or_edit {
             InstOrEdit::Inst(inst) => {
-                res.push(regalloc_emit_inst(
-                    &f.insts[inst.index()],
-                    &output.inst_allocs(inst),
-                ));
+                let instref = &f.insts[inst.index()];
+                res.push(regalloc_emit_inst(instref, &output.inst_allocs(inst)));
+
+                if instref.need_placeholder() {
+                    res.push(BPFInst::PlaceHolder);
+                }
             }
 
             InstOrEdit::Edit(Edit::Move { from, to }) => {
                 match (from.as_reg(), to.as_reg()) {
                     (Some(from), Some(to)) => {
                         // todo: It should be judged according to the type whether to use MovX or Mov32X
-                        res.push(BPFInst::MovX(p2v(to), p2v(from)));
+                        res.push(BPFInst::MovX(BPFReg::from(to), BPFReg::from(from)));
                     }
                     (Some(from), None) => {
                         // Spill from register to spillslot.
                         let to = to.as_stack().unwrap();
                         res.push(BPFInst::StoreX(
-                            64,
-                            p2v(BPFSpec::R10()),
-                            p2v(from),
-                            to.index() as u16,
+                            BPFSize::DW,
+                            BPFReg::r10(),
+                            BPFReg::from(from),
+                            to.index() as i16,
                         ));
                     }
                     (None, Some(to)) => {
                         // Load from spillslot to register.
                         let from = from.as_stack().unwrap();
                         res.push(BPFInst::LoadX(
-                            64,
-                            p2v(to),
-                            p2v(BPFSpec::R10()),
-                            from.index() as u16,
+                            BPFSize::DW,
+                            BPFReg::from(to),
+                            BPFReg::r10(),
+                            from.index() as i16,
                         ));
                     }
                     (None, None) => {
-                        panic!("regalloc2 should have eliminated stack-to-stack moves!");
+                        panic!("unexpected stack-to-stack moves!");
                     }
                 }
             }
@@ -259,36 +272,32 @@ fn regalloc_emit_block(f: &RAFunctionBuilder, output: &Output, block: u32) -> Ve
     res
 }
 
+// Replace the virtual registers in BPFInst with hardware registers
 fn regalloc_emit_inst(inst: &BPFInst, allocs: &[Allocation]) -> BPFInst {
-    // get the allocated preg and then convert it to vreg
-    let vreg = |idx: usize| p2v(allocs[idx].as_reg().unwrap());
+    // get the allocated preg and then convert it to BPFReg
+    let reg = |idx: usize| BPFReg::from(allocs[idx].as_reg().unwrap());
 
     match inst {
-        BPFInst::LoadX(sz, v1, v2, off) => todo!(),
-        BPFInst::Load64(v, imm) => todo!(),
-        BPFInst::StoreX(sz, v1, v2, off) => todo!(),
-        BPFInst::Store(sz, v, off, imm) => todo!(),
-        BPFInst::Alu64X(op, v1, v2) => todo!(),
-        BPFInst::Alu32X(op, v1, v2) => todo!(),
-        BPFInst::Alu64(op, v1, imm) => todo!(),
-        BPFInst::Alu32(op, v1, imm) => todo!(),
-        BPFInst::Endian(sz, v) => todo!(),
-        BPFInst::MovX(v1, v2) => todo!(),
-        BPFInst::Mov32X(v1, v2) => todo!(),
-        BPFInst::Mov(v1, imm) => BPFInst::Mov(vreg(0), *imm),
-        BPFInst::Mov32(v1, imm) => todo!(),
-        BPFInst::JmpX(rel, v1, v2, off) => todo!(),
-        BPFInst::Jmp(rel, v1, imm, off) => todo!(),
-        BPFInst::Jmp32X(rel, v1, v2, off) => todo!(),
-        BPFInst::Jmp32(rel, v1, imm, off) => todo!(),
+        BPFInst::LoadX(sz, v1, v2, off) => BPFInst::LoadX(*sz, reg(0), reg(1), *off),
+        BPFInst::Load64(v, imm) => BPFInst::Load64(reg(0), *imm),
+        BPFInst::StoreX(sz, v1, v2, off) => BPFInst::StoreX(*sz, reg(0), reg(1), *off),
+        BPFInst::Store(sz, v, off, imm) => BPFInst::Store(*sz, reg(0), *off, *imm),
+        BPFInst::Alu64X(op, v1, v2) => BPFInst::Alu64X(*op, reg(0), reg(1)),
+        BPFInst::Alu32X(op, v1, v2) => BPFInst::Alu32X(*op, reg(0), reg(1)),
+        BPFInst::Alu64(op, v1, imm) => BPFInst::Alu64(*op, reg(0), *imm),
+        BPFInst::Alu32(op, v1, imm) => BPFInst::Alu32(*op, reg(0), *imm),
+        BPFInst::Endian(sz, v) => BPFInst::Endian(*sz, reg(0)),
+        BPFInst::MovX(v1, v2) => BPFInst::MovX(reg(0), *v2),
+        BPFInst::Mov32X(v1, v2) => BPFInst::Mov32X(reg(0), reg(1)),
+        BPFInst::Mov(v1, imm) => BPFInst::Mov(reg(0), *imm),
+        BPFInst::Mov32(v1, imm) => BPFInst::Mov32(reg(0), *imm),
+        BPFInst::JmpX(rel, v1, v2, off) => BPFInst::JmpX(*rel, reg(0), reg(1), *off),
+        BPFInst::Jmp(rel, v1, imm, off) => BPFInst::Jmp(*rel, reg(0), *imm, *off),
+        BPFInst::Jmp32X(rel, v1, v2, off) => BPFInst::Jmp32X(*rel, reg(0), reg(1), *off),
+        BPFInst::Jmp32(rel, v1, imm, off) => BPFInst::Jmp32(*rel, reg(0), *imm, *off),
         BPFInst::JmpA(off) => inst.clone(),
-        BPFInst::Call(id) => todo!(),
+        BPFInst::Call(id) => inst.clone(),
         BPFInst::Exit => inst.clone(),
+        BPFInst::PlaceHolder => inst.clone(),// panic!("BUG: BPFInst::PlaceHolder should not be here"),
     }
-}
-
-#[inline]
-fn p2v(p: PReg) -> VReg {
-    let no = p.hw_enc();
-    VReg::new(no, RegClass::Int)
 }

@@ -38,6 +38,7 @@ pub enum TypeKind {
     Ptr(Box<Type>),
     Struct(String),
     Union(String),
+    Map(libbpf_rs::MapType, u32, Box<Type>, Box<Type>), // entries, key, value
 
     Kprobe(String),
     Kretprobe(String),
@@ -59,12 +60,29 @@ impl TypeKind {
             _ => panic!("Not a function type"),
         }
     }
+
+    pub fn loadable(&self) -> bool {
+        match self {
+            Self::Char
+            | Self::Bool
+            | Self::I8
+            | Self::U8
+            | Self::I16
+            | Self::U16
+            | Self::I32
+            | Self::U32
+            | Self::I64
+            | Self::U64
+            | Self::Ptr(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Type {
     pub kind: TypeKind,
-    pub span: Span,
+    // pub span: Span,
     pub typeid: u32,
 }
 
@@ -72,13 +90,28 @@ impl Type {
     pub fn new(kind: TypeKind) -> Self {
         Type {
             kind,
-            span: Span::default(),
+            // span: Span::default(),
             typeid: 0,
         }
     }
 
     pub fn is_kind(&self, kind: TypeKind) -> bool {
         self.kind == kind
+    }
+
+    pub fn is_ptr(&self) -> bool {
+        if let TypeKind::Ptr(..) = self.kind {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn points_to(&self) -> &Type {
+        if let TypeKind::Ptr(x) = &self.kind {
+            return x.as_ref();
+        }
+        panic!("Not a pointer")
     }
 
     impl_specified_type!(
@@ -105,6 +138,10 @@ impl Type {
     pub fn kretprobe(name: String) -> Self {
         Type::new(TypeKind::Kretprobe(name))
     }
+
+    pub fn map(ty: libbpf_rs::MapType, entries: u32, key: Type, val: Type) -> Self {
+        Type::new(TypeKind::Map(ty, entries, Box::new(key), Box::new(val)))
+    }
 }
 
 impl ToString for Type {
@@ -126,6 +163,9 @@ impl ToString for Type {
             TypeKind::Ptr(x) => x.to_string() + "*",
             TypeKind::Struct(name) => format!("struct {}", name),
             TypeKind::Union(name) => format!("union {}", name),
+            TypeKind::Map(ty, n, k, v) => {
+                format!("{ty} map {n} key:{}, val:{}", k.to_string(), v.to_string())
+            }
 
             TypeKind::Kprobe(name) => format!("kprobe {}", name),
             TypeKind::Kretprobe(name) => format!("kprobe {}", name),
@@ -159,44 +199,55 @@ pub enum BinaryOp {
     Xor,
     #[display("&&")]
     And,
-    #[display("=")]
+    #[display("==")]
     Equal,
     #[display("!=")]
     NonEqual,
-    #[display("=")]
+    #[display("<")]
     LT,
-    #[display("=")]
+    #[display(">")]
     GT,
-    #[display("=")]
+    #[display("<=")]
     LTE,
-    #[display("=")]
+    #[display(">=")]
     GTE,
-    #[display("=")]
+    #[display("<<")]
     LShift,
-    #[display("=")]
+    #[display(">>")]
     RShift,
     #[display("+")]
     Add,
-    #[display("=")]
+    #[display("-")]
     Sub,
-    #[display("=")]
+    #[display("*")]
     Mult,
-    #[display("=")]
+    #[display("/")]
     Div,
-    #[display("=")]
+    #[display("%")]
     Mod,
     #[display("=")]
     Assign,
+    #[display("|")]
+    BitOr,
+    #[display("&")]
+    BitAnd,
+    #[display("^")]
+    BitXor,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[repr(u32)]
 pub enum Relation {
-    NotEqual,
-    Equal,
-    Less,
-    LessEqual,
-    Greater,
-    GreateEqual,
+    NotEqual = libbpf_sys::BPF_JNE,
+    Equal = libbpf_sys::BPF_JEQ,
+    Less = libbpf_sys::BPF_JLT,
+    LessEqual = libbpf_sys::BPF_JLE,
+    SignedLess = libbpf_sys::BPF_JSLT,
+    SignedLessEqual = libbpf_sys::BPF_JSLE,
+    Greater = libbpf_sys::BPF_JGT,
+    GreateEqual = libbpf_sys::BPF_JGE,
+    SignedGreater = libbpf_sys::BPF_JSGT,
+    SignedGreateEqual = libbpf_sys::BPF_JSGE,
 }
 
 impl fmt::Display for Relation {
@@ -206,8 +257,12 @@ impl fmt::Display for Relation {
             Relation::Equal => write!(f, "=="),
             Relation::Less => write!(f, "<"),
             Relation::LessEqual => write!(f, "<="),
+            Relation::SignedLess => write!(f, "<(signed)"),
+            Relation::SignedLessEqual => write!(f, "<=(signed)"),
             Relation::Greater => write!(f, ">"),
             Relation::GreateEqual => write!(f, ">="),
+            Relation::SignedGreater => write!(f, ">(signed)"),
+            Relation::SignedGreateEqual => write!(f, ">=(signed)"),
         }
     }
 }

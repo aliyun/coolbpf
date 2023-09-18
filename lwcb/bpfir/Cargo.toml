@@ -19,3 +19,7 @@ cranelift-frontend = "0.99.1"
 cranelift-codegen = { version = "0.99.1", features = ["riscv64"] }
 target-lexicon = "0.12.11"
 parse-display = "0.8.2"
+cranelift-module = "0.99.2"
+
+[dev-dependencies]
+cranelift-reader = "0.99.2"
