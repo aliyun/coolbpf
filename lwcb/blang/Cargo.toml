@@ -14,3 +14,6 @@ libbpf-sys = "1.2.1"
 libbpf-rs = "0.21.2"
 paste = "1.0.14"
 bpfir = { path = "../bpfir" }
+cranelift-frontend = "0.99.1"
+cranelift-codegen = { version = "0.99.1", features = ["riscv64", "arm64"] }
+cranelift-module = "0.99.2"

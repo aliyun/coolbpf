@@ -14,6 +14,13 @@ use std::sync::atomic::AtomicUsize;
 static GLOBAL_NODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MemberAttr {
+    pub offset: u32, // in bytes
+    pub bitfield_offset: u16, // in bits
+    pub bitfield_size: u16,   // in bits
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     Compound(Vec<Expr>), // compound statement
     ExprStmt(Box<Expr>),
@@ -29,7 +36,7 @@ pub enum ExprKind {
     Binary(BinaryOp, Box<Expr>, Box<Expr>), // binary expression
     Cast(Box<Expr>, Box<Expr>),
     Call(Call, Vec<Expr>),
-    Member(Box<Expr>, Box<Expr>), //member access
+    Member(Box<Expr>, Box<Expr>, Option<MemberAttr>), //member access
     Trace(Box<Expr>, Box<Expr>),  // bpf program, tracing point definition and program body
 }
 
@@ -105,7 +112,7 @@ impl Expr {
     }
 
     pub fn new_member(expr1: Expr, expr2: Expr, span: Span) -> Self {
-        Self::new(ExprKind::Member(Box::new(expr1), Box::new(expr2)), span)
+        Self::new(ExprKind::Member(Box::new(expr1), Box::new(expr2), None), span)
     }
 
     pub fn ty(&self) -> &Type {

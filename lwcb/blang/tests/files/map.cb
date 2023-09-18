@@ -1,0 +1,44 @@
+
+$
+function u0:0(i64) -> i64 system_v {
+    ss0 = explicit_slot 8
+    ss1 = explicit_slot 4
+    gv0 = symbol colocated userextname0
+    sig0 = (i64, i64, i64, i64) -> i64 system_v
+    fn0 = colocated u0:0 sig0
+
+block0(v0: i64):
+    v1 = iadd_imm v0, 112
+    v2 = load.i64 notrap aligned v1
+    v3 = iadd_imm v0, 104
+    v4 = load.i64 notrap aligned v3
+    v5 = iadd_imm v0, 96
+    v6 = load.i64 notrap aligned v5
+    v7 = iadd_imm v0, 88
+    v8 = load.i64 notrap aligned v7
+    v9 = iconst.i32 0
+    v10 = symbol_value.i64 gv0
+    v11 = stack_addr.i64 ss0
+    stack_store v4, ss0
+    v12 = stack_addr.i64 ss1
+    stack_store v9, ss1  ; v9 = 0
+    v13 = iconst.i64 0
+    v14 = call fn0(v10, v11, v12, v13)  ; v13 = 0
+    v15 = iconst.i64 0
+    return v15  ; v15 = 0
+}
+$
+
+
+
+
+
+
+
+kprobe:tcp_sendmsg {
+    skmap[sk] = 0;
+}
+
+
+
+
