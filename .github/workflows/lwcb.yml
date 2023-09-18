@@ -23,7 +23,7 @@ jobs:
     - name: Run tests for bpfir
       run: cd lwcb/bpfir && cargo test
     - name: Run tests for blang
-      run: cd lwcb/blang && cargo test
+      run: cd lwcb/blang && cargo test --tests
     - name: Run tests for lwcb
       run: cd lwcb && cargo test
 
