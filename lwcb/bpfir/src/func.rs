@@ -6,10 +6,10 @@ use cranelift_codegen::settings::builder;
 use cranelift_codegen::settings::Configurable;
 use cranelift_codegen::settings::Flags;
 use cranelift_codegen::Context;
+use std::fmt;
 use target_lexicon::Architecture;
 use target_lexicon::Riscv64Architecture;
 use target_lexicon::Triple;
-use std::fmt;
 
 #[derive(Debug)]
 pub struct Func {

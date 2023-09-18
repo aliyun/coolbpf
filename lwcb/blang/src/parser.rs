@@ -9,13 +9,10 @@ use bpfir::types::UnaryOp;
 use bpfir::Type;
 use bpfir::TypeKind;
 use logos::Span;
-use std::sync::atomic::AtomicUsize;
-
-static GLOBAL_NODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberAttr {
-    pub offset: u32, // in bytes
+    pub offset: u32,          // in bytes
     pub bitfield_offset: u16, // in bits
     pub bitfield_size: u16,   // in bits
 }
@@ -37,7 +34,7 @@ pub enum ExprKind {
     Cast(Box<Expr>, Box<Expr>),
     Call(Call, Vec<Expr>),
     Member(Box<Expr>, Box<Expr>, Option<MemberAttr>), //member access
-    Trace(Box<Expr>, Box<Expr>),  // bpf program, tracing point definition and program body
+    Trace(Box<Expr>, Box<Expr>), // bpf program, tracing point definition and program body
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,7 +109,10 @@ impl Expr {
     }
 
     pub fn new_member(expr1: Expr, expr2: Expr, span: Span) -> Self {
-        Self::new(ExprKind::Member(Box::new(expr1), Box::new(expr2), None), span)
+        Self::new(
+            ExprKind::Member(Box::new(expr1), Box::new(expr2), None),
+            span,
+        )
     }
 
     pub fn ty(&self) -> &Type {

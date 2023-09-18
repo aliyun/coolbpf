@@ -82,17 +82,27 @@ impl Module {
 
     pub fn declare_helper_function(&mut self, id: u32) -> FuncId {
         let mut sig = self.make_signature();
+
+        macro_rules! sig_params {
+            ($a:expr,$($b:expr) ,*) => {
+                $(
+                    sig.params.push(AbiParam::new($b));
+                )*
+                sig.returns.push(AbiParam::new($a));
+            };
+        }
         let name;
 
         match id {
             // static long (*bpf_map_update_elem)(void *map, const void *key, const void *value, __u64 flags) = (void *) 2;
             libbpf_sys::BPF_FUNC_map_update_elem => {
-                sig.returns.push(AbiParam::new(I64));
-                sig.params.push(AbiParam::new(I64));
-                sig.params.push(AbiParam::new(I64));
-                sig.params.push(AbiParam::new(I64));
-                sig.params.push(AbiParam::new(I64));
+                sig_params!(I64, I64, I64, I64, I64);
                 name = "bpf_map_lookup_elem";
+            }
+            // static long (*bpf_perf_event_output)(void *ctx, void *map, __u64 flags, void *data, __u64 size) = (void *) 25;
+            libbpf_sys::BPF_FUNC_perf_event_output => {
+                sig_params!(I64, I64, I64, I64, I64, I64);
+                name = "bpf_perf_event_output";
             }
             _ => todo!(),
         }
@@ -123,13 +133,12 @@ impl Module {
     pub fn context(&mut self) -> Context {
         self.make_context()
     }
-
 }
 
 impl fmt::Display for Module {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (ty, func) in &self.functions {
-            writeln!(f, "{}",  func.func)?;
+            writeln!(f, "{}", func.func)?;
         }
         writeln!(f, "")
     }

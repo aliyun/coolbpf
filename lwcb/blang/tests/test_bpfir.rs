@@ -62,7 +62,6 @@ fn test_empty() {
     run_one_test("empty.cb");
 }
 
-
 #[test]
 fn test_map() {
     run_one_test("map.cb");
@@ -91,4 +90,9 @@ fn test_binary_mul() {
 #[test]
 fn test_unary_neg() {
     run_one_test("unary_neg.cb");
+}
+
+#[test]
+fn test_call_print() {
+    run_one_test("call_print.cb");
 }
