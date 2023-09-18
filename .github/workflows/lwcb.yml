@@ -21,11 +21,11 @@ jobs:
     - name: Build
       run: cd lwcb && cargo build --verbose
     - name: Run tests for bpfir
-      run: cd lwcb && cargo test -p bpfir
+      run: cd lwcb/bpfir && cargo test
     - name: Run tests for blang
-      run: cd lwcb && cargo test -p blang
+      run: cd lwcb/blang && cargo test
     - name: Run tests for lwcb
-      run: cd lwcb && cargo test -p lwcb
+      run: cd lwcb && cargo test
 
   rustfmt:
     name: Check code formatting
