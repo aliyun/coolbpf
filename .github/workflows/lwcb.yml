@@ -11,12 +11,31 @@ env:
 
 jobs:
   build:
-
+    name: Build and run tests
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v3
+    - name: Install deps
+      run: sudo apt-get install -y libelf-dev
     - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      run: cd lwcb && cargo build --verbose
+    - name: Run tests for bpfir
+      run: cd lwcb && cargo test -p bpfir
+    - name: Run tests for blang
+      run: cd lwcb && cargo test -p blang
+    - name: Run tests for lwcb
+      run: cd lwcb && cargo test -p lwcb
+
+  rustfmt:
+    name: Check code formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          components: rustfmt
+          override: true
+      - run: cd lwcb && cargo fmt --all --check
