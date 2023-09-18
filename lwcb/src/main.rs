@@ -1,74 +1,59 @@
+use blang::BLangBuilder;
 use std::fs::read_to_string;
-use std::path::PathBuf;
-
-use anyhow::Result;
-use lwcb::LwCB;
-
-use libfirm_rs::init_libfirm;
 use structopt::StructOpt;
-mod utils;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "lwbt", about = "LightWeight eBPF Tracing")]
+#[structopt(name = "lwcb", about = "LightWeight eBPF Tracing")]
 pub struct Command {
     #[structopt(help = "The path of script file")]
     script: Option<String>,
-
     #[structopt(long, short, help = "Raw text")]
     text: Option<String>,
-
-    #[structopt(
-        long,
-        parse(from_os_str),
-        help = "Folder path to save intermediate code files"
-    )]
-    irdump: Option<PathBuf>,
-
-    #[structopt(
-        long,
-        parse(from_os_str),
-        help = "Folder path to save lower intermediate code files"
-    )]
-    lirdump: Option<PathBuf>,
-
-    #[structopt(long, help = "Dump bpf instruction")]
-    bpfdump: Option<String>,
-
-    #[structopt(long, help = "Dump ast")]
-    astdump: bool,
+    #[structopt(long, help = "btf file path")]
+    btf: Option<String>,
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::init();
     let opts = Command::from_args();
-    let content;
-    if let Some(p) = opts.script {
-        content = Some(read_to_string(&p)?);
-    } else if let Some(t) = opts.text {
-        content = Some(t.clone());
+
+    let code_string;
+    if let Some(p) = &opts.script {
+        code_string = read_to_string(p).unwrap();
+    } else if let Some(t) = &opts.text {
+        code_string = t.clone();
     } else {
-        content = None;
+        panic!("code script not found")
     }
 
-    let mut lwbt = LwCB::new();
+    run(&opts, code_string);
+}
 
-    if let Some(p) = opts.irdump {
-        lwbt.set_irdump(p);
+fn run(opts: &Command, code: String) {
+    let mut builder = BLangBuilder::new(code);
+    if let Some(b) = &opts.btf {
+        builder = builder.btf(b);
     }
+    let blang = builder.build();
+    let mut object = load_bpf_object(blang.object());
+    let links = attach_program(&mut object);
+}
 
-    if let Some(p) = opts.lirdump {
-        lwbt.set_lirdump(p);
+fn load_bpf_object(mem_obj: &Vec<u8>) -> libbpf_rs::Object {
+    let mut builder = libbpf_rs::ObjectBuilder::default();
+    let object = builder
+        .open_memory("lwcb", &mem_obj)
+        .expect("failed to open object");
+    let mut loaded_object = object
+        .load()
+        .expect("failed to load eBPF program into kernel");
+    loaded_object
+}
+
+fn attach_program(object: &mut libbpf_rs::Object) -> Vec<libbpf_rs::Link> {
+    let mut res = vec![];
+    for prog in object.progs_iter_mut() {
+        res.push(prog.attach().unwrap());
     }
-
-    lwbt.set_astdump(opts.astdump);
-
-    if let Some(c) = content {
-        lwbt.compile(&c)?;
-        lwbt.generate_bytecode()?;
-
-        lwbt.attach()?;
-
-        lwbt.poll();
-    }
-    Ok(())
+    res
 }
