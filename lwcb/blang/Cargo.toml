@@ -17,3 +17,4 @@ bpfir = { path = "../bpfir" }
 cranelift-frontend = "0.99.1"
 cranelift-codegen = { version = "0.99.1", features = ["riscv64", "arm64"] }
 cranelift-module = "0.99.2"
+byteorder = "1.4.3"

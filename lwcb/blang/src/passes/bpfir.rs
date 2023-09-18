@@ -1,6 +1,10 @@
+use crate::call::Call;
 use crate::parser::Ast;
 use crate::parser::Expr;
 use crate::parser::ExprKind;
+use crate::print::Print;
+use crate::BLangBuilder;
+use crate::__PERF_EVENT_MAP__;
 use anyhow::bail;
 use anyhow::Result;
 use bpfir::module::Module;
@@ -17,7 +21,6 @@ use cranelift_codegen::ir::MemFlags;
 use cranelift_codegen::ir::StackSlotData;
 use cranelift_codegen::ir::StackSlotKind;
 use cranelift_codegen::ir::Value;
-use cranelift_codegen::Context;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_frontend::Variable;
@@ -28,6 +31,7 @@ struct LocalContext {
     vars: HashMap<String, Variable>,
     vars_cnt: u32,
     module: Module,
+    prints: Vec<Print>,
 }
 
 impl LocalContext {
@@ -48,6 +52,10 @@ impl LocalContext {
         }
     }
 
+    pub fn get_ctx(&self) -> Variable {
+        *self.vars.get("ctx").unwrap()
+    }
+
     fn new_var(&mut self) -> Variable {
         self.vars_cnt += 1;
         Variable::from_u32(self.vars_cnt)
@@ -66,12 +74,14 @@ impl LocalContext {
     }
 }
 
-pub fn gen_bpfir(ast: &Ast) -> Result<Module> {
+pub fn gen_bpfir(bb: &mut BLangBuilder, ast: &Ast) -> Result<Module> {
     let mut ctx = LocalContext::default();
 
     for expr in &ast.exprs {
         gen_func(&mut ctx, expr).unwrap();
     }
+
+    bb.prints = ctx.prints;
     return Ok(ctx.module);
 }
 
@@ -277,9 +287,10 @@ fn gen_expr_val(ctx: &mut LocalContext, fb: &mut FunctionBuilder, expr: &Expr) -
             }
         }
         ExprKind::Cast(from, to) => gen_expr_val(ctx, fb, from),
-        ExprKind::Call(c, args) => {
-            todo!()
-        }
+        ExprKind::Call(c, args) => match c {
+            Call::Print => gen_call_print(ctx, fb, args),
+            _ => todo!(),
+        },
         ExprKind::Member(p, s, _) => {
             let addr = gen_expr_addr(ctx, fb, expr)?;
             let val = fb
@@ -324,6 +335,38 @@ fn gen_expr_addr(ctx: &mut LocalContext, fb: &mut FunctionBuilder, expr: &Expr) 
 
 fn gen_load(ctx: &mut LocalContext, fb: &mut FunctionBuilder, addr: Value, ty: &bpfir::Type) {}
 
+fn gen_call_print(
+    ctx: &mut LocalContext,
+    fb: &mut FunctionBuilder,
+    args: &Vec<Expr>,
+) -> Result<Value> {
+    let mut values = vec![];
+    let mut offsets = vec![];
+
+    let mut print = Print::new();
+
+    // print id
+    values.push(fb.ins().iconst(I64, ctx.prints.len() as i64));
+    offsets.push(print.add_type(&bpfir::Type::i64()));
+
+    for arg in args {
+        values.push(gen_expr_val(ctx, fb, arg)?);
+        offsets.push(print.add_type(&arg.ty));
+    }
+
+    let addr = values_to_stack(fb, &values, &offsets, print.sz as i32);
+    let fr = ctx.find_helper_function(libbpf_sys::BPF_FUNC_perf_event_output, fb);
+
+    let ctx_val = fb.use_var(ctx.get_ctx());
+    let map = ctx.find_map(__PERF_EVENT_MAP__, bpfir::Type::i64(), fb);
+    let sz = fb.ins().iconst(I64, print.sz as i64);
+    let flag = fb.ins().iconst(types::I64, 0xffffffff);
+    let inst = fb.ins().call(fr, &vec![ctx_val, map, flag, addr, sz]);
+
+    ctx.prints.push(print);
+    Ok(fb.inst_results(inst)[0])
+}
+
 // Store the value on the stack and return the stack address
 fn value_to_stack(fb: &mut FunctionBuilder, val: Value, ty: &bpfir::Type) -> Value {
     let ss = fb.create_sized_stack_slot(StackSlotData::new(
@@ -332,6 +375,21 @@ fn value_to_stack(fb: &mut FunctionBuilder, val: Value, ty: &bpfir::Type) -> Val
     ));
     let addr = fb.ins().stack_addr(I64, ss, 0);
     let _ = fb.ins().stack_store(val, ss, 0);
+    addr
+}
+
+fn values_to_stack(
+    fb: &mut FunctionBuilder,
+    values: &Vec<Value>,
+    off: &Vec<i32>,
+    sz: i32,
+) -> Value {
+    let ss = fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, sz as u32));
+    let addr = fb.ins().stack_addr(I64, ss, 0);
+
+    for (&value, &off) in values.iter().zip(off) {
+        let _ = fb.ins().stack_store(value, ss, off);
+    }
     addr
 }
 

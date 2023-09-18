@@ -1,8 +1,8 @@
+use crate::btf::BTF;
 use crate::call::Call;
 use crate::parser::Ast;
 use crate::parser::Expr;
 use crate::parser::ExprKind;
-use crate::btf::BTF;
 use bpfir::types::BinaryOp;
 use bpfir::types::Type;
 use bpfir::types::TypeKind;
@@ -162,7 +162,7 @@ fn type_check_expr(tc: &mut LocalContext, expr: &mut Expr) {
             if let Some(x) = e.as_mut() {
                 type_check_expr(tc, x);
             }
-        },
+        }
         ExprKind::LitStr(_) => {
             expr.ty = Type::string();
         }
@@ -179,8 +179,8 @@ fn type_check_expr(tc: &mut LocalContext, expr: &mut Expr) {
                         .btf
                         .find_member(tc.btf.find_by_name(x).unwrap(), i)
                         .expect("failed to resolve type");
-                    
-                        *attr = Some(ma);
+
+                    *attr = Some(ma);
 
                     expr.ty = tc.btf.to_type(id);
                     return;
@@ -255,18 +255,10 @@ fn type_check_expr_bianry(
                 panic!("map is not a identifier");
             }
         }
-        BinaryOp::Add => {
-            l.ty.clone()
-        }
-        BinaryOp::Sub => {
-            l.ty.clone()
-        }
-        BinaryOp::Div => {
-            l.ty.clone()
-        }
-        BinaryOp::Mult => {
-            l.ty.clone()
-        }
+        BinaryOp::Add => l.ty.clone(),
+        BinaryOp::Sub => l.ty.clone(),
+        BinaryOp::Div => l.ty.clone(),
+        BinaryOp::Mult => l.ty.clone(),
         _ => {
             todo!("not implment {op}");
         }
@@ -274,5 +266,10 @@ fn type_check_expr_bianry(
 }
 
 fn type_check_expr_call(tc: &mut LocalContext, c: &Call, args: &mut Vec<Expr>) {
-    todo!()
+    for arg in args {
+        type_check_expr(tc, arg);
+    }
+    match c {
+        _ => {}
+    }
 }

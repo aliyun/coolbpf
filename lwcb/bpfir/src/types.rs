@@ -142,6 +142,16 @@ impl Type {
     pub fn map(ty: libbpf_rs::MapType, entries: u32, key: Type, val: Type) -> Self {
         Type::new(TypeKind::Map(ty, entries, Box::new(key), Box::new(val)))
     }
+
+    pub fn size(&self) -> i32 {
+        match self.kind {
+            TypeKind::Bool | TypeKind::Char | TypeKind::I8 | TypeKind::U8 => 1,
+            TypeKind::I16 | TypeKind::U16 => 2,
+            TypeKind::I32 | TypeKind::U32 => 4,
+            TypeKind::I64 | TypeKind::U64 | TypeKind::Ptr(_) => 8,
+            _ => todo!("{:?}", self),
+        }
+    }
 }
 
 impl ToString for Type {

@@ -5,10 +5,12 @@ use crate::parser::Ast;
 use crate::passes::bpfir::gen_bpfir;
 use crate::passes::typecheck::type_check;
 use crate::passes::unfold;
+use crate::print::Print;
 
 pub struct BLang {
     code: String,
     object: Vec<u8>,
+    pub prints: Vec<Print>,
 }
 
 impl BLang {
@@ -25,6 +27,7 @@ pub struct BLangBuilder {
     code: String,
     btf_path: Option<String>,
     dump_ir: bool,
+    pub(crate) prints: Vec<Print>,
 }
 
 impl BLangBuilder {
@@ -33,6 +36,7 @@ impl BLangBuilder {
             code,
             btf_path: None,
             dump_ir: false,
+            prints: vec![],
         }
     }
 
@@ -46,15 +50,15 @@ impl BLangBuilder {
         self
     }
 
-    pub fn build(self) -> BLang {
+    pub fn build(mut self) -> BLang {
         let mut compile = true;
 
-        let btf = BTF::from_path(self.btf_path.expect("Please specify btf path"));
+        let btf = BTF::from_path(self.btf_path.as_ref().expect("Please specify btf path"));
 
         let mut ast = Ast::from(self.code.as_str());
         unfold::unfold(&btf, &mut ast);
         type_check(&btf, &mut ast);
-        let m = gen_bpfir(&ast).expect("Failed to generate bpf ir");
+        let m = gen_bpfir(&mut self, &ast).expect("Failed to generate bpf ir");
         let mut object = vec![];
 
         if self.dump_ir {
@@ -68,18 +72,19 @@ impl BLangBuilder {
         BLang {
             code: self.code,
             object,
+            prints: self.prints,
         }
     }
 
-    pub fn build_with_output(self, out: &mut impl Write) -> BLang {
+    pub fn build_with_output(mut self, out: &mut impl Write) -> BLang {
         let mut compile = true;
 
-        let btf = BTF::from_path(self.btf_path.expect("Please specify btf path"));
+        let btf = BTF::from_path(self.btf_path.as_ref().expect("Please specify btf path"));
 
         let mut ast = Ast::from(self.code.as_str());
         unfold::unfold(&btf, &mut ast);
         type_check(&btf, &mut ast);
-        let m = gen_bpfir(&ast).expect("Failed to generate bpf ir");
+        let m = gen_bpfir(&mut self, &ast).expect("Failed to generate bpf ir");
         let mut object = vec![];
 
         if self.dump_ir {
@@ -94,6 +99,7 @@ impl BLangBuilder {
         BLang {
             code: self.code,
             object,
+            prints: self.prints,
         }
     }
 }

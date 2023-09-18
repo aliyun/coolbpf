@@ -36,7 +36,7 @@ impl<'a> BTF<'a> {
                         if y.cmp(name) == Ordering::Equal {
                             let ma = match mem.attr {
                                 MemberAttr::Normal { offset } => parser::MemberAttr {
-                                    offset: offset/8,
+                                    offset: offset / 8,
                                     bitfield_offset: 0,
                                     bitfield_size: 0,
                                 },

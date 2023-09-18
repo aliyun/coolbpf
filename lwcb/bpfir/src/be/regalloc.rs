@@ -298,6 +298,6 @@ fn regalloc_emit_inst(inst: &BPFInst, allocs: &[Allocation]) -> BPFInst {
         BPFInst::JmpA(off) => inst.clone(),
         BPFInst::Call(id) => inst.clone(),
         BPFInst::Exit => inst.clone(),
-        BPFInst::PlaceHolder => inst.clone(),// panic!("BUG: BPFInst::PlaceHolder should not be here"),
+        BPFInst::PlaceHolder => inst.clone(), // panic!("BUG: BPFInst::PlaceHolder should not be here"),
     }
 }
