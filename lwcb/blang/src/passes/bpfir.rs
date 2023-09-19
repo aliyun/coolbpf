@@ -283,7 +283,15 @@ fn gen_expr_val(ctx: &mut LocalContext, fb: &mut FunctionBuilder, expr: &Expr) -
                     let rval = gen_expr_val(ctx, fb, r)?;
                     return Ok(to_clif_binary(fb, op, lval, rval));
                 }
-                _ => panic!("Relation binary op should not be handled here"),
+                BinaryOp::LT
+                | BinaryOp::LTE
+                | BinaryOp::GT
+                | BinaryOp::GTE
+                | BinaryOp::NonEqual
+                | BinaryOp::Equal => {
+                    return gen_expr_cf(ctx, fb, expr);
+                }
+                _ => todo!(),
             }
         }
         ExprKind::Cast(from, to) => gen_expr_val(ctx, fb, from),
@@ -411,6 +419,7 @@ fn type_size(ty: &bpfir::Type) -> u32 {
 
 fn to_clif_type(ty: &bpfir::Type) -> types::Type {
     match ty.kind {
+        TypeKind::Bool => types::I8,
         TypeKind::I8 => types::I8,
         TypeKind::U8 => types::I8,
         TypeKind::I16 => types::I16,

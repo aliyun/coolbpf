@@ -271,7 +271,13 @@ fn type_check_expr_bianry(
         BinaryOp::Sub => l.ty.clone(),
         BinaryOp::Div => l.ty.clone(),
         BinaryOp::Mult => l.ty.clone(),
-        BinaryOp::Equal => Type::bool(),
+        BinaryOp::Equal
+        | BinaryOp::GT
+        | BinaryOp::NonEqual
+        | BinaryOp::GTE
+        | BinaryOp::LT
+        | BinaryOp::LTE => Type::bool(),
+
         _ => {
             todo!("not implment {op}");
         }
