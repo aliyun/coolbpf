@@ -136,3 +136,18 @@ fn test_relation_lt() {
 fn test_relation_lte() {
     run_one_test("relation_lte.cb");
 }
+
+#[test]
+fn test_if_empty() {
+    run_one_test("if_empty.cb");
+}
+
+#[test]
+fn test_if_then() {
+    run_one_test("if_then.cb");
+}
+
+#[test]
+fn test_if_then_else() {
+    run_one_test("if_then_else.cb");
+}
