@@ -41,8 +41,8 @@ impl<'a> BTF<'a> {
                                     bitfield_size: 0,
                                 },
                                 MemberAttr::BitField { size, offset } => parser::MemberAttr {
-                                    offset: 0,
-                                    bitfield_offset: offset as u16,
+                                    offset: offset / 8,
+                                    bitfield_offset: (offset % 8) as u16,
                                     bitfield_size: size as u16,
                                 },
                             };
@@ -123,7 +123,8 @@ impl<'a> BTF<'a> {
     }
 
     pub fn to_type(&self, id: u32) -> Type {
-        let bt = self.btf.type_by_id::<BtfType>(TypeId::from(id)).unwrap();
+        let mut bt = self.btf.type_by_id::<BtfType>(TypeId::from(id)).unwrap();
+        bt = bt.skip_mods_and_typedefs();
         match bt.kind() {
             BtfKind::Struct => Type::struct_(to_string(&bt)),
             BtfKind::Int => {
@@ -202,5 +203,16 @@ mod tests {
         let btf = BTF::from_path("../tests/bin/vmlinux");
         let id = btf.find_by_name("sock");
         assert!(btf.find_member(id.unwrap(), "__sk_common").is_some());
+    }
+
+    #[test]
+    fn find_member_bitfield() {
+        let btf = BTF::from_path("../tests/bin/vmlinux");
+        let id = btf.find_by_name("tcphdr").unwrap();
+        let (_, ma) = btf.find_member(id, "res1").unwrap();
+
+        assert_eq!(ma.offset, 12);
+        assert_eq!(ma.bitfield_offset, 0);
+        assert_eq!(ma.bitfield_size, 4);
     }
 }
