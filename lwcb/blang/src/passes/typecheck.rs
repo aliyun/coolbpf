@@ -174,12 +174,24 @@ fn type_check_expr(tc: &mut LocalContext, expr: &mut Expr) {
                 ..
             } = s.as_ref()
             {
-                if let TypeKind::Struct(x) = &p.ty.kind {
+                let mut ty = &p.ty;
+                // For structure pointers, we can automatically dereference
+                if let TypeKind::Ptr(t) = &ty.kind {
+                    ty = t;
+                }
+
+                if let TypeKind::Struct(x) = &ty.kind {
                     let (id, ma) = tc
                         .btf
                         .find_member(tc.btf.find_by_name(x).unwrap(), i)
                         .expect("failed to resolve type");
 
+                    log::debug!(
+                        "member {i} offset: {}, bitfield_offset: {}, bitfield_size: {}",
+                        ma.offset,
+                        ma.bitfield_offset,
+                        ma.bitfield_size
+                    );
                     *attr = Some(ma);
 
                     expr.ty = tc.btf.to_type(id);
@@ -259,6 +271,7 @@ fn type_check_expr_bianry(
         BinaryOp::Sub => l.ty.clone(),
         BinaryOp::Div => l.ty.clone(),
         BinaryOp::Mult => l.ty.clone(),
+        BinaryOp::Equal => Type::bool(),
         _ => {
             todo!("not implment {op}");
         }
