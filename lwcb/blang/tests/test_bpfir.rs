@@ -96,3 +96,13 @@ fn test_unary_neg() {
 fn test_call_print() {
     run_one_test("call_print.cb");
 }
+
+#[test]
+fn test_member_simpile() {
+    run_one_test("member_simple.cb");
+}
+
+#[test]
+fn test_member_complex() {
+    run_one_test("member_complex.cb");
+}
