@@ -106,3 +106,33 @@ fn test_member_simpile() {
 fn test_member_complex() {
     run_one_test("member_complex.cb");
 }
+
+#[test]
+fn test_relation_eq() {
+    run_one_test("relation_eq.cb");
+}
+
+#[test]
+fn test_relation_neq() {
+    run_one_test("relation_neq.cb");
+}
+
+#[test]
+fn test_relation_gt() {
+    run_one_test("relation_gt.cb");
+}
+
+#[test]
+fn test_relation_gte() {
+    run_one_test("relation_gte.cb");
+}
+
+#[test]
+fn test_relation_lt() {
+    run_one_test("relation_lt.cb");
+}
+
+#[test]
+fn test_relation_lte() {
+    run_one_test("relation_lte.cb");
+}

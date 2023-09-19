@@ -1,0 +1,39 @@
+
+$
+function u0:0(i64) -> i64 system_v {
+block0(v0: i64):
+    v1 = iadd_imm v0, 112
+    v2 = load.i64 notrap aligned v1
+    v3 = iadd_imm v0, 104
+    v4 = load.i64 notrap aligned v3
+    v5 = iadd_imm v0, 96
+    v6 = load.i64 notrap aligned v5
+    v7 = iadd_imm v0, 88
+    v8 = load.i64 notrap aligned v7
+    v9 = iconst.i32 5
+    v10 = iconst.i32 5
+    v11 = icmp sgt v9, v10  ; v9 = 5, v10 = 5
+    v12 = iconst.i32 5
+    v13 = icmp sgt v9, v12  ; v9 = 5, v12 = 5
+    v14 = iconst.i32 5
+    v15 = icmp sgt v14, v9  ; v14 = 5, v9 = 5
+    v16 = iadd_imm v4, 444
+    v17 = load.i32 notrap aligned v16
+    v18 = icmp sgt v9, v17  ; v9 = 5
+    v19 = iadd_imm v4, 444
+    v20 = load.i32 notrap aligned v19
+    v21 = icmp sgt v20, v9  ; v9 = 5
+    v22 = iconst.i64 0
+    return v22  ; v22 = 0
+}
+$
+
+kprobe:tcp_sendmsg {
+    a = 5;
+    b = 5;
+    c = a > b;
+    d = a > 5;
+    e = 5 > a;
+    f = a > sk.sk_priority;
+    g = sk.sk_priority > a;
+}
