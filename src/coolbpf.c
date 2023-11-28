@@ -140,7 +140,7 @@ pthread_t initial_perf_thread(struct perf_thread_arguments *args)
         return -ENOMEM;
 
     memcpy(args_copy, args, sizeof(struct perf_thread_arguments));
-    pthread_create(&thread, NULL, perf_thread_worker, args);
+    pthread_create(&thread, NULL, perf_thread_worker, args_copy);
     return thread;
 }
 
