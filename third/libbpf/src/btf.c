@@ -1161,9 +1161,9 @@ retry_load:
 		}
 
 		err = -errno;
-		pr_warn("Error loading BTF: %s(%d)\n", strerror(errno), errno);
+		pr_debug("Error loading BTF: %s(%d)\n", strerror(errno), errno);
 		if (*log_buf)
-			pr_warn("%s\n", log_buf);
+			pr_debug("%s\n", log_buf);
 		goto done;
 	}
 

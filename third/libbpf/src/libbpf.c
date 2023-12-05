@@ -3022,7 +3022,7 @@ static int bpf_object__sanitize_and_load_btf(struct bpf_object *obj)
 report:
 	if (err) {
 		btf_mandatory = kernel_needs_btf(obj);
-		pr_warn("Error loading .BTF into kernel: %d. %s\n", err,
+		pr_debug("Error loading .BTF into kernel: %d. %s\n", err,
 			btf_mandatory ? "BTF is mandatory, can't proceed."
 				      : "BTF is optional, ignoring.");
 		if (!btf_mandatory)
