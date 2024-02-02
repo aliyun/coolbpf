@@ -228,7 +228,7 @@ int btf_get_member_offset(struct btf *btf, char *name, char *member_name)
     int typeid = btf_type_by_name(btf, name);
     const struct btf_type *t;
     const struct btf_member *m;
-    char *tmp_member_name;
+    const char *tmp_member_name;
     int i;
     
     if (typeid < 0)
