@@ -1,0 +1,3 @@
+add_executable(raw_bytecode raw_bytecode.c)
+target_include_directories(raw_bytecode PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(raw_bytecode PRIVATE coolbpf)

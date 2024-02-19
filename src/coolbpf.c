@@ -25,6 +25,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/utsname.h>
+#include <linux/version.h>
 
 #include "coolbpf.h"
 uint32_t coolbpf_major_version(void)
@@ -159,5 +161,17 @@ int bump_memlock_rlimit(void)
     };
 
     return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
+}
+
+unsigned int get_kernel_version(void)
+{
+	__u32 major, minor, patch, version;
+	struct utsname info;
+
+	uname(&info);
+	if (sscanf(info.release, "%u.%u.%u", &major, &minor, &patch) != 3)
+		return 0;
+
+	return KERNEL_VERSION(major, minor, patch);
 }
 #endif

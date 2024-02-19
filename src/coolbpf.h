@@ -206,6 +206,13 @@ COOLBPF_API int kill_perf_thread(pthread_t thread);
  */
 int bump_memlock_rlimit(void);
 
+/**
+ * @brief get kernel version number
+ * 
+ * @return unsigned int
+ */
+unsigned int get_kernel_version(void);
+
 #endif
 
 #endif
