@@ -31,3 +31,11 @@ Test(btfparse, btf_get_member_offset)
     cr_assert_eq(btf_get_member_offset(btf, "struct sock", "__sk_common"), 0);
     cr_assert_gt(btf_get_member_offset(btf, "struct sock", "sk_sndbuf"), 0);
 }
+
+
+Test(btfparse, btf_get_member_offset_union)
+{
+    struct btf *btf = btf_load(NULL);
+    cr_assert_gt(btf_get_member_offset(btf, "struct page", "mapping"), 0);
+    cr_assert_gt(btf_get_member_offset(btf, "struct kernfs_node", "name"), 0);
+}

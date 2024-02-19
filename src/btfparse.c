@@ -195,21 +195,24 @@ free_ma:
     return NULL;
 }
 
-int btf_type_find_struct(struct btf *btf, char *name) {
+int btf_type_find_struct(struct btf *btf, char *name)
+{
     return btf__find_by_name_kind(btf, name, BTF_KIND_STRUCT);
 }
 
-int btf_type_struct_size(struct btf *btf, char *name) {
+int btf_type_struct_size(struct btf *btf, char *name)
+{
     int typeid = btf_type_find_struct(btf, name);
     if (typeid < 0)
         return typeid;
-    
+
     return btf__resolve_size(btf, typeid);
 }
 
 int btf_type_size(struct btf *btf, char *typename)
 {
-    if (strncmp(typename, "struct", strlen("struct")) == 0) {
+    if (strncmp(typename, "struct", strlen("struct")) == 0)
+    {
         return btf_type_struct_size(btf, &typename[strlen("struct ")]);
     }
     return -ENOTSUP;
@@ -217,31 +220,43 @@ int btf_type_size(struct btf *btf, char *typename)
 
 int btf_type_by_name(struct btf *btf, char *name)
 {
-    if (strncmp(name, "struct", strlen("struct")) == 0) {
+    if (strncmp(name, "struct", strlen("struct")) == 0)
+    {
         return btf_type_find_struct(btf, &name[strlen("struct ")]);
     }
     return -ENOTSUP;
 }
 
-int btf_get_member_offset(struct btf *btf, char *name, char *member_name)
+int __btf_get_member_offset(struct btf *btf, int typeid, char *member_name)
 {
-    int typeid = btf_type_by_name(btf, name);
     const struct btf_type *t;
-    const struct btf_member *m;
     const char *tmp_member_name;
+    const struct btf_member *m;
     int i;
-    
-    if (typeid < 0)
-        return typeid;
-    
+
     t = btf__type_by_id(btf, typeid);
     m = btf_members(t);
     for (i = 0; i < btf_vlen(t); i++, m++)
     {
+        if (m->name_off == 0)
+        {
+            int tmp_offset = __btf_get_member_offset(btf, m->type, member_name);
+            if (tmp_offset >= 0) // find it
+                return m->offset + tmp_offset;
+        }
         tmp_member_name = btf__name_by_offset(btf, m->name_off);
         if (tmp_member_name && tmp_member_name[0] && strcmp(tmp_member_name, member_name) == 0)
             return m->offset;
     }
-
     return -ENOENT;
+}
+
+int btf_get_member_offset(struct btf *btf, char *name, char *member_name)
+{
+    int typeid = btf_type_by_name(btf, name);
+
+    if (typeid < 0)
+        return typeid;
+
+    return __btf_get_member_offset(btf, typeid, member_name);
 }
