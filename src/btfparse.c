@@ -232,21 +232,24 @@ int __btf_get_member_offset(struct btf *btf, int typeid, char *member_name)
     const struct btf_type *t;
     const char *tmp_member_name;
     const struct btf_member *m;
+    bool kflag;
     int i;
 
     t = btf__type_by_id(btf, typeid);
     m = btf_members(t);
+    kflag = btf_kflag(t);
+
     for (i = 0; i < btf_vlen(t); i++, m++)
     {
         if (m->name_off == 0)
         {
             int tmp_offset = __btf_get_member_offset(btf, m->type, member_name);
             if (tmp_offset >= 0) // find it
-                return m->offset + tmp_offset;
+                return (kflag ? BTF_MEMBER_BIT_OFFSET(m->offset) : m->offset) + tmp_offset;
         }
         tmp_member_name = btf__name_by_offset(btf, m->name_off);
         if (tmp_member_name && tmp_member_name[0] && strcmp(tmp_member_name, member_name) == 0)
-            return m->offset;
+            return kflag ? BTF_MEMBER_BIT_OFFSET(m->offset) : m->offset;
     }
     return -ENOENT;
 }
