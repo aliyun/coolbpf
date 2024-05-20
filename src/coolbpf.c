@@ -48,11 +48,21 @@ const char *coolbpf_version_string(void)
 #undef __S
 }
 
+int bump_memlock_rlimit(void)
+{
+    struct rlimit rlim_new = {
+        .rlim_cur = RLIM_INFINITY,
+        .rlim_max = RLIM_INFINITY,
+    };
+
+    return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
+}
+
 int coolbpf_object_load(struct coolbpf_object *cb)
 {
-    int err = 0;
+    int err = bump_memlock_rlimit();
     if (cb->preload)
-        err = cb->preload(cb->ctx, cb->skel_obj);
+        err = err ?: cb->preload(cb->ctx, cb->skel_obj);
     err = err ?: cb->skel_load(cb->skel_obj);
     return err;
 }
@@ -85,7 +95,6 @@ int coolbpf_create_perf_thread(struct coolbpf_object *cb, const char *perfmap_na
 {
     return 0;
 }
-
 
 void *perf_thread_worker(void *ctx)
 {
@@ -153,25 +162,15 @@ int kill_perf_thread(pthread_t thread)
     return 0;
 }
 
-int bump_memlock_rlimit(void)
-{
-    struct rlimit rlim_new = {
-        .rlim_cur = RLIM_INFINITY,
-        .rlim_max = RLIM_INFINITY,
-    };
-
-    return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
-}
-
 unsigned int get_kernel_version(void)
 {
-	__u32 major, minor, patch, version;
-	struct utsname info;
+    __u32 major, minor, patch, version;
+    struct utsname info;
 
-	uname(&info);
-	if (sscanf(info.release, "%u.%u.%u", &major, &minor, &patch) != 3)
-		return 0;
+    uname(&info);
+    if (sscanf(info.release, "%u.%u.%u", &major, &minor, &patch) != 3)
+        return 0;
 
-	return KERNEL_VERSION(major, minor, patch);
+    return KERNEL_VERSION(major, minor, patch);
 }
 #endif
