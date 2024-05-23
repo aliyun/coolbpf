@@ -1268,7 +1268,7 @@ static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
 {
   int bytes_sent = 0;
 
-#pragma unroll
+#pragma unroll(VEC_LEN)
   for (int i = 0; i < VEC_LEN && i < iovlen && bytes_sent < total_size; ++i)
   {
     struct iovec iov_cpy;
