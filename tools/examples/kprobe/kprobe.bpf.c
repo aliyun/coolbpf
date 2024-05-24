@@ -1,7 +1,7 @@
 
 
 #include <vmlinux.h>
-#include <coolbpf/coolbpf.h>
+#include "coolbpf.h"
 
 SEC("kprobe/tcp_sendmsg")
 int BPF_KPROBE(tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)

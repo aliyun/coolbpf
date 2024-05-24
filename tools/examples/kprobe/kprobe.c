@@ -1,6 +1,6 @@
 
 #include <unistd.h>
-#include <coolbpf/coolbpf.h>
+#include "coolbpf.h"
 #include "kprobe.skel.h"
 
 int main()

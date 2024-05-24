@@ -3,7 +3,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <linux/perf_event.h>
-#include <coolbpf/coolbpf.h>
+#include "coolbpf.h"
 
 int main(void)
 {

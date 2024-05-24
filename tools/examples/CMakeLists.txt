@@ -1,4 +1,6 @@
+include_directories(${PROJECT_SOURCE_DIR}/src)
 add_subdirectory(asm)
 add_subdirectory(kprobe)
 add_subdirectory(raw_bytecode)
 add_subdirectory(syscall)
+add_subdirectory(net)

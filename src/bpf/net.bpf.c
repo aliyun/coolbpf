@@ -993,6 +993,51 @@ static __always_inline bool need_trace_protocol(const struct connect_info_t *con
   return config;
 }
 
+static __always_inline struct socket *get_socket_by_fd(int fd)
+{
+  struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+  struct fdtable *fdt, __fdt;
+  struct files_struct *files;
+  struct file *file;
+  void *private_data;
+  struct socket *socket, __socket;
+  short socket_type;
+
+  bpf_probe_read_kernel(&files, sizeof(files), &task->files);
+  bpf_probe_read_kernel(&fdt, sizeof(fdt), &files->fdt);
+  bpf_probe_read_kernel(&__fdt, sizeof(__fdt), (void *)fdt);
+  bpf_probe_read_kernel(&file, sizeof(file), __fdt.fd + fd);
+  bpf_probe_read_kernel(&private_data,
+                        sizeof(private_data),
+                        &file->private_data);
+  socket = private_data;
+  bpf_probe_read_kernel(&__socket,
+                        sizeof(__socket),
+                        (void *)socket);
+
+  socket_type = __socket.type;
+  if (__socket.file == file && (socket_type == SOCK_STREAM || socket_type == SOCK_DGRAM))
+  {
+    return socket;
+  }
+  return NULL;
+}
+
+static __always_inline void parse_socket_info(struct socket *socket, struct socket_info *si)
+{
+  // TODO(qianlu)
+}
+
+static __always_inline enum support_role_e get_sock_role(struct socket *socket)
+{
+  struct sock *sk;
+  u32 max_ack_backlog;
+  bpf_probe_read_kernel(&sk, sizeof(sk), &socket->sk);
+  bpf_probe_read_kernel(&max_ack_backlog, sizeof(max_ack_backlog), &sk->sk_max_ack_backlog);
+
+  return max_ack_backlog == 0 ? IsClient : IsServer;
+}
+
 static __always_inline void add_one_conn(struct trace_event_raw_sys_exit *ctx,
                                          const struct sockaddr *addr,
                                          const struct socket *socket,
@@ -1002,6 +1047,16 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit *ctx,
   uint32_t tgid = tg_role->tgid;
   int32_t fd = tg_role->fd;
   enum support_role_e role = tg_role->role;
+
+  socket = socket ? : get_socket_by_fd(fd);
+  if (socket != NULL)
+  {
+    if (role == IsUnknown)
+    {
+      role = get_sock_role(socket);
+    }
+    parse_socket_info(socket, &conn_info.si);
+  }
 
   init_conn_info(tgid, fd, &conn_info);
   if (addr != NULL)
@@ -1025,7 +1080,7 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit *ctx,
   {
     return;
   }
-
+#if 0
   // net_bpf_print("end ====add_conn\n");
   struct conn_ctrl_event_t ctrl_event = {};
   ctrl_event.type = EventConnect;
@@ -1038,6 +1093,7 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit *ctx,
     bpf_perf_event_output(ctx, &connect_ctrl_events_map, BPF_F_CURRENT_CPU,
                           &ctrl_event, sizeof(struct conn_ctrl_event_t));
   }
+#endif
 }
 
 static __always_inline void output_conn_stats(struct trace_event_raw_sys_exit *ctx,

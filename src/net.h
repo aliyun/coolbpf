@@ -1,5 +1,5 @@
 /*
- * Author: Chen Tao 
+ * Author: Chen Tao
  * Create: Sun Feb 20 20:32:45 2022
  */
 
@@ -133,6 +133,13 @@ struct test_data
   int ret_val;
 };
 
+struct socket_info
+{
+  struct addr_pair_t ap;
+  int family;
+  int netns;
+};
+
 union sockaddr_t
 {
   struct sockaddr sa;
@@ -178,6 +185,7 @@ struct conn_data_event_t
     uint64_t ts;
     struct connect_id_t conn_id;
     union sockaddr_t addr;
+    struct socket_info si;
     enum support_proto_e protocol;
     enum support_role_e role;
     enum support_type_e type;
@@ -197,6 +205,7 @@ struct conn_stats_event_t
   uint64_t ts;
   struct connect_id_t conn_id;
   union sockaddr_t addr;
+  struct socket_info si;
   enum support_role_e role;
   int64_t wr_bytes;
   int64_t rd_bytes;
@@ -213,6 +222,7 @@ struct connect_info_t
 {
   struct connect_id_t conn_id;
   union sockaddr_t addr;
+  struct socket_info si;
   enum support_proto_e protocol;
   enum support_role_e role;
   enum support_type_e type;

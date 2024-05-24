@@ -1,6 +1,6 @@
 
 #include <unistd.h>
-#include <coolbpf/coolbpf.h>
+#include "coolbpf.h"
 #include "asm.skel.h"
 
 int main()
