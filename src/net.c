@@ -136,10 +136,10 @@ void ebpf_setup_net_test_process_func(net_test_process_func_t func, void *custom
 }
 #endif
 
-void ebpf_setup_net_data_process_func(net_data_process_func_t func, void *custom_data)
+void ebpf_setup_net_info_process_func(net_info_process_func_t func, void *custom_data)
 {
-	env.callback[DATA_HAND].func = func;
-	env.callback[DATA_HAND].custom_data = custom_data;
+	env.callback[INFO_HANDLE].func = func;
+	env.callback[INFO_HANDLE].custom_data = custom_data;
 }
 
 void ebpf_setup_net_event_process_func(net_ctrl_process_func_t func, void *custom_data)
@@ -213,9 +213,9 @@ static void handle_lost_ctrl_event(void *ctx, int cpu, __u64 lost_cnt)
 static void handle_data_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
 	++g_poll_callback_count;
-	struct conn_data_event_t *info = (struct conn_data_event_t *)data;
-	void *custom_data = env.callback[DATA_HAND].custom_data;
-	env.callback[DATA_HAND].func(custom_data, info);
+	struct connect_info_t *info = (struct connect_info_t *)data;
+	void *custom_data = env.callback[INFO_HANDLE].custom_data;
+	env.callback[INFO_HANDLE].func(custom_data, info);
 }
 
 static void handle_lost_data_event(void *ctx, int cpu, __u64 lost_cnt)
@@ -227,7 +227,7 @@ static void handle_lost_data_event(void *ctx, int cpu, __u64 lost_cnt)
 	}
 	else
 	{
-		env.lost_callback.func(env.lost_callback.custom_data, DATA_HAND, lost_cnt);
+		env.lost_callback.func(env.lost_callback.custom_data, INFO_HANDLE, lost_cnt);
 	}
 }
 
@@ -442,8 +442,8 @@ int32_t ebpf_start(void)
 						  handle_ctrl_event, handle_lost_ctrl_event, &(env.pbs[CTRL_HAND]));
 	if (err)
 		return err;
-	err = set_events_cont(bpf_map__fd(obj->maps.connect_data_events_map), env.page_count[DATA_HAND],
-						  handle_data_event, handle_lost_data_event, &(env.pbs[DATA_HAND]));
+	err = set_events_cont(bpf_map__fd(obj->maps.connect_info_events_map), env.page_count[INFO_HANDLE],
+						  handle_data_event, handle_lost_data_event, &(env.pbs[INFO_HANDLE]));
 	if (err)
 		return err;
 	err = set_events_cont(bpf_map__fd(obj->maps.connect_stats_events_map), env.page_count[STAT_HAND],

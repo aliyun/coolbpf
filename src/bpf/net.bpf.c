@@ -13,7 +13,7 @@
 #define VEC_LEN 44
 #define TASK_COMM_LEN 16
 #define PROTO_LEN 128
-#define MAX_CONNECT_ENTRIES 262144
+#define MAX_CONNECT_ENTRIES 26214
 #define MAX_PARAM_ENTRIES 8192
 #define MAX_PROCESS_ENTRIES 8192
 #define MONGO_HEADER_LEN 16
@@ -129,7 +129,7 @@ struct
   __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
   __type(key, int);
   __type(value, int);
-} connect_data_events_map SEC(".maps");
+} connect_info_events_map SEC(".maps");
 
 struct
 {
@@ -149,17 +149,17 @@ struct
 {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __type(key, u32);
-  __type(value, struct conn_data_event_t);
+  __type(value, struct conn_stats_event_t);
   __uint(max_entries, 1);
-} connect_data_events_heap SEC(".maps");
+} connect_stats_events_heap SEC(".maps");
 
 struct
 {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __type(key, u32);
-  __type(value, struct conn_stats_event_t);
+  __type(value, struct connect_info_t);
   __uint(max_entries, 1);
-} connect_stats_events_heap SEC(".maps");
+} connect_info_heap SEC(".maps");
 
 /************
  * below are func for bpf
@@ -815,29 +815,72 @@ static __always_inline bool need_trace_family(uint16_t family)
   return family == AF_UNKNOWN || family == AF_INET || family == AF_INET6 || family == AF_UNIX;
 }
 
-static __always_inline struct conn_data_event_t *add_data_event(enum support_syscall_e src_fn,
-                                                                enum support_direction_e direction,
-                                                                const struct connect_info_t *conn_info)
+static __always_inline void handle_client_send_request(struct connect_info_t *info)
 {
-  uint32_t index = 0;
-  struct conn_data_event_t *event = bpf_map_lookup_elem(&connect_data_events_heap, &index);
-  if (event == NULL)
+  if (info->wr_min_ts != 0 && info->rd_min_ts != 0)
+    info->rt = info->rd_max_ts - info->wr_min_ts;
+}
+
+static __always_inline void handle_client_recv_response(struct connect_info_t *info)
+{
+  // do nothing
+}
+
+static __always_inline void handle_server_recv_request(struct connect_info_t *info)
+{
+  if (info->wr_min_ts != 0 && info->rd_min_ts != 0)
+    info->rt = (info->wr_max_ts - info->rd_min_ts);
+}
+
+static __always_inline void handle_server_send_response(struct connect_info_t *info)
+{
+  // do nothing
+}
+
+static __always_inline void handle_client_close(struct connect_info_t *info)
+{
+  handle_client_send_request(info);
+}
+
+static __always_inline void handle_server_close(struct connect_info_t *info)
+{
+  handle_server_recv_request(info);
+}
+
+static __always_inline void reset_sock_info(struct connect_info_t *info)
+{
+  info->wr_min_ts = 0;
+  info->wr_max_ts = 0;
+  info->rd_min_ts = 0;
+  info->rd_max_ts = 0;
+  info->rt = 0;
+  info->request_len = 0;
+  info->response_len = 0;
+}
+
+static __always_inline void try_event_output(void *ctx, struct connect_info_t *info, enum support_direction_e direction)
+{
+  if (info->rt)
   {
-    return NULL;
+    u64 total_size = (u64)(&info->msg[0]) - (u64)info + info->request_len + info->response_len;
+
+    bpf_perf_event_output(ctx, &connect_info_events_map, BPF_F_CURRENT_CPU, info, total_size & CONN_DATA_MAX_SIZE_MASK);
+    reset_sock_info(info);
   }
 
-  event->attr.ts = bpf_ktime_get_ns();
-  event->attr.syscall_func = src_fn;
-  event->attr.direction = direction;
-  event->attr.conn_id = conn_info->conn_id;
-  event->attr.protocol = conn_info->protocol;
-  event->attr.role = conn_info->role;
-  event->attr.pos = (direction == DirEgress) ? conn_info->wr_bytes : conn_info->rd_bytes;
-  event->attr.try_to_prepend = conn_info->try_to_prepend;
-  event->attr.type = conn_info->type;
-  bpf_probe_read(&event->attr.length_header, 4, conn_info->prev_buf);
-  event->attr.addr = conn_info->addr;
-  return event;
+  u64 ts = bpf_ktime_get_ns();
+  if (direction == DirEgress)
+  {
+    if (info->wr_min_ts == 0)
+      info->wr_min_ts = ts;
+    info->wr_max_ts = ts;
+  }
+  else if (direction == DirIngress)
+  {
+    if (info->rd_min_ts == 0)
+      info->rd_min_ts = ts;
+    info->rd_max_ts = ts;
+  }
 }
 
 static __always_inline struct conn_stats_event_t *add_conn_stats(struct connect_info_t *conn_info)
@@ -950,19 +993,24 @@ static __always_inline int filter_config_info(struct connect_info_t *conn_info)
 static __always_inline struct connect_info_t *build_conn_info(uint32_t tgid, int32_t fd)
 {
   uint64_t tgid_fd = combine_tgid_fd(tgid, fd);
-  struct connect_info_t new_conn_info = {};
-  init_conn_info(tgid, fd, &new_conn_info);
+  int key = 0;
+  struct connect_info_t *new_conn_info = bpf_map_lookup_elem(&connect_info_heap, &key);
+  if (!new_conn_info)
+  {
+    return NULL;
+  }
+  init_conn_info(tgid, fd, new_conn_info);
   long err;
 
   struct connect_info_t *tmp = (struct connect_info_t *)bpf_map_lookup_elem(&connect_info_map, &tgid_fd);
   if (tmp)
     return tmp;
 
-  if (filter_config_info(&new_conn_info))
+  if (filter_config_info(new_conn_info))
   {
     return NULL;
   }
-  err = bpf_map_update_elem(&connect_info_map, &tgid_fd, &new_conn_info, BPF_NOEXIST);
+  err = bpf_map_update_elem(&connect_info_map, &tgid_fd, new_conn_info, BPF_NOEXIST);
   if (err && err != -EEXIST)
     return NULL;
 
@@ -971,26 +1019,20 @@ static __always_inline struct connect_info_t *build_conn_info(uint32_t tgid, int
 
 static __always_inline bool need_trace_protocol(const struct connect_info_t *conn_info)
 {
-  if (conn_info->protocol == ProtoUnknown)
+  uint32_t protocol = conn_info->protocol;
+  uint64_t *tmp;
+  
+  if (protocol == ProtoUnknown)
   {
     return false;
   }
 
-  uint32_t protocol = conn_info->protocol;
-  uint64_t traced = 0;
-  uint64_t config;
-  uint64_t *tmp = (uint64_t *)bpf_map_lookup_elem(&config_protocol_map, &protocol);
+  tmp = (uint64_t *)bpf_map_lookup_elem(&config_protocol_map, &protocol);
   if (tmp != NULL)
-    bpf_probe_read(&config, sizeof(uint64_t), tmp);
-
-  if (bpf_map_update_elem(&config_protocol_map, &protocol, &traced, BPF_NOEXIST) == 0)
   {
-    tmp = (uint64_t *)bpf_map_lookup_elem(&config_protocol_map, &protocol);
-    bpf_probe_read(&config, sizeof(uint64_t), tmp);
+    return *tmp != 0;
   }
-
-  // return config & conn_info->role;
-  return config;
+  return false;
 }
 
 static __always_inline struct socket *get_socket_by_fd(int fd)
@@ -1028,7 +1070,7 @@ static __always_inline void parse_socket_info(struct socket *socket, struct sock
   // TODO(qianlu)
 }
 
-static __always_inline enum support_role_e get_sock_role(struct socket *socket)
+static __always_inline enum support_role_e get_sock_role(const struct socket *socket)
 {
   struct sock *sk;
   u32 max_ack_backlog;
@@ -1043,40 +1085,46 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit *ctx,
                                          const struct socket *socket,
                                          struct tg_info_t *tg_role)
 {
-  struct connect_info_t conn_info = {};
+  uint32_t key = 0;
+  struct connect_info_t *conn_info = bpf_map_lookup_elem(&connect_info_heap, &key);
+  if (!conn_info)
+  {
+    return;
+  }
+
   uint32_t tgid = tg_role->tgid;
   int32_t fd = tg_role->fd;
   enum support_role_e role = tg_role->role;
 
-  socket = socket ? : get_socket_by_fd(fd);
+  socket = socket ?: get_socket_by_fd(fd);
   if (socket != NULL)
   {
     if (role == IsUnknown)
     {
       role = get_sock_role(socket);
     }
-    parse_socket_info(socket, &conn_info.si);
+    parse_socket_info(socket, &conn_info->si);
   }
 
-  init_conn_info(tgid, fd, &conn_info);
+  init_conn_info(tgid, fd, conn_info);
   if (addr != NULL)
   {
-    bpf_probe_read(&conn_info.addr, sizeof(union sockaddr_t), addr);
+    bpf_probe_read(&conn_info->addr, sizeof(union sockaddr_t), addr);
   }
   else if (socket != NULL)
   {
-    get_sock_addr(&conn_info, socket);
+    get_sock_addr(conn_info, socket);
   }
-  if (filter_config_info(&conn_info))
+  if (filter_config_info(conn_info))
   {
     return;
   }
 
-  conn_info.role = role;
+  conn_info->role = role;
   uint64_t tgid_fd = combine_tgid_fd(tgid, fd);
   // net_bpf_print("start ====add_conn\n");
-  bpf_map_update_elem(&connect_info_map, &tgid_fd, &conn_info, BPF_ANY);
-  if (!need_trace_family(conn_info.addr.sa.sa_family))
+  bpf_map_update_elem(&connect_info_map, &tgid_fd, conn_info, BPF_ANY);
+  if (!need_trace_family(conn_info->addr.sa.sa_family))
   {
     return;
   }
@@ -1212,6 +1260,16 @@ static __always_inline void trace_exit_close(struct trace_event_raw_sys_exit *ct
   {
     return;
   }
+  enum support_role_e role = conn_info->role;
+  if (role == IsClient)
+  {
+    handle_client_close(conn_info);
+  }
+  else if (role == IsServer)
+  {
+    handle_server_close(conn_info);
+  }
+  try_event_output(ctx, conn_info, DirUnknown);
   /*
    * only family is AF_UNIX and no data will no report, but the bytes will be
    * recorded in first data event and report to user
@@ -1256,62 +1314,62 @@ static __always_inline void trace_exit_accept(struct trace_event_raw_sys_exit *c
   add_one_conn(ctx, accept_param->addr, accept_param->accept_socket, &tg_role);
 }
 
-static __always_inline void perf_output_user(struct trace_event_raw_sys_exit *ctx,
-                                             const enum support_direction_e direction,
-                                             const char *buf, size_t buf_size,
-                                             struct connect_info_t *conn_info,
-                                             struct conn_data_event_t *event)
+static __always_inline void output_buf(struct trace_event_raw_sys_exit *ctx,
+                                       const enum support_direction_e direction,
+                                       const char *buf,
+                                       size_t buf_size,
+                                       struct connect_info_t *conn_info)
 {
-  event->attr.org_msg_size = buf_size;
+  int bytes_sent = 0;
+  int bytes_left = 0;
+  int curr_offset = 0;
+  bool is_request;
+  unsigned int i;
+
+  if (conn_info->role == IsClient)
+  {
+    if (direction == DirEgress)
+    {
+      is_request = true;
+    }
+    else if (direction == DirIngress)
+    {
+      is_request = false;
+    }
+  }
+  else if (conn_info->role == IsServer)
+  {
+    if (direction == DirEgress)
+    {
+      is_request = false;
+    }
+    else if (direction == DirIngress)
+    {
+      is_request = true;
+    }
+  }
+
+  curr_offset = conn_info->request_len + conn_info->response_len;
+
+  if (is_request)
+  {
+    bytes_left = CONN_DATA_MAX_SIZE - conn_info->request_len;
+    buf_size = buf_size > bytes_left ? bytes_left : buf_size;
+    conn_info->request_len += buf_size;
+  }
+  else
+  {
+    bytes_left = CONN_DATA_MAX_SIZE - conn_info->response_len;
+    buf_size = buf_size > bytes_left ? bytes_left : buf_size;
+    conn_info->response_len += buf_size;
+  }
+
   if (buf_size == 0)
   {
     return;
   }
 
-  size_t buf_size_minus_1 = buf_size - 1;
-  asm volatile("" : "+r"(buf_size_minus_1) :);
-  buf_size = buf_size_minus_1 + 1;
-  size_t copied = 0;
-
-  if (buf_size_minus_1 < CONN_DATA_MAX_SIZE)
-  {
-    bpf_probe_read(&event->msg, buf_size, buf);
-    copied = buf_size;
-  }
-  else
-  {
-    bpf_probe_read(&event->msg, CONN_DATA_MAX_SIZE, buf);
-    copied = CONN_DATA_MAX_SIZE;
-  }
-
-  if (copied > 0)
-  {
-    event->attr.msg_buf_size = copied;
-    bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU,
-                          event, sizeof(event->attr) + copied);
-  }
-}
-
-static __always_inline void output_buf(struct trace_event_raw_sys_exit *ctx,
-                                       const enum support_direction_e direction,
-                                       const char *buf,
-                                       const size_t buf_size,
-                                       struct connect_info_t *conn_info,
-                                       struct conn_data_event_t *event)
-{
-  int bytes_sent = 0;
-  unsigned int i;
-
-#pragma unroll
-  for (i = 0; i < WRAPPER_LEN; ++i)
-  {
-    const int bytes_remain = buf_size - bytes_sent;
-    bool remain = bytes_remain > CONN_DATA_MAX_SIZE && (i != WRAPPER_LEN - 1);
-    const size_t current_size = remain ? CONN_DATA_MAX_SIZE : bytes_remain;
-    perf_output_user(ctx, direction, buf + bytes_sent, current_size, conn_info, event);
-    bytes_sent += current_size;
-    event->attr.pos += current_size;
-  }
+  bpf_probe_read(&conn_info->msg, buf_size & CONN_DATA_MAX_SIZE_MASK, buf);
 }
 
 static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
@@ -1319,22 +1377,68 @@ static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
                                          const struct iovec *iov,
                                          const size_t iovlen,
                                          const size_t total_size,
-                                         struct connect_info_t *conn_info,
-                                         struct conn_data_event_t *event)
+                                         struct connect_info_t *conn_info)
 {
-  int bytes_sent = 0;
+  u64 bytes_sent = 0;
+  u64 curr_offset = 0;
+  u64 bytes_left = 0;
+  u64 buf_size;
+  bool is_request;
+  int i;
+
+  if (conn_info->role == IsClient)
+  {
+    if (direction == DirEgress)
+    {
+      is_request = true;
+    }
+    else if (direction == DirIngress)
+    {
+      is_request = false;
+    }
+  }
+  else if (conn_info->role == IsServer)
+  {
+    if (direction == DirEgress)
+    {
+      is_request = false;
+    }
+    else if (direction == DirIngress)
+    {
+      is_request = true;
+    }
+  }
 
 #pragma unroll(VEC_LEN)
-  for (int i = 0; i < VEC_LEN && i < iovlen && bytes_sent < total_size; ++i)
+  for (i = 0; i < VEC_LEN && i < iovlen; ++i)
   {
     struct iovec iov_cpy;
     bpf_probe_read(&iov_cpy, sizeof(struct iovec), &iov[i]);
-    const int bytes_remain = total_size - bytes_sent;
-    bool remain = iov_cpy.iov_len < bytes_remain;
-    const size_t iov_size = remain ? iov_cpy.iov_len : bytes_remain;
-    perf_output_user(ctx, direction, iov_cpy.iov_base, iov_size, conn_info, event);
-    bytes_sent += iov_size;
-    event->attr.pos += iov_size;
+
+    curr_offset = conn_info->request_len + conn_info->response_len;
+    buf_size = iov_cpy.iov_len;
+    if (is_request)
+    {
+      bytes_left = CONN_DATA_MAX_SIZE - conn_info->request_len;
+      buf_size = buf_size > bytes_left ? bytes_left : buf_size;
+      conn_info->request_len += buf_size;
+    }
+    else
+    {
+      bytes_left = CONN_DATA_MAX_SIZE - conn_info->response_len;
+      buf_size = buf_size > bytes_left ? bytes_left : buf_size;
+      conn_info->response_len += buf_size;
+    }
+
+    if (buf_size == 0)
+    {
+      return;
+    }
+
+    if (curr_offset < CONN_DATA_MAX_SIZE_MASK - 4096 - 1)
+    {
+      bpf_probe_read(&conn_info->msg[curr_offset], buf_size & 4095, iov_cpy.iov_base);
+    }
   }
 }
 
@@ -1375,7 +1479,30 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit *ctx
   {
     return;
   }
-
+  enum support_role_e role = conn_info->role;
+  if (role == IsClient)
+  {
+    if (direction == DirEgress)
+    {
+      handle_client_send_request(conn_info);
+    }
+    else if (direction == DirIngress)
+    {
+      handle_client_recv_response(conn_info);
+    }
+  }
+  else if (role == IsServer)
+  {
+    if (direction == DirEgress)
+    {
+      handle_server_send_response(conn_info);
+    }
+    else if (direction == DirIngress)
+    {
+      handle_server_recv_request(conn_info);
+    }
+  }
+  try_event_output(ctx, conn_info, direction);
   output_conn_stats(ctx, conn_info, direction, return_bytes);
   if (!conn_info->is_sample)
   {
@@ -1400,19 +1527,13 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit *ctx
 
   if (need_trace_protocol(conn_info) || matched == TgidMatch)
   {
-    struct conn_data_event_t *event = add_data_event(data_param->syscall_func, direction, conn_info);
-    if (event == NULL)
-    {
-      return;
-    }
-
     if (!vecs)
     {
-      output_buf(ctx, direction, data_param->buf, return_bytes, conn_info, event);
+      output_buf(ctx, direction, data_param->buf, return_bytes, conn_info);
     }
     else
     {
-      output_iovec(ctx, direction, data_param->iov, data_param->iovlen, return_bytes, conn_info, event);
+      output_iovec(ctx, direction, data_param->iov, data_param->iovlen, return_bytes, conn_info);
     }
   }
   return;
@@ -2192,47 +2313,47 @@ int update_conn_role_probe(struct pt_regs *ctx)
 SEC("uprobe/ebpf_update_conn_addr")
 int update_conn_addr_probe(struct pt_regs *ctx)
 {
-  struct connect_id_t conn_id = {};
-  union sockaddr_t dest_addr = {};
-  struct connect_id_t *conn_id_pr = (struct connect_id_t *)PT_REGS_PARM1(ctx);
-  union sockaddr_t *dest_addr_pr = (union sockaddr_t *)PT_REGS_PARM2(ctx);
-  struct connect_info_t *conn_info;
-  struct connect_info_t new_conn = {};
-  uint16_t local_port = PT_REGS_PARM3(ctx);
-  bool drop = PT_REGS_PARM4(ctx);
+  // struct connect_id_t conn_id = {};
+  // union sockaddr_t dest_addr = {};
+  // struct connect_id_t *conn_id_pr = (struct connect_id_t *)PT_REGS_PARM1(ctx);
+  // union sockaddr_t *dest_addr_pr = (union sockaddr_t *)PT_REGS_PARM2(ctx);
+  // struct connect_info_t *conn_info;
+  // struct connect_info_t new_conn = {};
+  // uint16_t local_port = PT_REGS_PARM3(ctx);
+  // bool drop = PT_REGS_PARM4(ctx);
 
-  bpf_probe_read(&conn_id, sizeof(struct connect_id_t), conn_id_pr);
-  uint64_t tgid_fd = combine_tgid_fd(conn_id.tgid, conn_id.fd);
-  conn_info = (struct connect_info_t *)bpf_map_lookup_elem(&connect_info_map, &tgid_fd);
-  if (conn_info == NULL)
-  {
-    bpf_probe_read(&dest_addr, sizeof(union sockaddr_t), dest_addr_pr);
-    new_conn.addr = dest_addr;
-    new_conn.conn_id = conn_id;
-    new_conn.is_sample = !drop;
-    new_conn.role = IsUnknown;
-    bpf_map_update_elem(&connect_info_map, &tgid_fd, &new_conn, BPF_ANY);
-    if (filter_config_info(&new_conn))
-    {
-      return 0;
-    }
-    if (new_conn.is_sample)
-    {
-      struct conn_ctrl_event_t ctrl_event = {};
-      ctrl_event.type = EventConnect;
-      ctrl_event.ts = bpf_ktime_get_ns();
-      ctrl_event.conn_id = new_conn.conn_id;
-      ctrl_event.connect.addr = new_conn.addr;
-      ctrl_event.connect.role = new_conn.role;
-      bpf_perf_event_output(ctx, &connect_ctrl_events_map, BPF_F_CURRENT_CPU,
-                            &ctrl_event, sizeof(struct conn_ctrl_event_t));
-    }
-  }
-  else
-  {
-    bpf_probe_read(&conn_info->addr, sizeof(union sockaddr_t), dest_addr_pr);
-    conn_info->is_sample = !drop;
-  }
+  // bpf_probe_read(&conn_id, sizeof(struct connect_id_t), conn_id_pr);
+  // uint64_t tgid_fd = combine_tgid_fd(conn_id.tgid, conn_id.fd);
+  // conn_info = (struct connect_info_t *)bpf_map_lookup_elem(&connect_info_map, &tgid_fd);
+  // if (conn_info == NULL)
+  // {
+  //   bpf_probe_read(&dest_addr, sizeof(union sockaddr_t), dest_addr_pr);
+  //   new_conn.addr = dest_addr;
+  //   new_conn.conn_id = conn_id;
+  //   new_conn.is_sample = !drop;
+  //   new_conn.role = IsUnknown;
+  //   bpf_map_update_elem(&connect_info_map, &tgid_fd, &new_conn, BPF_ANY);
+  //   if (filter_config_info(&new_conn))
+  //   {
+  //     return 0;
+  //   }
+  //   if (new_conn.is_sample)
+  //   {
+  //     struct conn_ctrl_event_t ctrl_event = {};
+  //     ctrl_event.type = EventConnect;
+  //     ctrl_event.ts = bpf_ktime_get_ns();
+  //     ctrl_event.conn_id = new_conn.conn_id;
+  //     ctrl_event.connect.addr = new_conn.addr;
+  //     ctrl_event.connect.role = new_conn.role;
+  //     bpf_perf_event_output(ctx, &connect_ctrl_events_map, BPF_F_CURRENT_CPU,
+  //                           &ctrl_event, sizeof(struct conn_ctrl_event_t));
+  //   }
+  // }
+  // else
+  // {
+  //   bpf_probe_read(&conn_info->addr, sizeof(union sockaddr_t), dest_addr_pr);
+  //   conn_info->is_sample = !drop;
+  // }
   return 0;
 }
 

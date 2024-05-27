@@ -13,7 +13,8 @@
 #include <stdbool.h>
 #endif
 
-#define CONN_DATA_MAX_SIZE 16384
+#define CONN_DATA_MAX_SIZE 10240
+#define CONN_DATA_MAX_SIZE_MASK (10240 -1)
 #define DATA_SAMPLE_ALL 100
 
 enum support_proto_e
@@ -178,28 +179,6 @@ struct conn_ctrl_event_t
   };
 };
 
-struct conn_data_event_t
-{
-  struct attr_t
-  {
-    uint64_t ts;
-    struct connect_id_t conn_id;
-    union sockaddr_t addr;
-    struct socket_info si;
-    enum support_proto_e protocol;
-    enum support_role_e role;
-    enum support_type_e type;
-    enum support_direction_e direction;
-    enum support_syscall_e syscall_func;
-    uint64_t pos;
-    uint32_t org_msg_size;
-    uint32_t msg_buf_size;
-    bool try_to_prepend;
-    uint32_t length_header;
-  } attr;
-  char msg[CONN_DATA_MAX_SIZE];
-};
-
 struct conn_stats_event_t
 {
   uint64_t ts;
@@ -240,6 +219,15 @@ struct connect_info_t
   char prev_buf[4];
   bool try_to_prepend;
   bool is_sample;
+  
+  uint64_t rd_min_ts;
+  uint64_t rd_max_ts;
+  uint64_t wr_min_ts;
+  uint64_t wr_max_ts;
+  uint64_t rt;
+  uint16_t request_len;
+  uint16_t response_len;
+  char msg[CONN_DATA_MAX_SIZE];
 };
 
 struct protocol_type_t
@@ -295,7 +283,7 @@ struct config_info_t
 enum callback_type_e
 {
   CTRL_HAND = 0,
-  DATA_HAND,
+  INFO_HANDLE,
   STAT_HAND,
 #ifdef NET_TEST
   TEST_HAND,
@@ -307,7 +295,7 @@ enum callback_type_e
 #ifdef NET_TEST
 typedef void (*net_test_process_func_t)(void *custom_data, struct test_data *event);
 #endif
-typedef void (*net_data_process_func_t)(void *custom_data, struct conn_data_event_t *event);
+typedef void (*net_info_process_func_t)(void *custom_data, struct connect_info_t *event);
 typedef void (*net_ctrl_process_func_t)(void *custom_data, struct conn_ctrl_event_t *event);
 typedef void (*net_statistics_process_func_t)(void *custom_data, struct conn_stats_event_t *event);
 typedef void (*net_lost_func_t)(void *custom_data, enum callback_type_e type, uint64_t lost_count);
@@ -316,7 +304,7 @@ typedef int (*net_print_fn_t)(int16_t level, const char *format, va_list args);
 #ifdef NET_TEST
 void ebpf_setup_net_test_process_func(net_test_process_func_t func, void *custom_data);
 #endif
-void ebpf_setup_net_data_process_func(net_data_process_func_t func, void *custom_data);
+void ebpf_setup_net_info_process_func(net_info_process_func_t func, void *custom_data);
 void ebpf_setup_net_event_process_func(net_ctrl_process_func_t func, void *custom_data);
 void ebpf_setup_net_statistics_process_func(net_statistics_process_func_t func, void *custom_data);
 void ebpf_setup_net_lost_func(net_lost_func_t func, void *custom_data);

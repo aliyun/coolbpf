@@ -135,39 +135,38 @@ static void test_process_func(void *custom_data, struct test_data *event_data)
 	}
 }
 #endif
-static void test_data_process_func(void *custom_data, struct conn_data_event_t *event_data)
+static void test_data_process_func(void *custom_data, struct connect_info_t *event_data)
 {
-	struct conn_data_event_t *data = (struct conn_data_event_t *)event_data;
+	struct connect_info_t *data = (struct connect_info_t *)event_data;
 	int sport;
 	char sip[20];
 	FILE *file = env_para.file;
 
 	fprintf(file, "=========data evnet handle:%d==========\n", data_count++);
-	fprintf(file, "ts:%llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->attr.ts,
-			data->attr.conn_id.fd, data->attr.conn_id.tgid, data->attr.conn_id.start);
-	fprintf(file, "proto:%d, role:%d, type:%d, direction:%d, syscall_func:%d\n",
-			data->attr.protocol, data->attr.role, data->attr.type,
-			data->attr.direction, data->attr.syscall_func);
-	if (data->attr.addr.sa.sa_family == AF_INET)
+	fprintf(file, "ts:%llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->rt,
+			data->conn_id.fd, data->conn_id.tgid, data->conn_id.start);
+	fprintf(file, "proto:%d, role:%d, type:%d\n",
+			data->protocol, data->role, data->type);
+	if (data->addr.sa.sa_family == AF_INET)
 	{
-		inet_ntop(AF_INET, &data->attr.addr.in4.sin_addr.s_addr, sip, 16);
-		sport = ntohs(data->attr.addr.in4.sin_port);
+		inet_ntop(AF_INET, &data->addr.in4.sin_addr.s_addr, sip, 16);
+		sport = ntohs(data->addr.in4.sin_port);
 		fprintf(file, "ipv4::sip:%s, sport:%d\n", sip, sport);
 	}
-	else if (data->attr.addr.sa.sa_family == AF_INET6)
+	else if (data->addr.sa.sa_family == AF_INET6)
 	{
 		// inet_ntop(AF_INET6, &data->addr.in6.sin6_addr.s_addr, sip, 32);
-		sport = ntohs(data->attr.addr.in6.sin6_port);
+		sport = ntohs(data->addr.in6.sin6_port);
 		fprintf(file, "ipv6::sip:%s, sport:%d\n", sip, sport);
 	}
 	else
 	{
-		fprintf(file, "wrong family:%d\n", data->attr.addr.sa.sa_family);
+		fprintf(file, "wrong family:%d\n", data->addr.sa.sa_family);
 	}
 
-	fprintf(file, "pos:%llu, org_msg:%u, msg_buf:%u, try_pre:%d, len_header:%u\n",
-			data->attr.pos, data->attr.org_msg_size, data->attr.msg_buf_size,
-			data->attr.try_to_prepend, data->attr.length_header);
+	// fprintf(file, "pos:%llu, org_msg:%u, msg_buf:%u, try_pre:%d, len_header:%u\n",
+	// 		data->pos, data->org_msg_size, data->msg_buf_size,
+	// 		data->try_to_prepend, data->length_header);
 	fprintf(file, "msg:%s\n", data->msg);
 }
 
@@ -292,15 +291,15 @@ static void para_parse(int argc, char **argv)
 
 static void *handle_disable_recover_process(void *arg)
 {
-	bool drop = false;
-	int i = 0;
-	while (i++ < 10)
-	{
-		sleep(10);
+	// bool drop = false;
+	// int i = 0;
+	// while (i++ < 10)
+	// {
+	// 	sleep(10);
 
-		test_disable_process(drop);
-		drop = !drop;
-	}
+	// 	test_disable_process(drop);
+	// 	drop = !drop;
+	// }
 }
 
 static void *handle_clean(void *arg)
@@ -398,8 +397,8 @@ int main(int argc, char **argv)
 	int stop_flag = 0;
 	// void *handle;
 	pthread_t tid;
-	char so_file[64] = "/work/coolbpf-arms/build/tools/examples/net/net";
-	char btf_file[128] = "/boot/vmlinux-4.19.91-007.ali4000.alios7.x86_64";
+	char so_file[64] = "/root/gitee-github/coolbpf/build/tools/examples/net/net";
+	// char btf_file[128] = "/boot/vmlinux-4.19.91-007.ali4000.alios7.x86_64";
 	Dl_info dlinfo;
 
 	para_parse(argc, argv);
@@ -408,7 +407,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	ebpf_setup_print_func(test_print_func);
 	ebpf_setup_net_event_process_func(test_ctrl_process_func, NULL);
-	ebpf_setup_net_data_process_func(test_data_process_func, NULL);
+	ebpf_setup_net_info_process_func(test_data_process_func, NULL);
 	ebpf_setup_net_statistics_process_func(test_stat_process_func, NULL);
 	err = dladdr(ebpf_cleanup_dog, &dlinfo);
 	if (err)
@@ -436,7 +435,7 @@ int main(int argc, char **argv)
 		printf("pthread create failed:%s\n", strerror(err));
 		return err;
 	}
-	err = ebpf_init(btf_file, strlen(btf_file), so_file, strlen(so_file), uprobe_offset, upca_offset, disproc_offset, 0);
+	err = ebpf_init(NULL, 0, so_file, strlen(so_file), uprobe_offset, upca_offset, disproc_offset, 0);
 	if (err)
 	{
 		printf("init failed, err:%d\n", err);
@@ -448,8 +447,8 @@ int main(int argc, char **argv)
 	printf("net init end...\n");
 
 	set_ebpf_int_config((int32_t)PROTOCOL_FILTER, env_para.proto);
-	set_ebpf_int_config((int32_t)TGID_FILTER, env_para.pid);
-	set_ebpf_int_config((int32_t)PORT_FILTER, 9876);
+	set_ebpf_int_config((int32_t)TGID_FILTER, 1240144);
+	set_ebpf_int_config((int32_t)PORT_FILTER, -1);
 	set_ebpf_int_config((int32_t)SELF_FILTER, -1);
 	set_ebpf_int_config((int32_t)DATA_SAMPLING, env_para.data_sample);
 	map_fd = ebpf_get_fd();
