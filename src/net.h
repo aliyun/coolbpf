@@ -13,8 +13,9 @@
 #include <stdbool.h>
 #endif
 
-#define CONN_DATA_MAX_SIZE 10240
-#define CONN_DATA_MAX_SIZE_MASK (10240 -1)
+// request or reponse
+#define PACKET_MAX_SIZE 8192
+
 #define DATA_SAMPLE_ALL 100
 
 enum support_proto_e
@@ -31,6 +32,7 @@ enum support_proto_e
   ProtoHSF = 9,
   NumProto,
 };
+
 enum support_role_e
 {
   IsUnknown = 0x01,
@@ -219,7 +221,7 @@ struct connect_info_t
   char prev_buf[4];
   bool try_to_prepend;
   bool is_sample;
-  
+
   uint64_t rd_min_ts;
   uint64_t rd_max_ts;
   uint64_t wr_min_ts;
@@ -227,7 +229,7 @@ struct connect_info_t
   uint64_t rt;
   uint16_t request_len;
   uint16_t response_len;
-  char msg[CONN_DATA_MAX_SIZE];
+  char msg[PACKET_MAX_SIZE * 3];
 };
 
 struct protocol_type_t

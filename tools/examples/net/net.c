@@ -59,16 +59,16 @@ struct env_para_t
 };
 
 struct env_para_t env_para = {
-	.proto = -1,
-	.pid = -1,
-	.self_pid = -1,
-	.port = -1,
-	.data_sample = -1,
-	.ctrl_count = 0,
-	.data_count = 0,
-	.stat_count = 0,
-	.debug = 1,
-	.file = NULL,
+    .proto = -1,
+    .pid = -1,
+    .self_pid = -1,
+    .port = -1,
+    .data_sample = -1,
+    .ctrl_count = 0,
+    .data_count = 0,
+    .stat_count = 0,
+    .debug = 1,
+    .file = NULL,
 };
 
 enum libbpf_print_level
@@ -91,7 +91,7 @@ static void set_ebpf_int_config(int32_t opt, int32_t value)
 }
 
 static int test_print_func(enum libbpf_print_level level,
-						   const char *format, va_list args)
+			   const char *format, va_list args)
 {
 	int ret;
 	if (env_para.debug)
@@ -102,7 +102,7 @@ static int test_print_func(enum libbpf_print_level level,
 }
 
 static void test_print(enum libbpf_print_level level,
-					   const char *format, ...)
+		       const char *format, ...)
 {
 	va_list args;
 
@@ -126,27 +126,28 @@ static void test_process_func(void *custom_data, struct test_data *event_data)
 	strncpy(func, net_mapsys[nd->funcid].funcname, 30);
 	// printf("test_process:%s\n", nd->com);
 	if (!strncmp(nd->com, "client", strlen("client")) ||
-		!strncmp(nd->com, "server", strlen("server")))
+	    !strncmp(nd->com, "server", strlen("server")))
 	{
 		printf("fuc:%d(%s), %s:%u-> %s:%u: size = %u, com_name:%s, pid: %d, fd:%d, family:%d, ret_val:%d\n",
-			   nd->funcid, func, sip, nd->ap.sport, dip,
-			   nd->ap.dport, nd->size, nd->com,
-			   nd->pid, nd->fd, nd->family, nd->ret_val);
+		       nd->funcid, func, sip, nd->ap.sport, dip,
+		       nd->ap.dport, nd->size, nd->com,
+		       nd->pid, nd->fd, nd->family, nd->ret_val);
 	}
 }
 #endif
-static void test_data_process_func(void *custom_data, struct connect_info_t *event_data)
+static void test_info_process_func(void *custom_data, struct connect_info_t *event_data)
 {
 	struct connect_info_t *data = (struct connect_info_t *)event_data;
 	int sport;
 	char sip[20];
+	char split;
 	FILE *file = env_para.file;
 
-	fprintf(file, "=========data evnet handle:%d==========\n", data_count++);
-	fprintf(file, "ts:%llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->rt,
-			data->conn_id.fd, data->conn_id.tgid, data->conn_id.start);
+	fprintf(file, "=========data event handle:%d==========\n", data_count++);
+	fprintf(file, "rt:%llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->rt,
+		data->conn_id.fd, data->conn_id.tgid, data->conn_id.start);
 	fprintf(file, "proto:%d, role:%d, type:%d\n",
-			data->protocol, data->role, data->type);
+		data->protocol, data->role, data->type);
 	if (data->addr.sa.sa_family == AF_INET)
 	{
 		inet_ntop(AF_INET, &data->addr.in4.sin_addr.s_addr, sip, 16);
@@ -164,10 +165,8 @@ static void test_data_process_func(void *custom_data, struct connect_info_t *eve
 		fprintf(file, "wrong family:%d\n", data->addr.sa.sa_family);
 	}
 
-	// fprintf(file, "pos:%llu, org_msg:%u, msg_buf:%u, try_pre:%d, len_header:%u\n",
-	// 		data->pos, data->org_msg_size, data->msg_buf_size,
-	// 		data->try_to_prepend, data->length_header);
-	fprintf(file, "msg:%s\n", data->msg);
+	fprintf(file, "reqeust_len:%d, response_len:%d\n", data->request_len, data->response_len);
+	fprintf(file, "request and response msg:\n%s\n", data->msg);
 }
 
 static void test_ctrl_process_func(void *custom_data, struct conn_ctrl_event_t *event_data)
@@ -180,7 +179,7 @@ static void test_ctrl_process_func(void *custom_data, struct conn_ctrl_event_t *
 	fprintf(file, "==========ctrl event handle:%d=========\n", ctrl_count++);
 	fprintf(file, "event type:%d, ts:%llu\n", data->type, data->ts);
 	fprintf(file, "connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->conn_id.fd,
-			data->conn_id.tgid, data->conn_id.start);
+		data->conn_id.tgid, data->conn_id.start);
 	if (data->type == EventConnect)
 	{
 		fprintf(file, "conn_event_t::support_role:%d\n", data->connect.role);
@@ -204,7 +203,7 @@ static void test_ctrl_process_func(void *custom_data, struct conn_ctrl_event_t *
 	if (data->type == EventClose)
 	{
 		fprintf(file, "close_event_t:: wr_bytes:%lld, rd_bytes:%lld\n", data->close.wr_bytes,
-				data->close.rd_bytes);
+			data->close.rd_bytes);
 	}
 }
 
@@ -218,7 +217,7 @@ static void test_stat_process_func(void *custom_data, struct conn_stats_event_t 
 	fprintf(file, "=========stats event handle:%d========\n", stat_count++);
 	fprintf(file, "ts:%llu\n", data->ts);
 	fprintf(file, "connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->conn_id.fd,
-			data->conn_id.tgid, data->conn_id.start);
+		data->conn_id.tgid, data->conn_id.start);
 	if (data->addr.sa.sa_family == AF_INET)
 	{
 		inet_ntop(AF_INET, &data->addr.in4.sin_addr.s_addr, sip, 16);
@@ -237,11 +236,11 @@ static void test_stat_process_func(void *custom_data, struct conn_stats_event_t 
 	}
 
 	fprintf(file, "wr_bytes:%lld, rd_bytes:%lld, wr_pkts:%d, rd_pkts:%d\n",
-			data->wr_bytes, data->rd_bytes, data->wr_pkts, data->rd_pkts);
+		data->wr_bytes, data->rd_bytes, data->wr_pkts, data->rd_pkts);
 	fprintf(file, "last_wr_bytes:%lld, last_rd_bytes:%lld, last_wr_pkts:%d, last_rd_pkts:%d, conn_event:%u\n",
-			data->last_output_wr_bytes, data->last_output_rd_bytes,
-			data->last_output_wr_pkts, data->last_output_rd_pkts,
-			data->conn_events);
+		data->last_output_wr_bytes, data->last_output_rd_bytes,
+		data->last_output_wr_pkts, data->last_output_rd_pkts,
+		data->conn_events);
 }
 
 static void sig_handler(int sig)
@@ -371,9 +370,9 @@ ipv4::sip:127.0.0.1, sport:1234
 static void test_update_conn_addr(void)
 {
 	struct connect_id_t conn_id = {
-		.tgid = 1234,
-		.fd = 1234,
-		.start = 1234,
+	    .tgid = 1234,
+	    .fd = 1234,
+	    .start = 1234,
 	};
 	union sockaddr_t dst_addr;
 	dst_addr.sa.sa_family = AF_INET;
@@ -407,7 +406,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	ebpf_setup_print_func(test_print_func);
 	ebpf_setup_net_event_process_func(test_ctrl_process_func, NULL);
-	ebpf_setup_net_info_process_func(test_data_process_func, NULL);
+	ebpf_setup_net_info_process_func(test_info_process_func, NULL);
 	ebpf_setup_net_statistics_process_func(test_stat_process_func, NULL);
 	err = dladdr(ebpf_cleanup_dog, &dlinfo);
 	if (err)
@@ -442,7 +441,7 @@ int main(int argc, char **argv)
 		return err;
 	}
 	printf("input para pid:%d, proto:%d, self:%d, sample:%d, port:%d, debug:%d\n",
-		   env_para.pid, env_para.proto, env_para.self_pid, env_para.data_sample, env_para.port, env_para.debug);
+	       env_para.pid, env_para.proto, env_para.self_pid, env_para.data_sample, env_para.port, env_para.debug);
 
 	printf("net init end...\n");
 

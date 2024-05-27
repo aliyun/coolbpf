@@ -864,7 +864,7 @@ static __always_inline void try_event_output(void *ctx, struct connect_info_t *i
   {
     u64 total_size = (u64)(&info->msg[0]) - (u64)info + info->request_len + info->response_len;
 
-    bpf_perf_event_output(ctx, &connect_info_events_map, BPF_F_CURRENT_CPU, info, total_size & CONN_DATA_MAX_SIZE_MASK);
+    bpf_perf_event_output(ctx, &connect_info_events_map, BPF_F_CURRENT_CPU, info, total_size & (PACKET_MAX_SIZE * 2 -1));
     reset_sock_info(info);
   }
 
@@ -1021,17 +1021,16 @@ static __always_inline bool need_trace_protocol(const struct connect_info_t *con
 {
   uint32_t protocol = conn_info->protocol;
   uint64_t *tmp;
-  
-  if (protocol == ProtoUnknown)
+
+  if (protocol != ProtoUnknown)
   {
-    return false;
+    tmp = (uint64_t *)bpf_map_lookup_elem(&config_protocol_map, &protocol);
+    if (tmp != NULL)
+    {
+      return *tmp != 0;
+    }
   }
 
-  tmp = (uint64_t *)bpf_map_lookup_elem(&config_protocol_map, &protocol);
-  if (tmp != NULL)
-  {
-    return *tmp != 0;
-  }
   return false;
 }
 
@@ -1353,23 +1352,23 @@ static __always_inline void output_buf(struct trace_event_raw_sys_exit *ctx,
 
   if (is_request)
   {
-    bytes_left = CONN_DATA_MAX_SIZE - conn_info->request_len;
+    bytes_left = PACKET_MAX_SIZE - conn_info->request_len;
     buf_size = buf_size > bytes_left ? bytes_left : buf_size;
     conn_info->request_len += buf_size;
   }
   else
   {
-    bytes_left = CONN_DATA_MAX_SIZE - conn_info->response_len;
+    bytes_left = PACKET_MAX_SIZE - conn_info->response_len;
     buf_size = buf_size > bytes_left ? bytes_left : buf_size;
     conn_info->response_len += buf_size;
   }
 
-  if (buf_size == 0)
+
+  if (curr_offset < PACKET_MAX_SIZE * 2)
   {
-    return;
+    bpf_probe_read(&conn_info->msg[curr_offset], buf_size & (PACKET_MAX_SIZE - 1), buf);
   }
 
-  bpf_probe_read(&conn_info->msg, buf_size & CONN_DATA_MAX_SIZE_MASK, buf);
 }
 
 static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
@@ -1419,13 +1418,13 @@ static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
     buf_size = iov_cpy.iov_len;
     if (is_request)
     {
-      bytes_left = CONN_DATA_MAX_SIZE - conn_info->request_len;
+      bytes_left = PACKET_MAX_SIZE - conn_info->request_len;
       buf_size = buf_size > bytes_left ? bytes_left : buf_size;
       conn_info->request_len += buf_size;
     }
     else
     {
-      bytes_left = CONN_DATA_MAX_SIZE - conn_info->response_len;
+      bytes_left = PACKET_MAX_SIZE - conn_info->response_len;
       buf_size = buf_size > bytes_left ? bytes_left : buf_size;
       conn_info->response_len += buf_size;
     }
@@ -1435,9 +1434,9 @@ static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
       return;
     }
 
-    if (curr_offset < CONN_DATA_MAX_SIZE_MASK - 4096 - 1)
+    if (curr_offset < PACKET_MAX_SIZE * 2)
     {
-      bpf_probe_read(&conn_info->msg[curr_offset], buf_size & 4095, iov_cpy.iov_base);
+      bpf_probe_read(&conn_info->msg[curr_offset], buf_size & (PACKET_MAX_SIZE - 1), iov_cpy.iov_base);
     }
   }
 }
