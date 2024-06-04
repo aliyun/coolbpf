@@ -9,7 +9,7 @@
 #define FILE_PATH_SIZE 256
 
 typedef void (*handle_event_func_t)(void *ctx, int cpu, void *data,
-									__u32 data_sz);
+				    __u32 data_sz);
 typedef void (*handle_lost_func_t)(void *ctx, int cpu, __u64 lost_cnt);
 typedef void (*callback_func_t)(void *custom_data, void *event);
 
@@ -40,39 +40,39 @@ enum log_type_e
 };
 
 struct map_syscall_t net_mapsys[25] = {
-	{0, "NULL"},
-	{1, "sys_enter_connect"},
-	{2, "sys_exit_connect"},
-	{3, "sys_enter_accept"},
-	{4, "sys_exit_accept"},
-	{5, "sys_accept4"},
-	{6, "sys_exit_accept4"},
-	{7, "sys_enter_close"},
-	{8, "sys_exit_close"},
-	{9, "sys_enter_mmap"},
-	{10, "sock_alloc"},
-	{11, "security_socket_sendmsg"},
-	{12, "security_socket_recvmsg"},
-	{13, "sys_enter_write"},
-	{14, "sys_exit_write"},
-	{15, "sys_enter_read"},
-	{16, "sys_exit_read"},
-	{17, "sys_enter_sendto"},
-	{18, "sys_exit_sendto"},
-	{19, "sys_enter_recvfrom"},
-	{20, "sys_exit_recvfrom"},
-	{21, "sys_enter_sendmsg"},
-	{22, "sys_exit_sendmsg"},
-	{23, "sys_enter_recvmsg"},
-	{24, "sys_exit_recvmsg"},
+    {0, "NULL"},
+    {1, "sys_enter_connect"},
+    {2, "sys_exit_connect"},
+    {3, "sys_enter_accept"},
+    {4, "sys_exit_accept"},
+    {5, "sys_accept4"},
+    {6, "sys_exit_accept4"},
+    {7, "sys_enter_close"},
+    {8, "sys_exit_close"},
+    {9, "sys_enter_mmap"},
+    {10, "sock_alloc"},
+    {11, "security_socket_sendmsg"},
+    {12, "security_socket_recvmsg"},
+    {13, "sys_enter_write"},
+    {14, "sys_exit_write"},
+    {15, "sys_enter_read"},
+    {16, "sys_exit_read"},
+    {17, "sys_enter_sendto"},
+    {18, "sys_exit_sendto"},
+    {19, "sys_enter_recvfrom"},
+    {20, "sys_exit_recvfrom"},
+    {21, "sys_enter_sendmsg"},
+    {22, "sys_exit_sendmsg"},
+    {23, "sys_enter_recvmsg"},
+    {24, "sys_exit_recvmsg"},
 };
 
 struct mproto_t net_mproto[MAX_PROTOCOL_NUM] = {
-	{0, "dns"},
-	{1, "http"},
-	{2, "redis"},
-	{3, "kafka"},
-	{4, "mysql"},
+    {0, "dns"},
+    {1, "http"},
+    {2, "redis"},
+    {3, "kafka"},
+    {4, "mysql"},
 };
 
 static struct net_env_t
@@ -91,25 +91,25 @@ static struct net_env_t
 	net_print_fn_t libbpf_print;
 	char version[64];
 } env = {
-	.debug = false,
-	.btf_custom_path = {0},
-	.tgid = -1,
-	.protocol = -1,
-	.enable = 1,
-	.config = {
-		.port = -1,
-		.self_pid = -1,
-		.data_sample = DATA_SAMPLE_ALL,
-	},
-	.obj = NULL,
-	.pbs = {},
-	.callback = {},
-	.page_count = {0},
-	.lost_callback = {
-		.func = NULL,
-		.custom_data = NULL,
-	},
-	.version = "net v0.1"};
+    .debug = false,
+    .btf_custom_path = {0},
+    .tgid = -1,
+    .protocol = -1,
+    .enable = 1,
+    .config = {
+	.port = -1,
+	.self_pid = -1,
+	.data_sample = DATA_SAMPLE_ALL,
+    },
+    .obj = NULL,
+    .pbs = {},
+    .callback = {},
+    .page_count = {0},
+    .lost_callback = {
+	.func = NULL,
+	.custom_data = NULL,
+    },
+    .version = "net v0.1"};
 
 int bpf_net_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -118,7 +118,7 @@ int bpf_net_print_fn(enum libbpf_print_level level, const char *format, va_list 
 }
 
 static void net_log(enum libbpf_print_level level,
-					const char *format, ...)
+		    const char *format, ...)
 {
 	va_list args;
 
@@ -136,7 +136,7 @@ void ebpf_setup_net_test_process_func(net_test_process_func_t func, void *custom
 }
 #endif
 
-void ebpf_setup_net_info_process_func(net_info_process_func_t func, void *custom_data)
+void ebpf_setup_net_data_process_func(net_data_process_func_t func, void *custom_data)
 {
 	env.callback[INFO_HANDLE].func = func;
 	env.callback[INFO_HANDLE].custom_data = custom_data;
@@ -149,7 +149,7 @@ void ebpf_setup_net_event_process_func(net_ctrl_process_func_t func, void *custo
 }
 
 void ebpf_setup_net_statistics_process_func(net_statistics_process_func_t func,
-											void *custom_data)
+					    void *custom_data)
 {
 	env.callback[STAT_HAND].func = func;
 	env.callback[STAT_HAND].custom_data = custom_data;
@@ -210,12 +210,12 @@ static void handle_lost_ctrl_event(void *ctx, int cpu, __u64 lost_cnt)
 	}
 }
 
-static void handle_data_event(void *ctx, int cpu, void *data, __u32 data_sz)
+static void handle_data_event(void *ctx, int cpu, void *raw_data, __u32 data_sz)
 {
 	++g_poll_callback_count;
-	struct connect_info_t *info = (struct connect_info_t *)data;
+	struct conn_data_event_t *data = (struct conn_data_event_t *)raw_data;
 	void *custom_data = env.callback[INFO_HANDLE].custom_data;
-	env.callback[INFO_HANDLE].func(custom_data, info);
+	env.callback[INFO_HANDLE].func(custom_data, data);
 }
 
 static void handle_lost_data_event(void *ctx, int cpu, __u64 lost_cnt)
@@ -234,7 +234,7 @@ static void handle_lost_data_event(void *ctx, int cpu, __u64 lost_cnt)
 static void handle_stat_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
 	++g_poll_callback_count;
-	struct connect_info_t *info = (struct connect_info_t *)data;
+	struct conn_stats_event_t *info = (struct conn_stats_event_t *)data;
 	void *custom_data = env.callback[STAT_HAND].custom_data;
 	env.callback[STAT_HAND].func(custom_data, info);
 }
@@ -318,14 +318,14 @@ static void get_btf_path(void)
 		if (access("/sys/kernel/btf/vmlinux", F_OK) == 0)
 		{
 			snprintf(env.btf_custom_path, sizeof(env.btf_custom_path),
-					 "/sys/kernel/btf/vmlinux");
+				 "/sys/kernel/btf/vmlinux");
 		}
 	}
 	pclose(fp);
 }
 
 int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long uprobe_offset,
-				  long upca_offset, long upps_offset, long upcr_offset)
+		  long upca_offset, long upps_offset, long upcr_offset)
 {
 	struct net_bpf *obj = NULL;
 	int err;
@@ -407,8 +407,8 @@ static int set_events_cont(int perf_fd, int page_count, handle_event_func_t even
 		page_count = 128;
 	}
 	struct perf_buffer_opts pb_opts = {
-		.sample_cb = event_func,
-		.lost_cb = lost_func,
+	    .sample_cb = event_func,
+	    .lost_cb = lost_func,
 	};
 	struct perf_buffer *pb = NULL;
 	int err;
@@ -434,20 +434,20 @@ int32_t ebpf_start(void)
 	int err;
 #ifdef NET_TEST
 	err = set_events_cont(bpf_map__fd(obj->maps.test_map), env.page_count[TEST_HAND],
-						  handle_test_event, handle_lost_test_event, &(env.pbs[TEST_HAND]));
+			      handle_test_event, handle_lost_test_event, &(env.pbs[TEST_HAND]));
 	if (err)
 		return err;
 #endif
 	err = set_events_cont(bpf_map__fd(obj->maps.connect_ctrl_events_map), env.page_count[CTRL_HAND],
-						  handle_ctrl_event, handle_lost_ctrl_event, &(env.pbs[CTRL_HAND]));
+			      handle_ctrl_event, handle_lost_ctrl_event, &(env.pbs[CTRL_HAND]));
 	if (err)
 		return err;
-	err = set_events_cont(bpf_map__fd(obj->maps.connect_info_events_map), env.page_count[INFO_HANDLE],
-						  handle_data_event, handle_lost_data_event, &(env.pbs[INFO_HANDLE]));
+	err = set_events_cont(bpf_map__fd(obj->maps.connect_data_events_map), env.page_count[INFO_HANDLE],
+			      handle_data_event, handle_lost_data_event, &(env.pbs[INFO_HANDLE]));
 	if (err)
 		return err;
 	err = set_events_cont(bpf_map__fd(obj->maps.connect_stats_events_map), env.page_count[STAT_HAND],
-						  handle_stat_event, handle_lost_stat_event, &(env.pbs[STAT_HAND]));
+			      handle_stat_event, handle_lost_stat_event, &(env.pbs[STAT_HAND]));
 	if (err)
 		return err;
 
@@ -455,7 +455,7 @@ int32_t ebpf_start(void)
 }
 
 void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count,
-				 void **params, int32_t *params_len)
+		 void **params, int32_t *params_len)
 {
 	struct net_bpf *obj = env.obj;
 	int32_t *value;
@@ -536,7 +536,7 @@ int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag)
 			if (rst < 0 && errno != EINTR)
 			{
 				net_log(LOG_TYPE_WARN, "Error polling perf buffer: %d, hand_type:%d\n",
-						rst, j);
+					rst, j);
 				return rst;
 			}
 		}
@@ -589,7 +589,7 @@ static int cleanup_dog_init(char *so, int32_t so_size, long uprobe_offset)
 	int ret;
 
 	obj->links.cleanup_dog_probe = bpf_program__attach_uprobe(obj->progs.cleanup_dog_probe, false,
-															  0, so, uprobe_offset); // 0 for self
+								  0, so, uprobe_offset); // 0 for self
 	ret = libbpf_get_error(obj->links.cleanup_dog_probe);
 	if (ret != 0)
 	{
@@ -616,7 +616,7 @@ static int update_conn_addr_init(char *so, int32_t so_size, long uprobe_offset)
 	int ret;
 
 	obj->links.update_conn_addr_probe = bpf_program__attach_uprobe(obj->progs.update_conn_addr_probe, false,
-																   0, so, uprobe_offset); // 0 for self
+								       0, so, uprobe_offset); // 0 for self
 	ret = libbpf_get_error(obj->links.update_conn_addr_probe);
 	if (ret != 0)
 	{
@@ -627,7 +627,7 @@ static int update_conn_addr_init(char *so, int32_t so_size, long uprobe_offset)
 }
 
 void ebpf_update_conn_addr(struct connect_id_t *conn_id, union sockaddr_t *dest_addr,
-						   uint16_t local_port, bool drop)
+			   uint16_t local_port, bool drop)
 {
 }
 
@@ -637,7 +637,7 @@ static int disable_process_init(char *so, int32_t so_size, long uprobe_offset)
 	int ret;
 
 	obj->links.disable_process_probe = bpf_program__attach_uprobe(obj->progs.disable_process_probe, false,
-																  0, so, uprobe_offset); // 0 for self
+								      0, so, uprobe_offset); // 0 for self
 	ret = libbpf_get_error(obj->links.disable_process_probe);
 	if (ret != 0)
 	{
@@ -653,7 +653,7 @@ static int update_conn_role_init(char *so, int32_t so_size, long uprobe_offset)
 	int ret;
 
 	obj->links.update_conn_role_probe = bpf_program__attach_uprobe(obj->progs.update_conn_role_probe, false,
-																   0, so, uprobe_offset); // 0 for self
+								       0, so, uprobe_offset); // 0 for self
 	ret = libbpf_get_error(obj->links.update_conn_role_probe);
 	if (ret != 0)
 	{

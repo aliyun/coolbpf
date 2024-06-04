@@ -199,6 +199,18 @@ struct conn_stats_event_t
   uint32_t conn_events;
 };
 
+struct conn_data_event_t
+{
+  struct connect_id_t conn_id;
+  uint64_t start_ts;
+  uint64_t end_ts;
+  uint16_t request_len;
+  uint16_t response_len;
+  char msg[PACKET_MAX_SIZE * 3];
+};
+
+#ifdef __VMLINUX_H__
+
 struct connect_info_t
 {
   struct connect_id_t conn_id;
@@ -222,15 +234,19 @@ struct connect_info_t
   bool try_to_prepend;
   bool is_sample;
 
+  uint64_t rt;
   uint64_t rd_min_ts;
   uint64_t rd_max_ts;
   uint64_t wr_min_ts;
   uint64_t wr_max_ts;
-  uint64_t rt;
+  uint64_t start_ts;
+  uint64_t end_ts;
   uint16_t request_len;
   uint16_t response_len;
   char msg[PACKET_MAX_SIZE * 3];
 };
+
+#endif
 
 struct protocol_type_t
 {
@@ -297,7 +313,7 @@ enum callback_type_e
 #ifdef NET_TEST
 typedef void (*net_test_process_func_t)(void *custom_data, struct test_data *event);
 #endif
-typedef void (*net_info_process_func_t)(void *custom_data, struct connect_info_t *event);
+typedef void (*net_data_process_func_t)(void *custom_data, struct conn_data_event_t *event);
 typedef void (*net_ctrl_process_func_t)(void *custom_data, struct conn_ctrl_event_t *event);
 typedef void (*net_statistics_process_func_t)(void *custom_data, struct conn_stats_event_t *event);
 typedef void (*net_lost_func_t)(void *custom_data, enum callback_type_e type, uint64_t lost_count);
@@ -306,7 +322,7 @@ typedef int (*net_print_fn_t)(int16_t level, const char *format, va_list args);
 #ifdef NET_TEST
 void ebpf_setup_net_test_process_func(net_test_process_func_t func, void *custom_data);
 #endif
-void ebpf_setup_net_info_process_func(net_info_process_func_t func, void *custom_data);
+void ebpf_setup_net_data_process_func(net_data_process_func_t func, void *custom_data);
 void ebpf_setup_net_event_process_func(net_ctrl_process_func_t func, void *custom_data);
 void ebpf_setup_net_statistics_process_func(net_statistics_process_func_t func, void *custom_data);
 void ebpf_setup_net_lost_func(net_lost_func_t func, void *custom_data);

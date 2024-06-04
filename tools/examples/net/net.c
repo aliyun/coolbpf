@@ -135,35 +135,17 @@ static void test_process_func(void *custom_data, struct test_data *event_data)
 	}
 }
 #endif
-static void test_info_process_func(void *custom_data, struct connect_info_t *event_data)
+static void test_info_process_func(void *custom_data, struct conn_data_event_t *event_data)
 {
-	struct connect_info_t *data = (struct connect_info_t *)event_data;
+	struct conn_data_event_t *data = (struct conn_data_event_t *)event_data;
 	int sport;
 	char sip[20];
 	char split;
 	FILE *file = env_para.file;
 
 	fprintf(file, "=========data event handle:%d==========\n", data_count++);
-	fprintf(file, "rt:%llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->rt,
+	fprintf(file, "start_ts:%llu, end_ts: %llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->start_ts, data->end_ts,
 		data->conn_id.fd, data->conn_id.tgid, data->conn_id.start);
-	fprintf(file, "proto:%d, role:%d, type:%d\n",
-		data->protocol, data->role, data->type);
-	if (data->addr.sa.sa_family == AF_INET)
-	{
-		inet_ntop(AF_INET, &data->addr.in4.sin_addr.s_addr, sip, 16);
-		sport = ntohs(data->addr.in4.sin_port);
-		fprintf(file, "ipv4::sip:%s, sport:%d\n", sip, sport);
-	}
-	else if (data->addr.sa.sa_family == AF_INET6)
-	{
-		// inet_ntop(AF_INET6, &data->addr.in6.sin6_addr.s_addr, sip, 32);
-		sport = ntohs(data->addr.in6.sin6_port);
-		fprintf(file, "ipv6::sip:%s, sport:%d\n", sip, sport);
-	}
-	else
-	{
-		fprintf(file, "wrong family:%d\n", data->addr.sa.sa_family);
-	}
 
 	fprintf(file, "reqeust_len:%d, response_len:%d\n", data->request_len, data->response_len);
 	fprintf(file, "request and response msg:\n%s\n", data->msg);
@@ -406,7 +388,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	ebpf_setup_print_func(test_print_func);
 	ebpf_setup_net_event_process_func(test_ctrl_process_func, NULL);
-	ebpf_setup_net_info_process_func(test_info_process_func, NULL);
+	ebpf_setup_net_data_process_func(test_info_process_func, NULL);
 	ebpf_setup_net_statistics_process_func(test_stat_process_func, NULL);
 	err = dladdr(ebpf_cleanup_dog, &dlinfo);
 	if (err)

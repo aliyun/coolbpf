@@ -129,7 +129,7 @@ struct
   __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
   __type(key, int);
   __type(value, int);
-} connect_info_events_map SEC(".maps");
+} connect_data_events_map SEC(".maps");
 
 struct
 {
@@ -173,6 +173,7 @@ static __always_inline void set_addr_pair_by_sock(struct sock *sk, struct addr_p
   BPF_CORE_READ_INTO(&ap->dport, sk, __sk_common.skc_dport);
   BPF_CORE_READ_INTO(&ap->saddr, sk, __sk_common.skc_rcv_saddr);
   BPF_CORE_READ_INTO(&ap->sport, sk, __sk_common.skc_num);
+  ap->dport = bpf_ntohs(ap->dport);
 }
 
 static __always_inline enum support_tgid_e match_tgid(const uint32_t tgid)
@@ -853,6 +854,8 @@ static __always_inline void reset_sock_info(struct connect_info_t *info)
   info->wr_max_ts = 0;
   info->rd_min_ts = 0;
   info->rd_max_ts = 0;
+  info->start_ts = 0;
+  info->end_ts = 0;
   info->rt = 0;
   info->request_len = 0;
   info->response_len = 0;
@@ -862,13 +865,18 @@ static __always_inline void try_event_output(void *ctx, struct connect_info_t *i
 {
   if (info->rt)
   {
-    u64 total_size = (u64)(&info->msg[0]) - (u64)info + info->request_len + info->response_len;
-
-    bpf_perf_event_output(ctx, &connect_info_events_map, BPF_F_CURRENT_CPU, info, total_size & (PACKET_MAX_SIZE * 2 -1));
+    struct conn_data_event_t *data = &info->wr_min_ts;
+    data->conn_id = info->conn_id;
+    u64 total_size = (u64)(&data->msg[0]) - (u64)data + info->request_len + info->response_len;
+    bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU, data, total_size & (PACKET_MAX_SIZE * 2 - 1));
     reset_sock_info(info);
   }
 
   u64 ts = bpf_ktime_get_ns();
+  if (info->start_ts == 0)
+    info->start_ts = ts;
+  info->end_ts = ts;
+
   if (direction == DirEgress)
   {
     if (info->wr_min_ts == 0)
@@ -1066,7 +1074,10 @@ static __always_inline struct socket *get_socket_by_fd(int fd)
 
 static __always_inline void parse_socket_info(struct socket *socket, struct socket_info *si)
 {
-  // TODO(qianlu)
+  struct sock *sk;
+  bpf_probe_read_kernel(&sk, sizeof(sk), &socket->sk);
+  set_addr_pair_by_sock(sk, &si->ap);
+  // TODO: family and netns
 }
 
 static __always_inline enum support_role_e get_sock_role(const struct socket *socket)
@@ -1363,12 +1374,10 @@ static __always_inline void output_buf(struct trace_event_raw_sys_exit *ctx,
     conn_info->response_len += buf_size;
   }
 
-
   if (curr_offset < PACKET_MAX_SIZE * 2)
   {
     bpf_probe_read(&conn_info->msg[curr_offset], buf_size & (PACKET_MAX_SIZE - 1), buf);
   }
-
 }
 
 static __always_inline void output_iovec(struct trace_event_raw_sys_exit *ctx,
