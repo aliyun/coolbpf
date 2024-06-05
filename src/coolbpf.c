@@ -58,6 +58,27 @@ int bump_memlock_rlimit(void)
     return setrlimit(RLIMIT_MEMLOCK, &rlim_new);
 }
 
+struct coolbpf_object *__coolbpf_object_open(skel_open open, skel_load load,
+                                             skel_attach attach,
+                                             skel_destroy destroy) {
+    struct coolbpf_object *obj = calloc(1, sizeof(struct coolbpf_object));
+    if (!obj)
+      return NULL;
+
+    void *skel_obj = open();
+    if (!skel_obj) {
+      free(obj);
+      error("failed to open skeleton object\n");
+      return NULL;
+    }
+
+    obj->skel_load = load;
+    obj->skel_attach = attach;
+    obj->skel_destroy = destroy;
+    obj->skel_obj = skel_obj;
+    return obj;
+}
+
 int coolbpf_object_load(struct coolbpf_object *cb)
 {
     int err = bump_memlock_rlimit();
@@ -79,6 +100,11 @@ int coolbpf_object_attach(struct coolbpf_object *cb)
 void coolbpf_object_destroy(struct coolbpf_object *cb)
 {
     cb->skel_destroy(cb->skel_obj);
+}
+
+int coolbpf_object_pin_maps(struct coolbpf_object *cobj) {
+    const struct bpf_object *obj = coolbpf_get_bpf_object(cobj);
+    return bpf_object__pin_maps(obj, "/sys/fs/bpf");
 }
 
 int coolbpf_object_find_map(struct coolbpf_object *cb, const char *name)
