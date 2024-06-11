@@ -251,6 +251,7 @@ static __always_inline void init_conn_info(uint32_t tgid,
   conn_info->role = IsUnknown;
   conn_info->addr.sa.sa_family = AF_UNKNOWN;
   conn_info->is_sample = true;
+  conn_info->protocol = ProtoUnknown;
 }
 
 static __always_inline int32_t get_buf_32(const char *buf)

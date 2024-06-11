@@ -135,7 +135,7 @@ static void test_process_func(void *custom_data, struct test_data *event_data)
 	}
 }
 #endif
-static void test_info_process_func(void *custom_data, struct conn_data_event_t *event_data)
+static void test_data_process_func(void *custom_data, struct conn_data_event_t *event_data)
 {
 	struct conn_data_event_t *data = (struct conn_data_event_t *)event_data;
 	int sport;
@@ -144,8 +144,8 @@ static void test_info_process_func(void *custom_data, struct conn_data_event_t *
 	FILE *file = env_para.file;
 
 	fprintf(file, "=========data event handle:%d==========\n", data_count++);
-	fprintf(file, "start_ts:%llu, end_ts: %llu, connect_id_t:: fd:%d, tgid:%u, start:%llu\n", data->start_ts, data->end_ts,
-		data->conn_id.fd, data->conn_id.tgid, data->conn_id.start);
+	fprintf(file, "start_ts:%llu, end_ts: %llu, connect_id_t:: fd:%d, tgid:%u, start:%llu, protocol: %d\n", data->start_ts, data->end_ts,
+		data->conn_id.fd, data->conn_id.tgid, data->conn_id.start, data->protocol);
 
 	fprintf(file, "reqeust_len:%d, response_len:%d\n", data->request_len, data->response_len);
 	fprintf(file, "request and response msg:\n%s\n", data->msg);
@@ -388,7 +388,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	ebpf_setup_print_func(test_print_func);
 	ebpf_setup_net_event_process_func(test_ctrl_process_func, NULL);
-	ebpf_setup_net_data_process_func(test_info_process_func, NULL);
+	ebpf_setup_net_data_process_func(test_data_process_func, NULL);
 	ebpf_setup_net_statistics_process_func(test_stat_process_func, NULL);
 	err = dladdr(ebpf_cleanup_dog, &dlinfo);
 	if (err)

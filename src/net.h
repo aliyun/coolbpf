@@ -204,9 +204,14 @@ struct conn_data_event_t
   struct connect_id_t conn_id;
   uint64_t start_ts;
   uint64_t end_ts;
+  enum support_proto_e protocol;
   uint16_t request_len;
   uint16_t response_len;
+#ifdef __VMLINUX_H__
   char msg[PACKET_MAX_SIZE * 3];
+#else
+  char msg[]; // msg length = request_len + response_len
+#endif
 };
 
 #ifdef __VMLINUX_H__
@@ -216,7 +221,6 @@ struct connect_info_t
   struct connect_id_t conn_id;
   union sockaddr_t addr;
   struct socket_info si;
-  enum support_proto_e protocol;
   enum support_role_e role;
   enum support_type_e type;
   int64_t wr_bytes;
@@ -241,6 +245,7 @@ struct connect_info_t
   uint64_t wr_max_ts;
   uint64_t start_ts;
   uint64_t end_ts;
+  enum support_proto_e protocol;
   uint16_t request_len;
   uint16_t response_len;
   char msg[PACKET_MAX_SIZE * 3];
