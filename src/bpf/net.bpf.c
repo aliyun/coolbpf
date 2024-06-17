@@ -866,10 +866,13 @@ static __always_inline void try_event_output(void *ctx, struct connect_info_t *i
 {
   if (info->rt)
   {
-    struct conn_data_event_t *data = &info->wr_min_ts;
-    data->conn_id = info->conn_id;
-    u64 total_size = (u64)(&data->msg[0]) - (u64)data + info->request_len + info->response_len;
-    bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU, data, total_size & (PACKET_MAX_SIZE * 2 - 1));
+    if (info->request_len + info->response_len != 0)
+    {
+      struct conn_data_event_t *data = &info->wr_min_ts;
+      data->conn_id = info->conn_id;
+      u64 total_size = (u64)(&data->msg[0]) - (u64)data + info->request_len + info->response_len;
+      bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU, data, total_size & (PACKET_MAX_SIZE * 2 - 1));
+    }
     reset_sock_info(info);
   }
 
