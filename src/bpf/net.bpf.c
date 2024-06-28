@@ -916,6 +916,7 @@ static __always_inline struct conn_stats_event_t *add_conn_stats(struct connect_
   event->last_output_rd_bytes = conn_info->last_output_rd_bytes;
   event->last_output_wr_bytes = conn_info->last_output_wr_bytes;
   event->conn_events = 0;
+  event->si = conn_info->si;
   event->ts = bpf_ktime_get_ns();
   conn_info->last_output_time = event->ts;
   return event;
@@ -1076,12 +1077,63 @@ static __always_inline struct socket *get_socket_by_fd(int fd)
   return NULL;
 }
 
+// for centos 3.10 kernel
+struct net___310
+{
+  unsigned int proc_inum;
+};
+
+struct net_device___310
+{
+  struct net___310 *nd_net;
+  int ifindex;
+};
+
+static inline int read_ns_inum(struct sk_buff *skb, u32 *inum, u32 *ifindex)
+{
+  struct net *net;
+  if (bpf_core_field_exists(net->ns.inum))
+  {
+    struct net_device *dev;
+
+    if (bpf_core_read(&dev, sizeof(dev), &skb->dev))
+      return 0;
+    if (bpf_core_read(&net, sizeof(net), &dev->nd_net.net))
+      return 0;
+    if (bpf_core_read(inum, sizeof(*inum), &net->ns.inum))
+      return 0;
+    if (bpf_core_read(ifindex, sizeof(*ifindex), &dev->ifindex))
+      return 0;
+  }
+  else
+  {
+    struct net___310 *net310;
+    struct net_device___310 *dev310;
+    if (bpf_core_read(&dev310, sizeof(dev310), &skb->dev))
+      return 0;
+    if (bpf_core_read(&net310, sizeof(net310), &dev310->nd_net))
+      return 0;
+    if (bpf_core_read(inum, sizeof(*inum), &net310->proc_inum))
+      return 0;
+    if (bpf_core_read(ifindex, sizeof(*ifindex), &dev310->ifindex))
+      return 0;
+  }
+
+  return 1;
+}
+
+static __always_inline u32 get_netns(struct sock *sk) {
+    return BPF_CORE_READ(sk, __sk_common.skc_net.net, ns.inum);
+}
+
 static __always_inline void parse_socket_info(struct socket *socket, struct socket_info *si)
 {
   struct sock *sk;
   bpf_probe_read_kernel(&sk, sizeof(sk), &socket->sk);
   set_addr_pair_by_sock(sk, &si->ap);
-  // TODO: family and netns
+  si->family = 0;
+  bpf_probe_read_kernel(&si->family, sizeof(sk->__sk_common.skc_family), &sk->__sk_common.skc_family);
+  si->netns = get_netns(sk);
 }
 
 static __always_inline enum support_role_e get_sock_role(const struct socket *socket)
