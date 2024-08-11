@@ -329,16 +329,6 @@ int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long u
 {
 	struct net_bpf *obj = NULL;
 	int err;
-	DECLARE_LIBBPF_OPTS(bpf_object_open_opts, open_opts);
-
-	if (btf == NULL || btf_size == 0 || btf_size > FILE_PATH_SIZE)
-	{
-		get_btf_path();
-	}
-	else
-	{
-		strcpy(env.btf_custom_path, btf);
-	}
 
 	if (so == NULL || so_size == 0)
 	{
@@ -348,8 +338,7 @@ int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long u
 	bump_memlock_rlimit();
 	libbpf_set_print(bpf_net_print_fn);
 
-	open_opts.btf_custom_path = env.btf_custom_path;
-	obj = net_bpf__open_opts(&open_opts);
+	obj = net_bpf__open();
 	if (!obj)
 	{
 		net_log(LOG_TYPE_WARN, "failed to open BPF object\n");
