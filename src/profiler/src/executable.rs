@@ -1,0 +1,102 @@
+use crate::interpreter::IFileInfo;
+use crate::probes::probes::Probes;
+use crate::probes::stack_delta::StackDelta;
+use crate::probes::types::bpf::STACK_DELTA_PAGE_BITS;
+use crate::probes::types::bpf::STACK_DELTA_PAGE_MASK;
+use crate::process::maps::ProcessMapsEntry;
+use crate::symbollizer::elf::ElfFile;
+use crate::symbollizer::file_cache::FileInfo;
+use crate::symbollizer::file_id::FileId64;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::collections::HashSet;
+
+pub struct LoadedDelta {
+    map_id: u16,
+    num_page: u32,
+    start_page: u64,
+}
+
+pub struct Executable {
+    map_info: LoadedDelta,
+    pub i_info: Option<IFileInfo>,
+    rc: u32,
+}
+
+#[derive(Default)]
+pub struct ExecutableCache {
+    errors: HashSet<FileId64>,
+    executables: HashMap<FileId64, Executable>,
+}
+
+impl ExecutableCache {
+    pub fn load_stack_deltas() {}
+
+    pub fn get_or_insert(
+        &mut self,
+        probes: &mut Probes,
+        elf: &FileInfo,
+        map: &ProcessMapsEntry,
+    ) -> Result<Option<&mut Executable>> {
+        let file_id = elf.file_id;
+        // 1. check erros
+        if self.errors.contains(&file_id) {
+            return Ok(None);
+        }
+        if !self.executables.contains_key(&file_id) {
+            // 4. not found, create
+            // a. extract elf
+            // b. load deltas, return mapref
+            let mut ebpf_deltas = vec![];
+
+            let deltas = ElfFile::parse_eh_frame(&elf.elf.file).unwrap();
+
+            let first_page = deltas[0].addr >> STACK_DELTA_PAGE_BITS;
+            let first_page_addr = deltas[0].addr & !(STACK_DELTA_PAGE_MASK as u64);
+            let last_page = deltas.last().unwrap().addr >> STACK_DELTA_PAGE_BITS;
+            let num_pages = last_page - first_page + 1;
+            let mut num_deltas_per_page = vec![0; num_pages as usize];
+
+            // TODO: 可以进行合并，降低unwindinfo的使用量
+            for (_i, delta) in deltas.iter().enumerate() {
+                let unwind_info_idx = probes.get_unwind_info_index(&delta.info)?;
+
+                ebpf_deltas.push(StackDelta::new(delta.addr as u16, unwind_info_idx));
+
+                num_deltas_per_page
+                    [((delta.addr >> STACK_DELTA_PAGE_BITS) - first_page) as usize] += 1;
+            }
+
+            let map_id = probes.stack_delta_map.update(elf.file_id, ebpf_deltas)?;
+            log::debug!("update deltas into stack_delta_page_map");
+            probes.stack_delta_page_map.update(
+                elf.file_id,
+                &num_deltas_per_page,
+                map_id as u16,
+                first_page_addr,
+            )?;
+
+            let exe = Executable {
+                rc: 1,
+                map_info: LoadedDelta {
+                    map_id: map_id as u16,
+                    num_page: num_pages as u32,
+                    start_page: first_page_addr,
+                },
+                i_info: if let Some(p) = &map.path {
+                    IFileInfo::parse(p.as_str(), &elf.elf.object_file())
+                } else {
+                    None
+                },
+            };
+
+            self.executables.insert(file_id, exe);
+        }
+
+        let exe = self.executables.get_mut(&file_id).unwrap();
+        exe.rc += 1;
+        return Ok(Some(exe));
+
+        // check interpreter
+    }
+}

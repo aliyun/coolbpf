@@ -1,0 +1,44 @@
+[package]
+name = "profiler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "profiler"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.86"
+blazesym = "0.2.0-rc.0"
+byteorder = "1.5.0"
+cached = "0.52.0"
+crossbeam-channel = "0.5.13"
+env_logger = "0.11.5"
+gimli = "0.30.0"
+libbpf-rs = "0.23.3"
+libc = "0.2.155"
+log = "0.4.22"
+log4rs = "1.3.0"
+lru = "0.12.3"
+memmap2 = "0.9.4"
+num_cpus = "1.16.0"
+object = "0.36.1"
+perf-event-open-sys = "4.0.0"
+procfs = "0.16.0"
+read-process-memory = "0.1.6"
+regex = "1.10.5"
+sha2 = "0.10.8"
+structopt = "0.3.26"
+symbolic-common = "12.10.0"
+symbolic-demangle = { version = "12.10.0", default-features = false, features = ["rust", "cpp"] }
+tempfile = "3.10.1"
+thiserror = "1.0.63"
+typed-arena = "2.0.2"
+
+# [profile.release]
+# debug = true
+
+
+[build-dependencies]
+libbpf-cargo = "0.23.3"
+bindgen = "0.69.4"
