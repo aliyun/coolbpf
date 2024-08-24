@@ -79,7 +79,6 @@ macro_rules! load_skel {
 pub struct Probes<'a> {
     skel: native::NativeStackSkel<'a>,
     pub hotspot_skel: hotspot::HotspotSkel<'a>,
-    system_config_skel: system_config::SystemConfigSkel<'a>,
     interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
     links: Vec<Link>,
     pub rx: Receiver<ProbeEvent>,
@@ -153,7 +152,7 @@ impl<'a> Probes<'a> {
         }
         let stack_delta_map = StackDeltaMap::new(exeid2stack_maps, has_generic_batchop);
 
-        let system_config_skel = load_skel!(maps, system_config::SystemConfigSkelBuilder);
+        let mut system_config_skel = load_skel!(maps, system_config::SystemConfigSkelBuilder);
         let interpreter_dispatcher_skel =
             load_skel!(maps, dispatcher::InterpreterDispatcherSkelBuilder);
         let hotspot_skel = load_skel!(maps, hotspot::HotspotSkelBuilder);
@@ -186,7 +185,6 @@ impl<'a> Probes<'a> {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
             skel,
             hotspot_skel,
-            system_config_skel,
             interpreter_dispatcher_skel,
             links: vec![],
             rx,
@@ -197,7 +195,7 @@ impl<'a> Probes<'a> {
             unwind_info_cache: Default::default(),
             has_generic_batchop,
         };
-        probe.load_system_config();
+        probe.load_system_config(system_config_skel);
         probe.load_unwinders();
         probe.attach_perf_event(10000000);
         probe
@@ -232,9 +230,8 @@ impl<'a> Probes<'a> {
         }
     }
 
-    fn load_system_config(&mut self) {
-        let _link = self
-            .system_config_skel
+    fn load_system_config(&mut self, mut system_config_skel: system_config::SystemConfigSkel) {
+        let _link = system_config_skel
             .progs_mut()
             .read_task_struct()
             .attach()
@@ -244,14 +241,13 @@ impl<'a> Probes<'a> {
         let mut value = SystemAnalysis::default();
         value.set_pid(unsafe { libc::getpid() as u32 });
         value.set_address(sc.task_stack_offset as u64);
-        self.system_config_skel
+        system_config_skel
             .maps_mut()
             .system_analysis()
             .update(&key.to_ne_bytes(), value.slice(), MapFlags::ANY)
             .unwrap();
 
-        let value = self
-            .system_config_skel
+        let value = system_config_skel
             .maps_mut()
             .system_analysis()
             .lookup(&key.to_ne_bytes(), MapFlags::ANY)
@@ -262,7 +258,7 @@ impl<'a> Probes<'a> {
         assert!(ret_value.raw.pid == 0);
         sc.set_stack_ptregs_offset((ret_value.raw.address - ret_value.code_u64()) as u32);
 
-        self.system_config_skel
+        system_config_skel
             .maps_mut()
             .system_config()
             .update(&key.to_ne_bytes(), sc.slice(), MapFlags::ANY)
