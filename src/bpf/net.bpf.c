@@ -1624,10 +1624,10 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit_comp
   }
   try_event_output(ctx, conn_info, direction);
   output_conn_stats(ctx, conn_info, direction, return_bytes);
-  if (!conn_info->is_sample)
-  {
-    return;
-  }
+  // if (!conn_info->is_sample)
+  // {
+  //   return;
+  // }
   bool drop = false;
   if (!vecs)
   {
@@ -1929,6 +1929,11 @@ int tp_sys_exit_write(struct trace_event_raw_sys_exit_comp *ctx)
   struct data_param_t *write_param = bpf_map_lookup_elem(&write_param_map, &id);
   if (write_param != NULL && write_param->real_conn)
   {
+    struct conn_param_t conn_param = {
+        .addr = NULL,
+        .fd = write_param->fd,
+    };
+    trace_reserve_conn(ctx, id, &conn_param);
 #ifdef NET_TEST
     uint64_t pid = id >> 32;
     net_bpf_print("kernel sys_exit_write print: pid:%d fd: %d: \n", pid, write_param->fd);
@@ -1969,6 +1974,11 @@ int tp_sys_exit_read(struct trace_event_raw_sys_exit_comp *ctx)
   struct data_param_t *read_param = bpf_map_lookup_elem(&read_param_map, &id);
   if (read_param != NULL && read_param->real_conn)
   {
+    struct conn_param_t conn_param = {
+        .addr = NULL,
+        .fd = read_param->fd,
+    };
+    trace_reserve_conn(ctx, id, &conn_param);
     trace_exit_data(ctx, id, DirIngress, read_param, return_bytes, false);
   }
   bpf_map_delete_elem(&read_param_map, &id);
@@ -2539,6 +2549,11 @@ int tp_sys_exit_writev(struct trace_event_raw_sys_exit_comp *ctx)
   struct data_param_t *write_param = bpf_map_lookup_elem(&write_param_map, &id);
   if (write_param != NULL && write_param->real_conn)
   {
+    struct conn_param_t conn_param = {
+        .addr = NULL,
+        .fd = write_param->fd,
+    };
+    trace_reserve_conn(ctx, id, &conn_param);
 #ifdef NET_TEST
     uint64_t pid = id >> 32;
     net_bpf_print("kernel sys_exit_writev print: pid:%d fd: %d: \n", pid, write_param->fd);
@@ -2580,6 +2595,11 @@ int tp_sys_exit_readv(struct trace_event_raw_sys_exit_comp *ctx)
   struct data_param_t *read_param = bpf_map_lookup_elem(&read_param_map, &id);
   if (read_param != NULL && read_param->real_conn)
   {
+    struct conn_param_t conn_param = {
+        .addr = NULL,
+        .fd = read_param->fd,
+    };
+    trace_reserve_conn(ctx, id, &conn_param);
 #ifdef NET_TEST
     uint64_t pid = id >> 32;
     net_bpf_print("kernel sys_exit_readv print: pid:%d fd: %d: \n", pid, read_param->fd);
