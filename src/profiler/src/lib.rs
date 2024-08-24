@@ -1,6 +1,8 @@
 use profiler::Profiler;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 pub mod error;
 pub mod executable;
 pub mod interpreter;
@@ -14,6 +16,13 @@ pub mod utils;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
+
+pub const SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn livetrace_enable_system_profiling() {
+    SYSTEM_PROFILING.store(true, Ordering::SeqCst);
+}
 
 #[no_mangle]
 pub extern "C" fn livetrace_profiler_create() -> *mut Profiler<'static> {

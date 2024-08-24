@@ -883,10 +883,19 @@ static inline int collect_trace(struct pt_regs *ctx)
   {
     return 0;
   }
-  u64 ktime = bpf_ktime_get_ns();
+  bool tracing_pid = pid_information_exists(ctx, pid);
+
+  if (!tracing_pid)
+  {
+    u32 syscfg_key = 0;
+    SystemConfig *syscfg = bpf_map_lookup_elem(&system_config, &syscfg_key);
+    if (!syscfg || !syscfg->all_system_profiling)
+    {
+      return -1;
+    }
+  }
 
   DEBUG_PRINT("==== do_perf_event ====");
-
   // The trace is reused on each call to this function so we have to reset the
   // variables used to maintain state.
   DEBUG_PRINT("Resetting CPU record");
@@ -899,6 +908,7 @@ static inline int collect_trace(struct pt_regs *ctx)
   Trace *trace = &record->trace;
   trace->pid = pid;
 #if 0
+  u64 ktime = bpf_ktime_get_ns();
   trace->ktime = ktime;
   if (bpf_get_current_comm(&(trace->comm), sizeof(trace->comm)) < 0)
   {
@@ -919,19 +929,16 @@ static inline int collect_trace(struct pt_regs *ctx)
     goto exit;
   }
 
-  if (!pid_information_exists(ctx, pid))
+  if (!tracing_pid)
   {
-    if (has_usermode_regs)
-    {
 #if 1
-      trace->user_stack_id = 0x7fffffff;
-      long len = bpf_get_stack(ctx, trace->user_stack, sizeof(trace->user_stack), BPF_F_USER_STACK);
-      if (len > 0)
-        trace->stack_len = len / 8;
+    trace->user_stack_id = 0x7fffffff;
+    long len = bpf_get_stack(ctx, trace->user_stack, sizeof(trace->user_stack), BPF_F_USER_STACK);
+    if (len > 0)
+      trace->stack_len = len / 8;
 #else
-      trace->user_stack_id = bpf_get_stackid(ctx, &kernel_stackmap, BPF_F_USER_STACK);
+    trace->user_stack_id = bpf_get_stackid(ctx, &kernel_stackmap, BPF_F_USER_STACK);
 #endif
-    }
     unwinder = PROG_UNWIND_STOP;
     goto exit;
 #if 0
@@ -943,7 +950,6 @@ static inline int collect_trace(struct pt_regs *ctx)
 #endif
   }
   error = get_next_unwinder_after_native_frame(record, &unwinder);
-
 exit:
   record->state.unwind_error = error;
   tail_call(ctx, unwinder);
@@ -951,7 +957,7 @@ exit:
   return -1;
 }
 
-SEC("perf_event") 
+SEC("perf_event")
 int native_tracer_entry(struct bpf_perf_event_data *ctx)
 {
   return collect_trace((struct pt_regs *)&ctx->regs);

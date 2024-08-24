@@ -866,6 +866,8 @@ typedef struct SystemConfig {
 
   // Enables the temporary hack that drops pure errors frames in unwind_stop.
   bool drop_error_only_traces;
+
+  bool all_system_profiling;
 } SystemConfig;
 
 // Avoid including all of arch/arm64/include/uapi/asm/ptrace.h by copying the
