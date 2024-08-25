@@ -167,8 +167,8 @@ impl HotspotInstance {
             pinfo.raw.codecache_start = info.ranges[0].code_start;
             pinfo.raw.codecache_end = info.ranges[0].code_end;
         } else {
-            pinfo.raw.codecache_start = vms.code_cache.low_bound + self.bias;
-            pinfo.raw.codecache_end = vms.code_cache.high_bound + self.bias;
+            pinfo.raw.codecache_start = self.pm.ptr(vms.code_cache.low_bound + self.bias).unwrap();
+            pinfo.raw.codecache_end = self.pm.ptr(vms.code_cache.high_bound + self.bias).unwrap();
         }
 
         probes.hotspot_skel.maps_mut().hotspot_procs().update(
@@ -505,7 +505,7 @@ impl HotspotInstance {
 
         let compile_id = SafeReader::u32(&nmethod, vms.nmethod.compile_id as usize);
         if compile_id != addr_check {
-            bail!("JIT info evicted since eBPF snapshot")
+            bail!("JIT info evicted since eBPF snapshot: {:x}", compile_id)
         }
 
         let metadata_off = SafeReader::u32(&nmethod, vms.nmethod.metadata_offset as usize) as u64;
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_get_jit() {
-        let proc = Process::new(3311232);
+        let proc = Process::new(1233);
         let pm = proc.memory().unwrap();
 
         let maps = ProcessMaps::new(proc.pid()).unwrap();
@@ -662,9 +662,8 @@ mod tests {
                     HotspotFileInfo::new(&"sdsa".to_owned(), &elf_file).unwrap();
 
                 let mut hi = HotspotInstance::new(Rc::new(jvm_file_info), &proc, bias).unwrap();
-
-                let jit = hi.get_jit_info(0x7f2f445e0390, 5132).unwrap();
-
+                let jit = hi.get_jit_info(0x7ff26c660790, 5399).unwrap();
+                // let jit = hi.get_method(0x7ff26c456d56).unwrap();
                 println!("{:?}", jit);
             }
         }
