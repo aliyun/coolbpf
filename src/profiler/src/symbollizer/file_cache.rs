@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
-use std::num::NonZero;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::time::SystemTime;
@@ -80,7 +80,7 @@ impl DerefMut for FileCache {
 impl FileCache {
     pub fn new() -> Self {
         Self {
-            cache: LruCache::new(NonZero::new(1024).unwrap()),
+            cache: LruCache::new(NonZeroUsize::new(1024).unwrap()),
         }
     }
 

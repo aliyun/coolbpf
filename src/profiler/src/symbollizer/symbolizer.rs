@@ -7,7 +7,7 @@ use std::fs::read_to_string;
 use std::fs::File;
 use std::io;
 use std::io::BufRead;
-use std::num::NonZero;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::Range;
 
@@ -79,7 +79,7 @@ impl Symbolizer {
         let symer = Symbolizer {
             bias_cache: HashMap::default(),
             symbols: Vec::new(),
-            procs: LruCache::new(NonZero::new(MAX_NUM_OF_PROCESSES).unwrap()),
+            procs: LruCache::new(NonZeroUsize::new(MAX_NUM_OF_PROCESSES).unwrap()),
             files: HashMap::default(),
             kernel: FileSymbol::default(),
         };
