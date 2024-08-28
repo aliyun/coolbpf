@@ -1,5 +1,6 @@
 use crate::executable::ExecutableCache;
 use crate::interpreter::Interpreter;
+use crate::is_system_profiling;
 use crate::probes::event::ProbeEvent;
 use crate::probes::probes::Probes;
 use crate::process::maps::ExeMapsEntry;
@@ -11,6 +12,7 @@ use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::MIN_PROCESS_SAMPLES;
+use crate::SYSTEM_PROFILING;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -22,6 +24,8 @@ pub struct Profiler<'a> {
     executables: ExecutableCache,
     symbolizer: Symbolizer,
     interpreters: HashMap<u32, Interpreter>,
+
+    all_system_profiling: bool,
 }
 
 impl<'a> Profiler<'a> {
@@ -35,6 +39,7 @@ impl<'a> Profiler<'a> {
             executables: ExecutableCache::default(),
             symbolizer: symer,
             interpreters: HashMap::new(),
+            all_system_profiling: is_system_profiling(),
         }
     }
 
@@ -62,7 +67,10 @@ impl<'a> Profiler<'a> {
                 Err(_e) => break,
             }
         }
-        stack_agg.filter(MIN_PROCESS_SAMPLES);
+
+        if self.all_system_profiling {
+            stack_agg.filter(MIN_PROCESS_SAMPLES);
+        }
         let stacks = stack_agg.symbolize(&mut self.symbolizer, &mut self.interpreters);
         stacks
     }

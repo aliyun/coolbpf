@@ -19,6 +19,10 @@ const MIN_PROCESS_SAMPLES: usize = 10;
 
 pub const SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
 
+pub fn is_system_profiling() -> bool {
+    SYSTEM_PROFILING.load(Ordering::SeqCst)
+}
+
 #[no_mangle]
 pub extern "C" fn livetrace_enable_system_profiling() {
     SYSTEM_PROFILING.store(true, Ordering::SeqCst);
