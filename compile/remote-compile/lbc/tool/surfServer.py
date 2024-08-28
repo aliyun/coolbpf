@@ -65,7 +65,9 @@ class CexecCmd(object):
 
     def cmd(self, cmds):
         p = Popen(shlex.split(cmds), stdout=PIPE, stderr=PIPE)
-        return p.stdout.read().decode() + p.stderr.read().decode()
+        # return p.stdout.read().decode() + p.stderr.read().decode()
+        stdout, stderr = p.communicate()
+        return stdout.decode() + stderr.decode()
 
     def system(self, cmds):
         cmds = cmds.replace('\0', '').strip()
