@@ -1047,6 +1047,7 @@ static __always_inline int filter_config_info(struct connect_info_t *conn_info)
 static __always_inline struct connect_info_t *build_conn_info(uint32_t tgid, int32_t fd)
 {
   uint64_t tgid_fd = combine_tgid_fd(tgid, fd);
+#if 0
   int key = 0;
   struct connect_info_t *new_conn_info = bpf_map_lookup_elem(&connect_info_heap, &key);
   if (!new_conn_info)
@@ -1067,7 +1068,7 @@ static __always_inline struct connect_info_t *build_conn_info(uint32_t tgid, int
   err = bpf_map_update_elem(&connect_info_map, &tgid_fd, new_conn_info, BPF_NOEXIST);
   if (err && err != -EEXIST)
     return NULL;
-
+#endif
   return (struct connect_info_t *)bpf_map_lookup_elem(&connect_info_map, &tgid_fd);
 }
 
@@ -1600,11 +1601,13 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit_comp
     return;
   }
 
+#if 0
   enum support_tgid_e matched = match_tgid(tgid);
   if (matched == TgidUnmatch)
   {
     return;
   }
+#endif
 
   struct connect_info_t *conn_info = build_conn_info(tgid, data_param->fd);
   if (conn_info == NULL)
@@ -1661,7 +1664,7 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit_comp
     return;
   }
 
-  if (need_trace_protocol(conn_info) || matched == TgidMatch)
+  if (need_trace_protocol(conn_info))
   {
     if (!vecs)
     {
