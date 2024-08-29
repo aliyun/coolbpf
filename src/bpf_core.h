@@ -65,4 +65,9 @@ static __always_inline bool bpf_core_task_struct_thread_info_exist(struct task_s
     return bpf_core_field_exists(task->thread_info);
 }
 
+static __always_inline u16 bpf_core_sock_sk_protocol(struct sock *sk)
+{
+    return (u16)BPF_CORE_READ_BITFIELD_PROBED(sk, sk_protocol);
+}
+
 #endif

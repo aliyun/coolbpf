@@ -141,6 +141,7 @@ struct socket_info
   struct addr_pair_t ap;
   int family;
   int netns;
+  unsigned short protocol;
 };
 
 union sockaddr_t

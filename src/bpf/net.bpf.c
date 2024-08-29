@@ -83,6 +83,14 @@ struct
 {
   __uint(type, BPF_MAP_TYPE_HASH);
   __type(key, u64);
+  __type(value, u64);
+  __uint(max_entries, MAX_CONNECT_ENTRIES);
+} socket_pidfd_map SEC(".maps");
+
+struct
+{
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __type(key, u64);
   __type(value, struct conn_param_t);
   __uint(max_entries, MAX_PARAM_ENTRIES);
   __uint(map_flags, BPF_F_NO_PREALLOC);
@@ -966,7 +974,7 @@ static __always_inline void filter_data_sample(struct config_info_t *config_info
   {
     return;
   }
-  conn_info->is_sample = false;
+  // conn_info->is_sample = false;
 }
 
 static __always_inline int filter_self(struct config_info_t *config_info,
@@ -1190,6 +1198,7 @@ static __always_inline void parse_socket_info(struct socket *socket, struct sock
   si->family = 0;
   bpf_probe_read_kernel(&si->family, sizeof(sk->__sk_common.skc_family), &sk->__sk_common.skc_family);
   si->netns = get_netns(sk);
+  si->protocol = bpf_core_sock_sk_protocol(sk);
 }
 
 static __always_inline enum support_role_e get_sock_role(const struct socket *socket)
@@ -1219,13 +1228,18 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *c
   enum support_role_e role = tg_role->role;
 
   socket = socket ?: get_socket_by_fd(fd);
-  if (socket != NULL)
+  if (!socket)
+    return;
+
+  if (role == IsUnknown)
   {
-    if (role == IsUnknown)
-    {
-      role = get_sock_role(socket);
-    }
-    parse_socket_info(socket, &conn_info->si);
+    role = get_sock_role(socket);
+  }
+  parse_socket_info(socket, &conn_info->si);
+
+  if (conn_info->si.protocol != IPPROTO_TCP)
+  {
+    return;
   }
 
   init_conn_info(tgid, fd, conn_info);
@@ -1246,6 +1260,7 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *c
   uint64_t tgid_fd = combine_tgid_fd(tgid, fd);
   // net_bpf_print("start ====add_conn\n");
   bpf_map_update_elem(&connect_info_map, &tgid_fd, conn_info, BPF_ANY);
+  bpf_map_update_elem(&socket_pidfd_map, &socket, &tgid_fd, BPF_ANY);
   if (!need_trace_family(conn_info->addr.sa.sa_family))
   {
     return;
@@ -1359,7 +1374,7 @@ static __always_inline void trace_reserve_conn(struct trace_event_raw_sys_exit_c
   struct tg_info_t tg_role = {tgid, conn_param->fd, IsUnknown};
   add_one_conn(ctx, conn_param->addr, NULL, &tg_role);
 }
-
+#if 0
 static __always_inline void trace_exit_close(struct trace_event_raw_sys_exit_comp *ctx,
                                              uint64_t id,
                                              const struct close_param_t *close_param)
@@ -1415,6 +1430,7 @@ static __always_inline void trace_exit_close(struct trace_event_raw_sys_exit_com
 
   bpf_map_delete_elem(&connect_info_map, &tgid_fd);
 }
+#endif
 
 static __always_inline void trace_exit_accept(struct trace_event_raw_sys_exit_comp *ctx,
                                               uint64_t id,
@@ -1812,7 +1828,7 @@ int tp_sys_exit_accept4(struct trace_event_raw_sys_exit_comp *ctx)
 #endif
   return 0;
 }
-
+#if 0
 SEC("tracepoint/syscalls/sys_enter_close")
 // int close(int fd);
 int tp_sys_enter_close(struct trace_event_raw_sys_enter_comp *ctx)
@@ -1843,6 +1859,57 @@ int tp_sys_exit_close(struct trace_event_raw_sys_exit_comp *ctx)
 #ifdef NET_TEST
   test_bpf_syscall(ctx, id, 0, NULL, ctx->ret, 8);
 #endif
+  return 0;
+}
+#endif
+
+SEC("kprobe/tcp_close")
+int BPF_KPROBE(tcp_close, struct sock *sk)
+{
+  struct socket *sock;
+  bpf_probe_read(&sock, sizeof(sock), &sk->sk_socket);
+  u64 *tgid_fd = bpf_map_lookup_elem(&socket_pidfd_map, &sock);
+  if (!tgid_fd)
+    return 0;
+
+  struct connect_info_t *conn_info = bpf_map_lookup_elem(&connect_info_map, tgid_fd);
+  if (conn_info == NULL)
+  {
+    return 0;
+  }
+  enum support_role_e role = conn_info->role;
+  if (role == IsClient)
+  {
+    handle_client_close(conn_info);
+  }
+  else if (role == IsServer)
+  {
+    handle_server_close(conn_info);
+  }
+  try_event_output(ctx, conn_info, DirUnknown);
+  /*
+   * only family is AF_UNIX and no data will no report, but the bytes will be
+   * recorded in first data event and report to user
+   */
+  if (need_trace_family(conn_info->addr.sa.sa_family) ||
+      conn_info->wr_bytes != 0 ||
+      conn_info->rd_bytes != 0)
+  {
+
+    add_close_event(ctx, conn_info);
+    if (conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts != conn_info->rd_pkts + conn_info->wr_pkts)
+    {
+      struct conn_stats_event_t *stats_event = add_conn_stats(conn_info);
+      if (stats_event != NULL)
+      {
+        stats_event->conn_events = stats_event->conn_events | StatusClose;
+        bpf_perf_event_output(ctx, &connect_stats_events_map, BPF_F_CURRENT_CPU, stats_event, sizeof(struct conn_stats_event_t));
+      }
+    }
+  }
+
+  bpf_map_delete_elem(&connect_info_map, tgid_fd);
+  bpf_map_delete_elem(&socket_pidfd_map, &sock);
   return 0;
 }
 
