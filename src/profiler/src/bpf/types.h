@@ -6,9 +6,12 @@
 #include "errors.h"
 #include "frametypes.h"
 
-#ifndef __x86_64__
+#if defined(__TARGET_ARCH_x86)
 #define __x86_64__
+#elif defined(__TARGET_ARCH_arm64)
+#define __aarch64__
 #endif
+
 
 #ifndef __VMLINUX_H__
 typedef signed char         s8;
