@@ -86,13 +86,18 @@ impl Symbolizer {
         symer
     }
 
-    pub fn add_file(&mut self, file_id: FileId64, file: object::File) {
+    pub fn bias_by_fileid(&self, id: &FileId64) -> Option<&u64> {
+        self.bias_cache.get(id)
+    }
+
+    pub fn add_file(&mut self, file_id: FileId64, file: object::File, bias: u64) {
         let start = self.symbols.len();
         ElfFile::parse_symbols2(file, &mut self.symbols);
         let end = self.symbols.len();
 
         let fsym = FileSymbol(start..end);
         self.files.insert(file_id, fsym);
+        self.bias_cache.insert(file_id, bias);
     }
 
     fn __sort_symbols(&mut self, s: usize, e: usize) {

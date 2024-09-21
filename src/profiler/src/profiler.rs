@@ -75,6 +75,20 @@ impl<'a> Profiler<'a> {
         stacks
     }
 
+    pub fn read2(&mut self) -> Vec<u8> {
+        let mut stack_agg = StackAggregator::default();
+        loop {
+            match self.probes.rx.try_recv() {
+                Ok(ProbeEvent::Trace(data)) => {
+                    stack_agg.add(data);
+                }
+                Err(_e) => break,
+            }
+        }
+
+        stack_agg.serialize(&mut self.symbolizer, &mut self.interpreters)
+    }
+
     pub fn populate_pids(&mut self, pids: Vec<u32>) -> Result<()> {
         let start = Instant::now();
         for pid in pids {
@@ -179,7 +193,7 @@ impl<'a> Profiler<'a> {
                 .unwrap();
             let bias = map.start - va;
             self.symbolizer
-                .add_file(info.file_id, info.elf.object_file());
+                .add_file(info.file_id, info.elf.object_file(), bias);
 
             // 计算该maps对应的
             let exe_map = ExeMapsEntry {

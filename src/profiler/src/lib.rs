@@ -7,20 +7,27 @@ pub mod error;
 pub mod executable;
 pub mod interpreter;
 pub mod opened_file;
+pub mod pb;
 pub mod probes;
 pub mod process;
 pub mod profiler;
 pub mod stack;
 pub mod symbollizer;
 pub mod utils;
+use ctor::*;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
 
-pub const SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
+pub static SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_system_profiling() -> bool {
     SYSTEM_PROFILING.load(Ordering::SeqCst)
+}
+
+#[ctor]
+fn global_libarary_constructor() {
+    env_logger::init();
 }
 
 #[no_mangle]
@@ -30,7 +37,6 @@ pub extern "C" fn livetrace_enable_system_profiling() {
 
 #[no_mangle]
 pub extern "C" fn livetrace_profiler_create() -> *mut Profiler<'static> {
-    env_logger::init();
     Box::into_raw(Box::new(Profiler::new()))
 }
 
@@ -85,5 +91,23 @@ pub extern "C" fn livetrace_profiler_read(
         let cstr = CString::new(proc.to_string()).unwrap();
         let comm = CString::new(proc.comm.clone()).unwrap();
         unsafe { cb(proc.pid, comm.as_ptr(), cstr.as_ptr(), proc.count) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn livetrace_profiler_read_bytes(
+    profiler: *mut Profiler,
+    cb: unsafe extern "C" fn(*const libc::uint8_t, libc::c_uint),
+) {
+    let profiler = match unsafe { profiler.as_mut() } {
+        Some(profiler) => profiler,
+        None => return,
+    };
+
+    let bytes = profiler.read2();
+    if !bytes.is_empty() {
+        unsafe {
+            cb(bytes.as_ptr(), bytes.len() as u32);
+        }
     }
 }

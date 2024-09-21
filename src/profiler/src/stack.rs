@@ -1,4 +1,8 @@
 use crate::interpreter::Interpreter;
+use crate::pb::ustack;
+use crate::pb::LivetraceCell;
+use crate::pb::LivetraceList;
+use crate::pb::Ustack;
 use crate::probes::event::RawStack;
 use crate::probes::event::RawUserStack;
 use crate::probes::probes::Probes;
@@ -8,6 +12,7 @@ use crate::symbollizer::symbolizer::Symbol;
 use crate::symbollizer::symbolizer::Symbolizer;
 use anyhow::bail;
 use anyhow::Result;
+use protobuf::Message;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
@@ -144,16 +149,69 @@ impl StackCounter {
 #[derive(Default)]
 pub struct StackAggregator {
     stacks: HashMap<u32, StackCounter>,
+    pub total: usize,
 }
 
 impl StackAggregator {
     pub fn add(&mut self, raw: RawStack) {
         let sc = self.stacks.entry(raw.pid).or_insert(StackCounter::new());
+        self.total += 1;
         sc.add(raw);
     }
 
     pub fn filter(&mut self, threshold: usize) {
         self.stacks.retain(|_, x| x.len() > threshold);
+    }
+
+    pub fn serialize(
+        &mut self,
+        symer: &mut Symbolizer,
+        inters: &mut HashMap<u32, Interpreter>,
+    ) -> Vec<u8> {
+        let mut list = LivetraceList::new();
+        for (pid, sc) in &self.stacks {
+            let mut cell = LivetraceCell::new();
+            cell.pid = *pid;
+            for (raw, cnt) in &sc.stacks {
+                cell.samples = *cnt;
+                cell.kstack = raw.kernel.clone();
+                cell.kstack.reverse();
+
+                match &raw.user {
+                    RawUserStack::Dynamic(frames) => {
+                        for i in frames {
+                            let addr = i.addr_or_line;
+                            let frame = i.kind as u32;
+                            if frame == bpf::FRAME_MARKER_NATIVE {
+                                let id = i.file_id;
+                                let mut ustack = Ustack::new();
+                                let sym = symer.bias_by_fileid(&FileId64(id));
+                                ustack.set_addr(*sym.unwrap() + addr);
+                                cell.ustack.push(ustack);
+                            } else {
+                                // todo!("not support");
+                                log::debug!("frame type: {}", frame);
+                            }
+                        }
+                    }
+                    RawUserStack::Native(addrs) => {
+                        cell.ustack = addrs
+                            .iter()
+                            .map(|x| {
+                                let mut ustack = Ustack::new();
+                                ustack.set_addr(*x);
+                                ustack
+                            })
+                            .collect();
+                    }
+                }
+            }
+            
+            cell.ustack.reverse();
+            list.list.push(cell);
+        }
+
+        list.write_to_bytes().unwrap()
     }
 
     pub fn symbolize(

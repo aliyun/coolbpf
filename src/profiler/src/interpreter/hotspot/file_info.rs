@@ -51,9 +51,12 @@ impl HotspotFileInfo {
             ],
         )?;
 
-        info.jvmci_struct_ptrs = info.struct_ptrs;
-        info.jvmci_struct_ptrs.base = locate_jvmci_vm_structs(elf)?;
-        info.jvmci_struct_ptrs.skip_base_dref = true;
+        if let Ok(base) = locate_jvmci_vm_structs(elf) {
+            info.jvmci_struct_ptrs = info.struct_ptrs;
+            info.jvmci_struct_ptrs.base = base;
+            info.jvmci_struct_ptrs.skip_base_dref = true;
+        }
+        
 
         Ok(info)
     }

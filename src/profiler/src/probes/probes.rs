@@ -217,7 +217,8 @@ impl<'a> Probes<'a> {
             };
 
             if pfd <= 0 {
-                panic!("failed to create perf event on cpu: {}", i);
+                log::error!("failed to create perf event on cpu: {}", i);
+                continue;
             }
 
             let link = self

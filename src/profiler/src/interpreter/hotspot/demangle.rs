@@ -4,7 +4,6 @@
  * See the file "LICENSE" for details.
  */
 
-
 use std::usize;
 
 const JAVA_BASE_TYPES: &[(&str, char)] = &[
