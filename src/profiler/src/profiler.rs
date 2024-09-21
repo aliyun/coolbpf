@@ -1,5 +1,6 @@
 use crate::executable::ExecutableCache;
 use crate::interpreter::Interpreter;
+use crate::is_enable_symbolizer;
 use crate::is_system_profiling;
 use crate::probes::event::ProbeEvent;
 use crate::probes::probes::Probes;
@@ -26,6 +27,7 @@ pub struct Profiler<'a> {
     interpreters: HashMap<u32, Interpreter>,
 
     all_system_profiling: bool,
+    enable_symbolizer: bool,
 }
 
 impl<'a> Profiler<'a> {
@@ -40,6 +42,7 @@ impl<'a> Profiler<'a> {
             symbolizer: symer,
             interpreters: HashMap::new(),
             all_system_profiling: is_system_profiling(),
+            enable_symbolizer: is_enable_symbolizer(),
         }
     }
 
@@ -192,8 +195,12 @@ impl<'a> Profiler<'a> {
                 .get_or_insert(&mut self.probes, info, map)?
                 .unwrap();
             let bias = map.start - va;
-            self.symbolizer
-                .add_file(info.file_id, info.elf.object_file(), bias);
+            if self.enable_symbolizer {
+                self.symbolizer
+                    .add_file(info.file_id, info.elf.object_file(), bias);
+            } else {
+                self.symbolizer.bias_cache.insert(info.file_id, bias);
+            }
 
             // 计算该maps对应的
             let exe_map = ExeMapsEntry {

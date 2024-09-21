@@ -20,9 +20,14 @@ const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
 
 pub static SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
+pub static ENABLE_SYMBOLIZER: AtomicBool = AtomicBool::new(true);
 
 pub fn is_system_profiling() -> bool {
     SYSTEM_PROFILING.load(Ordering::SeqCst)
+}
+
+pub fn is_enable_symbolizer() -> bool {
+    ENABLE_SYMBOLIZER.load(Ordering::SeqCst)
 }
 
 #[ctor]
@@ -33,6 +38,11 @@ fn global_libarary_constructor() {
 #[no_mangle]
 pub extern "C" fn livetrace_enable_system_profiling() {
     SYSTEM_PROFILING.store(true, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn livetrace_disable_symbolizer() {
+    ENABLE_SYMBOLIZER.store(false, Ordering::SeqCst);
 }
 
 #[no_mangle]
