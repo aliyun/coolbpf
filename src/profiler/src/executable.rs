@@ -49,7 +49,7 @@ impl ExecutableCache {
             // b. load deltas, return mapref
             let mut ebpf_deltas = vec![];
 
-            let deltas = ElfFile::parse_eh_frame(&elf.elf.file).unwrap();
+            let deltas = ElfFile::parse_eh_frame(&elf.file).unwrap();
 
             let first_page = deltas[0].addr >> STACK_DELTA_PAGE_BITS;
             let first_page_addr = deltas[0].addr & !(STACK_DELTA_PAGE_MASK as u64);
@@ -84,7 +84,9 @@ impl ExecutableCache {
                     start_page: first_page_addr,
                 },
                 i_info: if let Some(p) = &map.path {
-                    IFileInfo::parse(p.as_str(), &elf.elf.object_file())
+                    let mmap_ref = unsafe { memmap2::Mmap::map(&elf.file)? };
+                    let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                    IFileInfo::parse(p.as_str(), &object)
                 } else {
                     None
                 },

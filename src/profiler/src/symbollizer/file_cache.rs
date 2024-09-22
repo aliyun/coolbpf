@@ -25,7 +25,7 @@ pub struct ProgramAddress {
 
 #[derive(Debug)]
 pub struct FileInfo {
-    pub elf: ElfFile,
+    pub file: File,
     pub last_modified: SystemTime,
     pub file_id: FileId64,
     pub pas: Vec<ProgramAddress>,
@@ -37,7 +37,7 @@ impl FileInfo {
             last_modified,
             file_id,
             pas: ElfFile::parse_ph(&file)?,
-            elf: ElfFile::from_file(file)?,
+            file,
         })
     }
 

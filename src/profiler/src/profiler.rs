@@ -196,8 +196,9 @@ impl<'a> Profiler<'a> {
                 .unwrap();
             let bias = map.start - va;
             if self.enable_symbolizer {
-                self.symbolizer
-                    .add_file(info.file_id, info.elf.object_file(), bias);
+                let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
+                let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                self.symbolizer.add_file(info.file_id, object, bias);
             } else {
                 self.symbolizer.bias_cache.insert(info.file_id, bias);
             }

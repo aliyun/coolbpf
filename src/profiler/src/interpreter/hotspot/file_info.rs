@@ -56,7 +56,6 @@ impl HotspotFileInfo {
             info.jvmci_struct_ptrs.base = base;
             info.jvmci_struct_ptrs.skip_base_dref = true;
         }
-        
 
         Ok(info)
     }

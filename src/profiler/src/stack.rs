@@ -206,7 +206,7 @@ impl StackAggregator {
                     }
                 }
             }
-            
+
             cell.ustack.reverse();
             list.list.push(cell);
         }

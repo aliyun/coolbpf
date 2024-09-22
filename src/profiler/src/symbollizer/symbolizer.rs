@@ -153,7 +153,9 @@ impl Symbolizer {
                 let id = info.file_id;
                 let fsym = self.files.entry(id).or_insert_with(|| {
                     let start = self.symbols.len();
-                    ElfFile::parse_symbols2(info.elf.object_file(), &mut self.symbols);
+                    let mmap_ref = unsafe { memmap2::Mmap::map(&info.file).unwrap() };
+                    let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                    ElfFile::parse_symbols2(object, &mut self.symbols);
                     let end = self.symbols.len();
                     let fsym = FileSymbol(start..end);
                     fsym
