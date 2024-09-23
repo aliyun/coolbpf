@@ -177,6 +177,23 @@ bool report_pid(void *ctx, int pid, int ratelimit_action) {
 }
 #endif
 
+static inline void event_send_trigger_for_sched_exit(struct pt_regs *ctx, u32 event_type, u32 pid)
+{
+  int ret;
+
+  Event event = {.event_type = event_type, .pid = pid};
+  ret = bpf_perf_event_output(ctx, &report_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+  if (ret < 0)
+  {
+    DEBUG_PRINT("event_send_trigger failed to send event %d: error %d", event_type, ret);
+  }
+}
+
+static inline __attribute__((__always_inline__)) bool report_pid_for_sched_exit(void *ctx, int pid)
+{
+  event_send_trigger_for_sched_exit(ctx, EVENT_TYPE_PROCESS_EXIT, pid);
+}
+
 // Return the per-cpu record.
 // As each per-cpu array only has 1 entry, we hard-code 0 as the key.
 // The return value of get_per_cpu_record() can never be NULL and return value checks only exist

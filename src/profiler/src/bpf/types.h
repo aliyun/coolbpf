@@ -787,10 +787,12 @@ typedef struct SystemAnalysis {
 // perf event output channel (event_send_trigger).
 typedef struct Event {
   u32 event_type; // EVENT_TYPE_xxx selector of event
+  u32 pid;
 } Event;
 
 // Event types that notifications are sent for through event_send_trigger.
 #define EVENT_TYPE_GENERIC_PID 1
+#define EVENT_TYPE_PROCESS_EXIT 2
 
 // PIDPage represents the key of the eBPF map pid_page_to_mapping_info.
 typedef struct PIDPage {

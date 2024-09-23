@@ -56,17 +56,21 @@ impl<'a> Profiler<'a> {
                         println!("{}", stack.to_string());
                     }
                 }
+
+                ProbeEvent::ProcessExit(pid) => {}
             }
         }
     }
 
     pub fn read(&mut self) -> Vec<SymbolizedStack> {
         let mut stack_agg = StackAggregator::default();
+        let mut exited_pids = vec![];
         loop {
             match self.probes.rx.try_recv() {
-                Ok(ProbeEvent::Trace(data)) => {
-                    stack_agg.add(data);
-                }
+                Ok(event) => match event {
+                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
+                },
                 Err(_e) => break,
             }
         }
@@ -80,11 +84,13 @@ impl<'a> Profiler<'a> {
 
     pub fn read2(&mut self) -> Vec<u8> {
         let mut stack_agg = StackAggregator::default();
+        let mut exited_pids = vec![];
         loop {
             match self.probes.rx.try_recv() {
-                Ok(ProbeEvent::Trace(data)) => {
-                    stack_agg.add(data);
-                }
+                Ok(event) => match event {
+                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
+                },
                 Err(_e) => break,
             }
         }

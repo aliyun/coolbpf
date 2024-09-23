@@ -38,7 +38,7 @@ fn main() {
     generate_skeleton(&mut out, "system_config");
     generate_skeleton(&mut out, "native_stack");
     generate_skeleton(&mut out, "interpreter_dispatcher");
-    // generate_skeleton(&mut out, "sched_monitor");
+    generate_skeleton(&mut out, "sched_monitor");
     generate_skeleton(&mut out, "hotspot");
 
     generate_header(&mut out, "types");

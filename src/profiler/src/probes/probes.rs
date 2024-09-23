@@ -56,6 +56,10 @@ mod hotspot {
     include!(concat!(env!("OUT_DIR"), "/hotspot.skel.rs"));
 }
 
+mod sched {
+    include!(concat!(env!("OUT_DIR"), "/sched_monitor.skel.rs"));
+}
+
 /// Handling Perf buffer loss events
 pub fn handle_lost_events(cpu: i32, count: u64) {
     eprintln!("Lost {count} events on CPU {cpu}");
@@ -78,6 +82,7 @@ macro_rules! load_skel {
 
 pub struct Probes<'a> {
     skel: native::NativeStackSkel<'a>,
+    sched_skel: sched::SchedMonitorSkel<'a>,
     pub hotspot_skel: hotspot::HotspotSkel<'a>,
     interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
     links: Vec<Link>,
@@ -181,9 +186,32 @@ impl<'a> Probes<'a> {
             });
         }
 
+        let sched_skel = load_skel!(maps, sched::SchedMonitorSkelBuilder);
+        {
+            let mut cloned_tx = tx.clone();
+            let handle_event = move |cpu: i32, data: &[u8]| {
+                thread_poll_report_event(&mut cloned_tx, cpu, data);
+            };
+
+            let perf = PerfBufferBuilder::new(&skel.maps_mut().report_events())
+                .sample_cb(handle_event)
+                .lost_cb(handle_lost_events)
+                .pages(8)
+                .build()
+                .unwrap();
+
+            std::thread::spawn(move || {
+                log::debug!("start report event polling thread");
+                loop {
+                    perf.poll(std::time::Duration::from_millis(200)).unwrap();
+                }
+            });
+        }
+
         let mut probe = Self {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
             skel,
+            sched_skel,
             hotspot_skel,
             interpreter_dispatcher_skel,
             links: vec![],
@@ -196,9 +224,14 @@ impl<'a> Probes<'a> {
             has_generic_batchop,
         };
         probe.load_system_config(system_config_skel);
+        probe.attach_sched_monitor();
         probe.load_unwinders();
         probe.attach_perf_event(10000000);
         probe
+    }
+
+    fn attach_sched_monitor(&mut self) {
+        self.sched_skel.attach().unwrap();
     }
 
     fn attach_perf_event(&mut self, sample_period: u64) {
@@ -327,6 +360,18 @@ impl<'a> Probes<'a> {
                 MapFlags::ANY,
             )
             .unwrap();
+    }
+}
+
+fn thread_poll_report_event(tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8]) {
+    let raw = data.as_ptr() as *const bpf::Event;
+    let ty = unsafe { (*raw).event_type };
+    match ty {
+        bpf::EVENT_TYPE_PROCESS_EXIT => {
+            let pid = unsafe { (*raw).pid };
+            tx.send(ProbeEvent::ProcessExit(pid)).unwrap();
+        }
+        _ => {}
     }
 }
 

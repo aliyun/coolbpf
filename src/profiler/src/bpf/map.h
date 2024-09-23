@@ -252,8 +252,8 @@ BPF_PERCPU_ARRAY(per_cpu_records, PerCPURecord, 1);
 BPF_PERCPU_ARRAY(metrics, u64, metricID_Max);
 #endif
 BPF_PROG_ARRAY(progs, NUM_TRACER_PROGS);
-#if 0
 BPF_PERF_OUTPUT(report_events, 0);
+#if 0
 BPF_LRU_HASH(reported_pids, u32, u64, 65536);
 BPF_HASH(pid_events, u32, bool, 65536);
 #endif

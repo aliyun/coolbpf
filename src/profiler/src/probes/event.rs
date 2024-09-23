@@ -2,6 +2,7 @@ use super::types::bpf;
 use std::hash::Hash;
 use std::hash::Hasher;
 pub enum ProbeEvent {
+    ProcessExit(u32),
     Trace(RawStack),
 }
 
