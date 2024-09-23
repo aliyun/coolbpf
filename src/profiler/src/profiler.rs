@@ -12,6 +12,7 @@ use crate::stack::StackAggregator;
 use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
+use crate::utils::lpm::Prefix;
 use crate::MIN_PROCESS_SAMPLES;
 use crate::SYSTEM_PROFILING;
 use anyhow::Result;
@@ -79,6 +80,10 @@ impl<'a> Profiler<'a> {
             stack_agg.filter(MIN_PROCESS_SAMPLES);
         }
         let stacks = stack_agg.symbolize(&mut self.symbolizer, &mut self.interpreters);
+
+        for pid in exited_pids {
+            let _ = self.process_exit(pid);
+        }
         stacks
     }
 
@@ -94,8 +99,11 @@ impl<'a> Profiler<'a> {
                 Err(_e) => break,
             }
         }
-
-        stack_agg.serialize(&mut self.symbolizer, &mut self.interpreters)
+        let ret = stack_agg.serialize(&mut self.symbolizer, &mut self.interpreters);
+        for pid in exited_pids {
+            let _ = self.process_exit(pid);
+        }
+        ret
     }
 
     pub fn populate_pids(&mut self, pids: Vec<u32>) -> Result<()> {
@@ -114,13 +122,13 @@ impl<'a> Profiler<'a> {
             Ok(maps) => {
                 if maps.is_empty() {
                     log::warn!("/proc/{pid}/maps is empty or no permission");
-                    self.process_exit();
+                    self.process_exit(pid);
                 } else {
                     self.sync_maps(pid, &maps)?;
                 }
             }
             Err(e) => {
-                self.process_exit();
+                self.process_exit(pid);
                 log::error!("failed to open /proc/{pid}/maps: {e}")
             }
         }
@@ -128,7 +136,16 @@ impl<'a> Profiler<'a> {
         Ok(())
     }
 
-    fn process_exit(&mut self) {}
+    fn process_exit(&mut self, pid: u32) -> Result<()> {
+        self.probes
+            .pid_maps_info_map
+            .delete(pid, &vec![Prefix::dummy()])?;
+        if let Some(mut proc) = self.pids.remove(&pid) {
+            proc.exit(&mut self.probes, &mut self.executables)?;
+        }
+
+        Ok(())
+    }
 
     fn sync_maps(&mut self, pid: u32, maps: &ProcessMaps) -> Result<()> {
         // 同步进程的地址映射信息
@@ -178,7 +195,7 @@ impl<'a> Profiler<'a> {
 
         // 1. 从进程中删除已经被删除/更新的映射
         // 2. 删除eBPF map pid_page_to_mapping_info 中该进程的映射关系
-        proc.remove_maps_entries(&mut self.probes, &removed)?;
+        proc.remove_maps_entries(&mut self.probes, &mut self.executables, &removed)?;
 
         for add in added {
             let map = maps.get(&add).unwrap();

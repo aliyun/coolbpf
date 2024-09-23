@@ -1,5 +1,6 @@
 use super::maps::ExeMapsEntry;
 use super::memory::ProcessMemory;
+use crate::executable::ExecutableCache;
 use crate::probes::probes::Probes;
 use crate::symbollizer::file_cache::FileInfo;
 use crate::utils::lpm::calculate_prefixes;
@@ -27,14 +28,29 @@ impl Process {
         ProcessMemory::new(self.pid)
     }
 
-    pub fn remove_maps_entries(&mut self, probes: &mut Probes, entries: &Vec<u64>) -> Result<()> {
+    pub fn remove_maps_entries(
+        &mut self,
+        probes: &mut Probes,
+        exes: &mut ExecutableCache,
+        entries: &Vec<u64>,
+    ) -> Result<()> {
         for &map in entries {
             if let Some(f) = self.maps.remove(&map) {
                 log::debug!("remove pid:{} maps entry: {:?}", self.pid(), f);
                 let prefixes = calculate_prefixes(f.vaddr, f.vaddr + f.length)?;
                 probes.pid_maps_info_map.delete(self.pid(), &prefixes)?;
-                // TODO: 删除stack delta的记录信息
+                exes.remove(probes, f.file_id)?;
             }
+        }
+        Ok(())
+    }
+
+    pub fn exit(&mut self, probes: &mut Probes, exes: &mut ExecutableCache) -> Result<()> {
+        for (_, f) in &self.maps {
+            log::debug!("remove pid:{} maps entry: {:?}", self.pid(), f);
+            let prefixes = calculate_prefixes(f.vaddr, f.vaddr + f.length)?;
+            probes.pid_maps_info_map.delete(self.pid(), &prefixes)?;
+            exes.remove(probes, f.file_id)?;
         }
         Ok(())
     }

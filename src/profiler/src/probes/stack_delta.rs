@@ -90,9 +90,12 @@ impl StackDeltaPageMap {
         Ok(())
     }
 
-    pub fn delete(&self, file_id: FileId64, page: u64) -> Result<()> {
-        let key = StackDeltaPageKey::new(file_id, page);
-        self.map.delete(key.slice())?;
+    pub fn delete(&self, file_id: FileId64, page: u64, numpage: u32) -> Result<()> {
+        for i in 0..numpage {
+            let pageaddr = page + (i << 16) as u64;
+            let key = StackDeltaPageKey::new(file_id, pageaddr);
+            self.map.delete(key.slice())?;
+        }
         Ok(())
     }
 }

@@ -32,6 +32,29 @@ pub struct ExecutableCache {
 impl ExecutableCache {
     pub fn load_stack_deltas() {}
 
+    pub fn remove(&mut self, probes: &mut Probes, id: FileId64) -> Result<()> {
+        let mut remove = false;
+        if let Some(exe) = self.executables.get(&id) {
+            if exe.rc == 1 {
+                remove = true;
+            }
+        }
+
+        if remove {
+            if let Some(exe) = self.executables.remove(&id) {
+                probes.stack_delta_page_map.delete(
+                    id,
+                    exe.map_info.start_page,
+                    exe.map_info.num_page,
+                )?;
+                probes
+                    .stack_delta_map
+                    .delete(id, exe.map_info.map_id as u32)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_or_insert(
         &mut self,
         probes: &mut Probes,
@@ -77,7 +100,7 @@ impl ExecutableCache {
             )?;
 
             let exe = Executable {
-                rc: 1,
+                rc: 0,
                 map_info: LoadedDelta {
                     map_id: map_id as u16,
                     num_page: num_pages as u32,
@@ -98,7 +121,5 @@ impl ExecutableCache {
         let exe = self.executables.get_mut(&file_id).unwrap();
         exe.rc += 1;
         return Ok(Some(exe));
-
-        // check interpreter
     }
 }
