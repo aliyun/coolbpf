@@ -170,9 +170,9 @@ impl StackAggregator {
     ) -> Vec<u8> {
         let mut list = LivetraceList::new();
         for (pid, sc) in &self.stacks {
-            let mut cell = LivetraceCell::new();
-            cell.pid = *pid;
             for (raw, cnt) in &sc.stacks {
+                let mut cell = LivetraceCell::new();
+                cell.pid = *pid;
                 cell.samples = *cnt;
                 cell.kstack = raw.kernel.clone();
                 cell.kstack.reverse();
@@ -205,10 +205,9 @@ impl StackAggregator {
                             .collect();
                     }
                 }
+                cell.ustack.reverse();
+                list.list.push(cell);
             }
-
-            cell.ustack.reverse();
-            list.list.push(cell);
         }
 
         list.write_to_bytes().unwrap()
