@@ -9,7 +9,27 @@ use std::cmp::Ordering;
 use std::sync::atomic;
 
 pub fn get_system_config() -> SystemConfig {
-    let btf = Btf::from_vmlinux().unwrap();
+    let btf_path: Option<String> = {
+        if let Ok(sysak) = std::env::var("SYSAK_WORK_PATH") {
+            if let Ok(info) = uname::uname() {
+                if !info.release.starts_with("5.10") {
+                    Some(format!("{}/tools/vmlinux-{}", sysak, info.release))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let btf = if let Some(path) = btf_path {
+        Btf::from_path(path).unwrap()
+    } else {
+        Btf::from_vmlinux().unwrap()
+    };
     let mut sc = SystemConfig::default();
 
     let system_profiling = SYSTEM_PROFILING.load(atomic::Ordering::SeqCst);
