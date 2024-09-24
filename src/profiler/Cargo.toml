@@ -25,6 +25,7 @@ lru = "0.12.3"
 memmap2 = "0.9.4"
 num_cpus = "1.16.0"
 object = "0.36.1"
+once_cell = "1.19.0"
 perf-event-open-sys = "4.0.0"
 procfs = "0.16.0"
 protobuf = "3.5.1"
@@ -37,6 +38,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
 tempfile = "3.10.1"
 thiserror = "1.0.63"
 typed-arena = "2.0.2"
+uname = "0.1.1"
 
 # [profile.release]
 # debug = true

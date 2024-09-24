@@ -31,12 +31,14 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::MapHandle;
 use libbpf_rs::MapType;
 use libbpf_rs::PerfBufferBuilder;
+use once_cell::sync::Lazy;
 use perf_event_open_sys::bindings::perf_event_attr;
 use perf_event_open_sys::bindings::PERF_COUNT_SW_CPU_CLOCK;
 use perf_event_open_sys::bindings::PERF_FLAG_FD_CLOEXEC;
 use perf_event_open_sys::bindings::PERF_TYPE_SOFTWARE;
 use perf_event_open_sys::perf_event_open;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 
@@ -65,12 +67,36 @@ pub fn handle_lost_events(cpu: i32, count: u64) {
     eprintln!("Lost {count} events on CPU {cpu}");
 }
 
+pub static SYSAK_BTF_PATH: Lazy<Option<CString>> = Lazy::new(|| {
+    if let Ok(sysak) = std::env::var("SYSAK_WORK_PATH") {
+        if let Ok(info) = uname::uname() {
+            if info.release.starts_with("5.10") {
+                return None;
+            }
+            return Some(
+                CString::new(format!("{}/tools/vmlinux-{}", sysak, info.release)).unwrap(),
+            );
+        }
+    }
+    None
+});
+
+macro_rules! btf_path_ptr_macro {
+    () => {{
+        SYSAK_BTF_PATH
+            .as_ref()
+            .map_or(std::ptr::null(), |x| x.as_ptr())
+    }};
+}
+
 macro_rules! load_skel {
     ($maps: ident, $skel: path) => {{
         use $skel as builder;
         let mut builder = builder::default();
         builder.obj_builder.debug(true);
-        let mut openskel = builder.open().unwrap();
+        let mut opts = builder.obj_builder.opts().clone();
+        opts.btf_custom_path = btf_path_ptr_macro!();
+        let mut openskel = builder.open_opts(opts).unwrap();
         for (name, map) in &$maps {
             if let Some(target_map) = openskel.obj.map_mut(name) {
                 target_map.reuse_fd(map.as_fd()).unwrap();
@@ -101,7 +127,9 @@ impl<'a> Probes<'a> {
         let has_generic_batchop = probe_has_generic_batch_ops();
         let mut builder = native::NativeStackSkelBuilder::default();
         builder.obj_builder.debug(false);
-        let mut openskel = builder.open().unwrap();
+        let mut opts = builder.obj_builder.opts().clone();
+        opts.btf_custom_path = btf_path_ptr_macro!();
+        let mut openskel = builder.open_opts(opts).unwrap();
 
         let mut inners = vec![];
         for i in
