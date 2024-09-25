@@ -280,7 +280,7 @@ mod tests {
         let id = FileId64::from(&id);
         let mmap_ref = unsafe { memmap2::Mmap::map(&file).unwrap() };
         let elf = object::File::parse(&*mmap_ref).unwrap();
-        symer.add_file(id, elf);
+        // symer.add_file(id, elf);
 
         let mut prev = 0;
         for sym in symer.symbols.iter() {

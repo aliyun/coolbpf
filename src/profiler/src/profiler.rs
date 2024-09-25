@@ -247,3 +247,19 @@ impl<'a> Profiler<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_exit() {
+        let mut prof = Profiler::new();
+        prof.sync_process(1).unwrap();
+        prof.process_exit(1).unwrap();
+
+        assert!(prof.pids.is_empty());
+        assert!(prof.executables.executables.is_empty());
+        assert!(prof.interpreters.is_empty());
+    }
+}

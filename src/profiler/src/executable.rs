@@ -26,7 +26,7 @@ pub struct Executable {
 #[derive(Default)]
 pub struct ExecutableCache {
     errors: HashSet<FileId64>,
-    executables: HashMap<FileId64, Executable>,
+    pub executables: HashMap<FileId64, Executable>,
 }
 
 impl ExecutableCache {
