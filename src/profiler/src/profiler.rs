@@ -261,5 +261,9 @@ mod tests {
         assert!(prof.pids.is_empty());
         assert!(prof.executables.executables.is_empty());
         assert!(prof.interpreters.is_empty());
+
+        assert!(prof.probes.pid_maps_info_map.is_empty());
+        assert!(prof.probes.stack_delta_page_map.is_empty());
+        assert!(prof.probes.stack_delta_map.is_empty());
     }
 }

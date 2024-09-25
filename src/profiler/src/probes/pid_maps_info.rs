@@ -47,6 +47,10 @@ impl PidMapsInfoMap {
         PidMapsInfoMap { map }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.keys().next().is_none()
+    }
+
     pub fn insert_dummy(&self, pid: u32) {
         let prefix = Prefix::dummy();
         self.update(pid, &prefix, FileId64(0), 0)

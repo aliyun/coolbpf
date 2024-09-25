@@ -71,6 +71,10 @@ impl StackDeltaPageMap {
         StackDeltaPageMap { map, batch: false }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.keys().next().is_none()
+    }
+
     pub fn update(
         &self,
         file_id: FileId64,
@@ -108,6 +112,16 @@ pub struct StackDeltaMap {
 impl StackDeltaMap {
     pub fn new(maps: Vec<MapHandle>, batch: bool) -> Self {
         StackDeltaMap { maps, batch }
+    }
+
+    /// check if no inner map
+    pub fn is_empty(&self) -> bool {
+        for map in &self.maps {
+            if map.keys().next().is_some() {
+                return false;
+            }
+        }
+        true
     }
 
     #[inline]
