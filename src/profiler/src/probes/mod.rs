@@ -2,6 +2,7 @@ pub mod system_config;
 pub mod types;
 
 pub mod event;
+pub mod nspid;
 pub mod pid_maps_info;
 pub mod probes;
 pub mod stack;

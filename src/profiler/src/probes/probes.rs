@@ -1,6 +1,9 @@
+use crate::is_system_profiling;
+
 use super::event::ProbeEvent;
 use super::event::RawStack;
 use super::event::RawUserStack;
+use super::nspid::NsPidMap;
 use super::pid_maps_info::PidMapsInfoMap;
 use super::stack::StackMap;
 use super::stack_delta::create_inner_map;
@@ -31,6 +34,7 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::MapHandle;
 use libbpf_rs::MapType;
 use libbpf_rs::PerfBufferBuilder;
+use libbpf_rs::UprobeOpts;
 use once_cell::sync::Lazy;
 use perf_event_open_sys::bindings::perf_event_attr;
 use perf_event_open_sys::bindings::PERF_COUNT_SW_CPU_CLOCK;
@@ -38,9 +42,12 @@ use perf_event_open_sys::bindings::PERF_FLAG_FD_CLOEXEC;
 use perf_event_open_sys::bindings::PERF_TYPE_SOFTWARE;
 use perf_event_open_sys::perf_event_open;
 use std::collections::HashMap;
+use std::env::current_exe;
 use std::ffi::CString;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
+use std::path;
+use std::thread::panicking;
 
 mod native {
     include!(concat!(env!("OUT_DIR"), "/native_stack.skel.rs"));
@@ -60,6 +67,10 @@ mod hotspot {
 
 mod sched {
     include!(concat!(env!("OUT_DIR"), "/sched_monitor.skel.rs"));
+}
+
+mod nspid_pid {
+    include!(concat!(env!("OUT_DIR"), "/nspid_pid.skel.rs"));
 }
 
 /// Handling Perf buffer loss events
@@ -106,6 +117,12 @@ macro_rules! load_skel {
     }};
 }
 
+#[inline(never)]
+#[no_mangle]
+extern "C" fn get_hostpid(nspid: u32, map: &NsPidMap) -> u32 {
+    map.lookup(nspid).unwrap().unwrap()
+}
+
 pub struct Probes<'a> {
     skel: native::NativeStackSkel<'a>,
     sched_skel: sched::SchedMonitorSkel<'a>,
@@ -120,6 +137,9 @@ pub struct Probes<'a> {
     pub unwind_info_cache: HashMap<UnwindInfo, u16>,
     pub stack_map: StackMap,
     has_generic_batchop: bool,
+
+    pid: u32,
+    nspid: u32,
 }
 
 impl<'a> Probes<'a> {
@@ -236,6 +256,27 @@ impl<'a> Probes<'a> {
             });
         }
 
+        let mut nspid_skel = load_skel!(maps, nspid_pid::NspidPidSkelBuilder);
+        let nspid_map =
+            NsPidMap::new(MapHandle::try_clone(&nspid_skel.maps().nspid_pid()).unwrap());
+
+        let nspid = unsafe { libc::getpid() };
+        let path = current_exe().expect("failed to find executable name");
+        let func_offset = 0;
+        let opts = UprobeOpts {
+            func_name: "get_hostpid".to_string(),
+            ..Default::default()
+        };
+        let _link = nspid_skel
+            .progs_mut()
+            .uprobe_get_hostpid()
+            .attach_uprobe_with_opts(-1, path, func_offset, opts)
+            .expect("failed to attach uprobe `get_hostpid` prog");
+
+        let pid = get_hostpid(nspid as u32, &nspid_map);
+
+        log::debug!("nspid: {nspid}, hostpid: {pid}");
+
         let mut probe = Self {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
             skel,
@@ -250,7 +291,15 @@ impl<'a> Probes<'a> {
             pid_maps_info_map,
             unwind_info_cache: Default::default(),
             has_generic_batchop,
+
+            pid,
+            nspid: nspid as u32,
         };
+
+        if probe.pid != probe.nspid && is_system_profiling() {
+            panic!("System-level profiling in pid namespace is not supported!!!");
+        }
+
         probe.load_system_config(system_config_skel);
         probe.attach_sched_monitor();
         probe.load_unwinders();
@@ -301,7 +350,7 @@ impl<'a> Probes<'a> {
         let mut sc = get_system_config();
         let key: u32 = 0;
         let mut value = SystemAnalysis::default();
-        value.set_pid(unsafe { libc::getpid() as u32 });
+        value.set_pid(self.pid);
         value.set_address(sc.task_stack_offset as u64);
         system_config_skel
             .maps_mut()
@@ -319,6 +368,7 @@ impl<'a> Probes<'a> {
         let ret_value = SystemAnalysis::from(value);
         assert!(ret_value.raw.pid == 0);
         sc.set_stack_ptregs_offset((ret_value.raw.address - ret_value.code_u64()) as u32);
+        sc.set_has_pid_namespace(self.pid != self.nspid);
 
         system_config_skel
             .maps_mut()

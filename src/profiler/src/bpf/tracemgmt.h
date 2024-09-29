@@ -502,4 +502,35 @@ static inline __attribute__((__always_inline__)) void tail_call(void *ctx, int n
   bpf_tail_call(ctx, &progs, next);
 }
 
+struct pid_link
+{
+  struct hlist_node node;
+  struct pid *pid;
+};
+
+struct task_struct___older_v50
+{
+  struct pid_link pids[PIDTYPE_MAX];
+};
+
+static inline u32 get_task_ns_pid(struct task_struct *task)
+{
+  unsigned int level = 0;
+  struct pid *pid = NULL;
+
+  if (bpf_core_type_exists(struct pid_link))
+  {
+    struct task_struct___older_v50 *t = (void *)task;
+    pid = BPF_CORE_READ(t, pids[PIDTYPE_PID].pid);
+  }
+  else
+  {
+    pid = BPF_CORE_READ(task, thread_pid);
+  }
+
+  level = BPF_CORE_READ(pid, level);
+
+  return BPF_CORE_READ(pid, numbers[level].nr);
+}
+
 #endif

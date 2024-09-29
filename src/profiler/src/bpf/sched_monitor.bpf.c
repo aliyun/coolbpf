@@ -1,6 +1,10 @@
 // This file contains the code and map definitions for the tracepoint on the scheduler to
 // report the stopping a process.
-
+#include "vmlinux.h"
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
 #include "map.h"
 #include "tracemgmt.h"
 
@@ -22,6 +26,20 @@ int tracepoint__sched_process_exit(void *ctx)
     // userspace for further processing.
     goto exit;
   }
+
+  u32 syscfg_key = 0;
+  SystemConfig *syscfg = bpf_map_lookup_elem(&system_config, &syscfg_key);
+  if (!syscfg)
+  {
+    return -1;
+  }
+
+  if (syscfg->has_pid_namespace)
+  {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    pid = get_task_ns_pid(task);
+  }
+
 #if 0
   if (!bpf_map_lookup_elem(&reported_pids, &pid) && !pid_information_exists(ctx, pid)) {
 #else

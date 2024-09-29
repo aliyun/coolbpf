@@ -875,24 +875,39 @@ int unwind_native(struct pt_regs *ctx)
 
 static inline int collect_trace(struct pt_regs *ctx)
 {
-  // Get the PID and TGID register.
-  u64 id = bpf_get_current_pid_tgid();
-  u64 pid = id >> 32;
 
+  u32 syscfg_key = 0;
+  SystemConfig *syscfg = bpf_map_lookup_elem(&system_config, &syscfg_key);
+  if (!syscfg)
+  {
+    return -1;
+  }
+
+  u32 pid = 0;
+  if (syscfg->has_pid_namespace)
+  {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    pid = get_task_ns_pid(task);
+  }
+  else
+  {
+    // Get the PID and TGID register.
+    u64 id = bpf_get_current_pid_tgid();
+    pid = id >> 32;
+  }
+
+#if 1
+  // keep idle
   if (pid == 0)
   {
     return 0;
   }
-  bool tracing_pid = pid_information_exists(ctx, pid);
+#endif
 
-  if (!tracing_pid)
+  bool tracing_pid = pid_information_exists(ctx, pid);
+  if (!tracing_pid && !syscfg->all_system_profiling)
   {
-    u32 syscfg_key = 0;
-    SystemConfig *syscfg = bpf_map_lookup_elem(&system_config, &syscfg_key);
-    if (!syscfg || !syscfg->all_system_profiling)
-    {
-      return -1;
-    }
+    return -1;
   }
 
   DEBUG_PRINT("==== do_perf_event ====");

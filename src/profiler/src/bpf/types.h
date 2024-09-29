@@ -873,6 +873,8 @@ typedef struct SystemConfig {
   bool drop_error_only_traces;
 
   bool all_system_profiling;
+
+  bool has_pid_namespace;
 } SystemConfig;
 
 // Avoid including all of arch/arm64/include/uapi/asm/ptrace.h by copying the

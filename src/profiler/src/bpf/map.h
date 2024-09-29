@@ -283,4 +283,9 @@ bpf_map_def SEC("maps") system_config = {
 #endif
 
 BPF_ARRAY(system_config, struct SystemConfig, 1);
+
+// mapping from nspid to host pid
+BPF_HASH(nspid_pid, u32, u32, 1024);
+
+
 #endif

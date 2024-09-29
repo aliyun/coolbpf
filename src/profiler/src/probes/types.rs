@@ -97,6 +97,10 @@ impl SystemConfig {
         self.raw.stack_ptregs_offset = off;
     }
 
+    pub fn set_has_pid_namespace(&mut self, has: bool) {
+        self.raw.has_pid_namespace = has;
+    }
+
     pub fn slice(&self) -> &[u8] {
         unsafe { any_as_u8_slice(&self.raw) }
     }
