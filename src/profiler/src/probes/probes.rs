@@ -104,7 +104,11 @@ macro_rules! load_skel {
     ($maps: ident, $skel: path) => {{
         use $skel as builder;
         let mut builder = builder::default();
-        builder.obj_builder.debug(true);
+        if log::log_enabled!(log::Level::Debug) {
+            builder.obj_builder.debug(true);
+        } else {
+            builder.obj_builder.debug(false);
+        }
         let mut opts = builder.obj_builder.opts().clone();
         opts.btf_custom_path = btf_path_ptr_macro!();
         let mut openskel = builder.open_opts(opts).unwrap();
@@ -146,7 +150,11 @@ impl<'a> Probes<'a> {
     pub fn new() -> Self {
         let has_generic_batchop = probe_has_generic_batch_ops();
         let mut builder = native::NativeStackSkelBuilder::default();
-        builder.obj_builder.debug(false);
+        if log::log_enabled!(log::Level::Debug) {
+            builder.obj_builder.debug(true);
+        } else {
+            builder.obj_builder.debug(false);
+        }
         let mut opts = builder.obj_builder.opts().clone();
         opts.btf_custom_path = btf_path_ptr_macro!();
         let mut openskel = builder.open_opts(opts).unwrap();
