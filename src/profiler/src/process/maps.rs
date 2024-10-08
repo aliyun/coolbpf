@@ -219,6 +219,16 @@ impl ProcessMaps {
 
         (added, removed)
     }
+
+    pub fn find_so(&self, name: &str) -> Option<String> {
+        for (_, entry) in self.entries.iter() {
+            if entry.path.as_ref().map_or(false, |p| p.ends_with(name)) {
+                return entry.path.clone();
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Debug)]

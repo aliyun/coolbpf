@@ -1,4 +1,5 @@
 use crate::is_system_profiling;
+use crate::process::maps::ProcessMaps;
 
 use super::event::ProbeEvent;
 use super::event::RawStack;
@@ -47,6 +48,7 @@ use std::ffi::CString;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path;
+use std::path::PathBuf;
 use std::thread::panicking;
 
 mod native {
@@ -119,6 +121,20 @@ macro_rules! load_skel {
         }
         openskel.load().unwrap()
     }};
+}
+
+fn get_self_path() -> PathBuf {
+    let pid = unsafe { libc::getpid() };
+    let pm = ProcessMaps::new(pid as u32).unwrap();
+    if let Some(p) = pm.find_so("libmullprof.so") {
+        return PathBuf::from(p);
+    }
+
+    if let Some(p) = pm.find_so("libnofp.so") {
+        return PathBuf::from(p);
+    }
+
+    current_exe().expect("failed to find executable name")
 }
 
 #[inline(never)]
@@ -269,7 +285,7 @@ impl<'a> Probes<'a> {
             NsPidMap::new(MapHandle::try_clone(&nspid_skel.maps().nspid_pid()).unwrap());
 
         let nspid = unsafe { libc::getpid() };
-        let path = current_exe().expect("failed to find executable name");
+        let path = get_self_path();
         let func_offset = 0;
         let opts = UprobeOpts {
             func_name: "get_hostpid".to_string(),

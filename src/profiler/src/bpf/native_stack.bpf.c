@@ -896,13 +896,10 @@ static inline int collect_trace(struct pt_regs *ctx)
     pid = id >> 32;
   }
 
-#if 1
-  // keep idle
-  if (pid == 0)
+  if (pid == 0 && !syscfg->all_system_profiling)
   {
     return 0;
   }
-#endif
 
   bool tracing_pid = pid_information_exists(ctx, pid);
   if (!tracing_pid && !syscfg->all_system_profiling)
