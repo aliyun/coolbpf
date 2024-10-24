@@ -19,7 +19,9 @@ else(ELF_LIBRARY)
 endif(ELF_LIBRARY)
 
 add_subdirectory(bpf)
-add_subdirectory(profiler)
+if (ENABLE_PROFILE)
+  add_subdirectory(profiler)
+endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
                ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc @ONLY)
@@ -73,6 +75,8 @@ install(FILES ${uapi_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/linux)
 install(FILES ${PROJECT_SOURCE_DIR}/arch/${CMAKE_SYSTEM_PROCESSOR}/vmlinux.h
         DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 
+if (ENABLE_PROFILE)
 # install libprofiler
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/profiler/release/libprofiler.so 
         DESTINATION ${INSTALL_LIB_DIR})
+endif()
