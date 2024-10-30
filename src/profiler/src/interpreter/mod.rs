@@ -7,6 +7,7 @@ use hotspot::instance::HotspotInstance;
 use std::rc::Rc;
 pub mod hotspot;
 use anyhow::Result;
+pub mod python;
 
 pub enum IFileInfo {
     Hotspot(Rc<HotspotFileInfo>),

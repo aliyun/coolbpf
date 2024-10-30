@@ -75,6 +75,10 @@ mod nspid_pid {
     include!(concat!(env!("OUT_DIR"), "/nspid_pid.skel.rs"));
 }
 
+mod python {
+    include!(concat!(env!("OUT_DIR"), "/python.skel.rs"));
+}
+
 /// Handling Perf buffer loss events
 pub fn handle_lost_events(cpu: i32, count: u64) {
     eprintln!("Lost {count} events on CPU {cpu}");
@@ -147,6 +151,7 @@ pub struct Probes<'a> {
     skel: native::NativeStackSkel<'a>,
     sched_skel: sched::SchedMonitorSkel<'a>,
     pub hotspot_skel: hotspot::HotspotSkel<'a>,
+    pub python_skel: python::PythonSkel<'a>,
     interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
     links: Vec<Link>,
     pub rx: Receiver<ProbeEvent>,
@@ -233,6 +238,7 @@ impl<'a> Probes<'a> {
         let interpreter_dispatcher_skel =
             load_skel!(maps, dispatcher::InterpreterDispatcherSkelBuilder);
         let hotspot_skel = load_skel!(maps, hotspot::HotspotSkelBuilder);
+        let python_skel = load_skel!(maps, python::PythonSkelBuilder);
 
         let (tx, rx) = crossbeam_channel::unbounded();
         {
@@ -306,6 +312,7 @@ impl<'a> Probes<'a> {
             skel,
             sched_skel,
             hotspot_skel,
+            python_skel,
             interpreter_dispatcher_skel,
             links: vec![],
             rx,

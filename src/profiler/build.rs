@@ -41,6 +41,7 @@ fn main() {
     generate_skeleton(&mut out, "sched_monitor");
     generate_skeleton(&mut out, "hotspot");
     generate_skeleton(&mut out, "nspid_pid");
+    generate_skeleton(&mut out, "python");
 
     generate_header(&mut out, "types");
     generate_header(&mut out, "frametypes");
