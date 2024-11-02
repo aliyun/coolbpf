@@ -42,3 +42,13 @@ In the tools/examples/syscall directory, we provide examples of using libcoolbpf
 * Compile syscall: run `mkdir -p build && cd build && cmake -DBUILD_EXAMPLE=on .. && make` in the coolbpf root directory
 
 The location of the final generated syscall executable program is: `build/tools/examples/syscall/syscall`.
+
+## Using BPF kernel modules
+
+In the bpf_kernel_modules directory, we provide additional kernel module implementations as libraries to supply extra [kernel functions](https://docs.kernel.org/bpf/kfuncs.html) for specific types of BPF programs. To use these libraries, first compile the kernel module, then load it, and finally use the kernel functions exposed by the module in your eBPF program. For example, with eNetSTL library designed for XDP programs:
+
+(eNetSTL Authors: Dian Shen, Bin Yang, Hanlin Yang, and Lunqi Zhao from Southeast University)
+
+* Compiling eNetSTL: In the bpf_kernel_modules/eNetSTL directory, run `make` (if the kernel was compiled with clang, use `make LLVM=1`), then run `sudo insmod eNetSTL.ko`.
+* In the eBPF program, `#include "coolbpf.h"` and use the APIs as needed. For details on using eNetSTL APIs, refer to src/coolbpf_bpf.h.
+* For usage examples of eNetSTL, refer to tools/examples/eNetSTL.

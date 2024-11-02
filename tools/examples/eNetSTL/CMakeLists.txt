@@ -1,0 +1,14 @@
+include(${PROJECT_SOURCE_DIR}/scripts/cmake/genskel.cmake)
+
+genskel(enetstl_countmin_sketch)
+
+add_executable(enetstl_countmin_sketch enetstl_countmin_sketch.c)
+target_include_directories(enetstl_countmin_sketch PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(enetstl_countmin_sketch enetstl_countmin_sketch_skel)
+target_link_libraries(enetstl_countmin_sketch PRIVATE coolbpf)
+
+genskel(enetstl_cuckoo_hash)
+add_executable(enetstl_cuckoo_hash enetstl_cuckoo_hash.c)
+target_include_directories(enetstl_cuckoo_hash PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_dependencies(enetstl_cuckoo_hash enetstl_cuckoo_hash_skel)
+target_link_libraries(enetstl_cuckoo_hash PRIVATE coolbpf)
