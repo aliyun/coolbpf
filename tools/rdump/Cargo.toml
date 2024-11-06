@@ -1,0 +1,34 @@
+[package]
+name = "rdump"
+version = "1.0.0" 
+authors = ["Fu Dong"] 
+description = "a kernel network packet capture tool" 
+edition = "2021"
+
+[[bin]]
+name = "rdump"
+path = "src/main.rs"
+
+
+[[example]]
+name = "tc_example"
+path = "examples/tc_example.rs"
+
+[dependencies]
+libc = "0.2.98"           # Raw FFI bindings to platform libraries like libc
+libbpf-rs = "0.23.0"      # libbpf-rs is a safe, idiomatic, and opinionated wrapper around libbpf-sys
+plain = "0.2.3"           # A small Rust library that allows users to reinterpret data of certain types safely
+pnet="0.34"             # Rust library for low level networking using the pcap library
+log="0.4"               # A lightweight logging facade for Rust
+clap = "4.5.16"
+once_cell = "1.17.1"
+crossbeam-channel = "0.5.8"
+nix = "0.24"
+byteorder = "1.5.0"
+pcap-file = "2.0.0"
+
+
+[build-dependencies]
+libbpf-cargo = "0.23.0"   # Cargo plugin to build bpf programs
+vmlinux = { git = "https://github.com/libbpf/libbpf-rs.git", branch = "master" } #使用远程的vmlinux.h 配合build.rs使用
+bindgen = "0.70.0"
