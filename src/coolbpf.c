@@ -126,14 +126,10 @@ void *perf_thread_worker(void *ctx)
 {
     int err;
     struct perf_buffer *pb = NULL;
-    struct perf_buffer_opts pb_opts = {};
     struct perf_thread_arguments *args = (struct perf_thread_arguments *)ctx;
     int timeout_ms = args->timeout_ms == 0 ? 100 : args->timeout_ms;
 
-    pb_opts.sample_cb = args->sample_cb;
-    pb_opts.ctx = args->ctx;
-    pb_opts.lost_cb = args->lost_cb;
-    pb = perf_buffer__new(args->mapfd, args->pg_cnt == 0 ? 128 : args->pg_cnt, &pb_opts);
+    pb = perf_buffer__new(args->mapfd, args->pg_cnt == 0 ? 128 : args->pg_cnt, args->sample_cb, args->lost_cb, args->ctx, NULL);
     free(args);
 
     err = libbpf_get_error(pb);
@@ -188,7 +184,7 @@ int kill_perf_thread(pthread_t thread)
     return 0;
 }
 
-unsigned int get_kernel_version(void)
+unsigned int coolbpf_get_kernel_version(void)
 {
     __u32 major, minor, patch, version;
     struct utsname info;

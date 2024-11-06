@@ -301,7 +301,7 @@ static __always_inline int32_t get_buf_32(const char *buf)
   bpf_probe_read(&length, 4, buf);
   return bpf_ntohl(length);
 }
-static __always_inline int bpf_strncmp(const char *src, const char *targ, size_t n)
+static __always_inline int net_bpf_strncmp(const char *src, const char *targ, size_t n)
 {
   size_t i;
 #pragma unroll
@@ -560,7 +560,7 @@ static __always_inline enum support_type_e detect_pgsql_start_mesg(const char *b
   {
     return TypeUnknown;
   }
-  if (bpf_strncmp(buf + 4, pgsql, 4) != 0)
+  if (net_bpf_strncmp(buf + 4, pgsql, 4) != 0)
   {
     return TypeUnknown;
   }

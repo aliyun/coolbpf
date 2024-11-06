@@ -232,7 +232,7 @@ COOLBPF_API int kill_perf_thread(pthread_t thread);
  *
  * @return unsigned int
  */
-unsigned int get_kernel_version(void);
+unsigned int coolbpf_get_kernel_version(void);
 
 #endif
 
