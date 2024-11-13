@@ -4,6 +4,7 @@ use crate::process::maps::ProcessMaps;
 use super::event::ProbeEvent;
 use super::event::RawStack;
 use super::event::RawUserStack;
+use super::interpreter_offset::InterpreterOffsetMap;
 use super::nspid::NsPidMap;
 use super::pid_maps_info::PidMapsInfoMap;
 use super::stack::StackMap;
@@ -15,6 +16,7 @@ use super::types::any_as_u8_slice;
 use super::types::bpf;
 use super::types::bpf::TracePrograms_PROG_UNWIND_HOTSPOT;
 use super::types::bpf::TracePrograms_PROG_UNWIND_NATIVE;
+use super::types::bpf::TracePrograms_PROG_UNWIND_PYTHON;
 use super::types::bpf::TracePrograms_PROG_UNWIND_STOP;
 use super::types::bpf::STACK_DELTA_COMMAND_FLAG;
 use super::types::bpf::UNWIND_OPCODE_COMMAND;
@@ -161,6 +163,7 @@ pub struct Probes<'a> {
     pub unwind_info_map: UnwindInfoMap,
     pub unwind_info_cache: HashMap<UnwindInfo, u16>,
     pub stack_map: StackMap,
+    pub interpreter_offset_map: InterpreterOffsetMap,
     has_generic_batchop: bool,
 
     pid: u32,
@@ -309,6 +312,10 @@ impl<'a> Probes<'a> {
 
         let mut probe = Self {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
+            interpreter_offset_map: InterpreterOffsetMap::new(
+                MapHandle::try_clone(skel.maps().interpreter_offsets()).unwrap(),
+            ),
+            
             skel,
             sched_skel,
             hotspot_skel,
@@ -465,6 +472,21 @@ impl<'a> Probes<'a> {
             .progs()
             .update(
                 &TracePrograms_PROG_UNWIND_HOTSPOT.to_ne_bytes(),
+                &fd.to_ne_bytes(),
+                MapFlags::ANY,
+            )
+            .unwrap();
+        let fd = self
+            .python_skel
+            .progs()
+            .unwind_python()
+            .as_fd()
+            .as_raw_fd();
+        self.skel
+            .maps_mut()
+            .progs()
+            .update(
+                &TracePrograms_PROG_UNWIND_PYTHON.to_ne_bytes(),
                 &fd.to_ne_bytes(),
                 MapFlags::ANY,
             )

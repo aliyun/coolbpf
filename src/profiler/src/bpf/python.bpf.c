@@ -32,7 +32,7 @@ bpf_map_def SEC("maps") py_procs = {
 };
 #endif
 
-BPF_HASH(py_procs, pid_t, HotspotProcInfo, 256);
+BPF_HASH(py_procs, pid_t, PyProcInfo, 256);
 
 // Record a Python frame
 static inline __attribute__((__always_inline__))

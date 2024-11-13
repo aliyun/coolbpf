@@ -9,3 +9,4 @@ pub mod stack;
 pub mod stack_delta;
 pub mod system_analysis;
 pub mod unwind_info;
+pub mod interpreter_offset;

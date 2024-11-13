@@ -2,6 +2,7 @@ use super::maps::ExeMapsEntry;
 use super::memory::ProcessMemory;
 use crate::executable::ExecutableCache;
 use crate::probes::probes::Probes;
+use crate::probes::types::bpf;
 use crate::symbollizer::file_cache::FileInfo;
 use crate::utils::lpm::calculate_prefixes;
 use anyhow::Result;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct Process {
     pub maps: HashMap<u64, ExeMapsEntry>,
+    pub tsd_info: Option<bpf::TSDInfo>,
     pub pid: u32,
 }
 

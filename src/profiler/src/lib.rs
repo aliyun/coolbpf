@@ -14,6 +14,7 @@ pub mod profiler;
 pub mod stack;
 pub mod symbollizer;
 pub mod utils;
+pub mod tpbase;
 use ctor::*;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;

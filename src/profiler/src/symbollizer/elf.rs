@@ -5,8 +5,11 @@ use std::fs::File;
 use std::io::ErrorKind;
 
 use anyhow::anyhow;
+use anyhow::bail;
 use anyhow::Result;
 use blazesym::IntoError;
+use byteorder::ByteOrder;
+use byteorder::NativeEndian;
 use gimli::write::CommonInformationEntry;
 use gimli::BaseAddresses;
 use gimli::CfaRule;
@@ -34,6 +37,8 @@ use object::Object;
 use object::ObjectSection;
 use object::ObjectSymbol;
 use object::ObjectSymbolTable;
+use object::ReadRef;
+use object::Symbol;
 use object::SymbolKind;
 use std::borrow::Cow;
 use std::fmt;
@@ -229,6 +234,64 @@ impl ElfFile {
         dst[start..].sort_by_key(|a| a.start);
     }
 
+    pub fn read_at<'a>(elf: &'a object::File, addr: u64, sz: usize) -> Result<&'a [u8]> {
+        if let object::File::Elf64(elf) = elf {
+            for ph in elf.elf_program_headers() {
+                if ph.p_type(elf.endianness()) == PT_LOAD
+                    && addr >= ph.p_vaddr(elf.endianness())
+                    && addr < ph.p_vaddr(elf.endianness()) + ph.p_memsz(elf.endianness())
+                {
+                    let off = addr - ph.p_vaddr(elf.endianness());
+                    if off < ph.p_filesz(elf.endianness()) {
+                        let end = std::cmp::min(sz as u64, ph.p_filesz(elf.endianness()) - off);
+                        match elf
+                            .data()
+                            .read_bytes_at(ph.p_offset(elf.endianness()) + off, sz as u64)
+                        {
+                            Ok(data) => {
+                                return Ok(data);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        panic!("failed to read data")
+    }
+
+    pub fn read_u32(elf: &object::File, addr: u64) -> Result<u32> {
+        let data = ElfFile::read_at(elf, addr, 4)?;
+        Ok(NativeEndian::read_u32(data))
+    }
+
+    pub fn read_u64(elf: &object::File, addr: u64) -> Result<u64> {
+        let data = ElfFile::read_at(elf, addr, 8)?;
+        Ok(NativeEndian::read_u64(data))
+    }
+
+    pub fn read_string<'a>(elf: &'a object::File, addr: u64, sz: usize) -> Result<Cow<'a, str>> {
+        if let object::File::Elf64(elf) = elf {
+            for ph in elf.elf_program_headers() {
+                if ph.p_type(elf.endianness()) == PT_LOAD
+                    && addr >= ph.p_vaddr(elf.endianness())
+                    && addr < ph.p_vaddr(elf.endianness()) + ph.p_memsz(elf.endianness())
+                {
+                    let off = addr - ph.p_vaddr(elf.endianness());
+                    if off < ph.p_filesz(elf.endianness()) {
+                        let start = ph.p_offset(elf.endianness()) + off;
+                        let end =
+                            start + std::cmp::min(sz as u64, ph.p_filesz(elf.endianness()) - off);
+                        if let Ok(data) = elf.data().read_bytes_at_until(start..end, 0) {
+                            return Ok(String::from_utf8_lossy(data));
+                        }
+                    }
+                }
+            }
+        }
+        bail!("failed to read string")
+    }
+
     pub fn parse_ph(file: &File) -> Result<Vec<ProgramAddress>> {
         let mmap_ref = unsafe { memmap2::Mmap::map(file)? };
         let elf = FileHeader64::<Endianness>::parse(&*mmap_ref)?;
@@ -247,6 +310,19 @@ impl ElfFile {
         }
 
         Ok(progs)
+    }
+
+    pub fn lookup_symbol<'a>(elf: &'a object::File, name: &str) -> Result<Symbol<'a, 'a>> {
+        let name_bytes = name.as_bytes();
+        if let Some(sym) = elf
+            .dynamic_symbols()
+            .find(|x| x.name_bytes() == Ok(&name_bytes))
+        {
+            return Ok(sym);
+        }
+
+        elf.symbol_by_name_bytes(name_bytes)
+            .ok_or(anyhow!("symbol {} not found", name))
     }
 
     // parse eh_frame and return stack_deltas

@@ -54,7 +54,8 @@ impl<'a> Profiler<'a> {
                     let stack =
                         Stack::new(&mut self.symbolizer, &data, &mut self.interpreters, 1).unwrap();
                     if !stack.empty() {
-                        println!("{}", stack.to_string());
+                        // println!("raw: {:?}", data);
+                        println!("stack: {}", stack.to_string());
                     }
                 }
 
@@ -213,11 +214,11 @@ impl<'a> Profiler<'a> {
             };
 
             let va = info.file_offset_to_virtual_address(map.offset).unwrap();
+            let bias = map.start - va;
             let exe = self
                 .executables
-                .get_or_insert(&mut self.probes, info, map)?
+                .get_or_insert(&mut self.probes, info, map, bias)?
                 .unwrap();
-            let bias = map.start - va;
             if self.enable_symbolizer {
                 let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
                 let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
@@ -238,8 +239,19 @@ impl<'a> Profiler<'a> {
             };
             proc.add_maps_entry(info, &mut self.probes, exe_map)?;
 
-            if let Some(i_info) = &mut exe.i_info {
+            if let Some(tsd) = &exe.tsd_info {
+                proc.tsd_info = Some(tsd.clone());
+                self.interpreters.entry(proc.pid).and_modify(|x| {
+                    x.update_tsd_info(&self.probes, proc.pid(), tsd.clone())
+                        .unwrap();
+                });
+            }
+
+            if let Some(i_info) = &exe.i_info {
                 let mut instance = Interpreter::parse(i_info, proc, bias)?;
+                if let Some(tsd) = &proc.tsd_info {
+                    instance.update_tsd_info(&self.probes, proc.pid(), tsd.clone())?;
+                }
                 instance.sync_maps(&mut self.probes).unwrap();
                 self.interpreters.insert(proc.pid, instance);
             }
