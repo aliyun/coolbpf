@@ -8,7 +8,6 @@ LightWeight CoolBPF (LWCB)
 
    introduction
    tutorial
-   build
    reference
    todo
 
