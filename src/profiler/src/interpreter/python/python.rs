@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use std::io::Read;
 use std::num::NonZero;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -518,7 +519,7 @@ impl PythonInstance {
             d: info,
             rm: proc.memory()?,
             bias,
-            addr_to_code_object: LruCache::new(NonZero::new(1024).unwrap()),
+            addr_to_code_object: LruCache::new(NonZeroUsize::new(1024).unwrap()),
             get_func_offset,
             proc_info_inserted: false,
         };
