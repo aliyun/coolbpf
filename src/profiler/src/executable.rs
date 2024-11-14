@@ -10,6 +10,7 @@ use crate::symbollizer::file_cache::FileInfo;
 use crate::symbollizer::file_id::FileId64;
 use crate::tpbase::libc::extract_tsd_info;
 use crate::tpbase::libc::is_potential_tsd_dso;
+use anyhow::bail;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -78,6 +79,10 @@ impl ExecutableCache {
             let mut ebpf_deltas = vec![];
 
             let deltas = ElfFile::parse_eh_frame(&elf.file).unwrap();
+            if deltas.is_empty() {
+                self.errors.insert(elf.file_id);
+                bail!("no eh_frame")
+            }
 
             let first_page = deltas[0].addr >> STACK_DELTA_PAGE_BITS;
             let first_page_addr = deltas[0].addr & !(STACK_DELTA_PAGE_MASK as u64);

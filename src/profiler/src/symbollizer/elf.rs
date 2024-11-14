@@ -1,9 +1,3 @@
-use std::borrow;
-use std::collections::HashMap;
-use std::default;
-use std::fs::File;
-use std::io::ErrorKind;
-
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
@@ -18,6 +12,7 @@ use gimli::EhFrameHdr;
 use gimli::EhHdrTable;
 use gimli::Encoding;
 use gimli::EndianReader;
+use gimli::EvaluationResult;
 use gimli::Operation;
 use gimli::Reader;
 use gimli::ReaderOffset as _;
@@ -40,8 +35,14 @@ use object::ObjectSymbolTable;
 use object::ReadRef;
 use object::Symbol;
 use object::SymbolKind;
+use regex::Regex;
+use std::borrow;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::default;
 use std::fmt;
+use std::fs::File;
+use std::io::ErrorKind;
 use symbolic_common::Name;
 use symbolic_demangle::demangle;
 use symbolic_demangle::Demangle;
@@ -201,14 +202,30 @@ impl ElfFile {
     }
 
     pub fn parse_symbols2(elf: object::File, dst: &mut Vec<ElfSymbol>) {
+        let re = Regex::new(r#"<.*?>"#).unwrap();
         let start = dst.len();
         for sym in elf.symbols() {
             if sym.is_undefined() || sym.kind() != SymbolKind::Text {
                 continue;
             }
-            let name = Name::from(sym.name().unwrap())
+            let demangle_name = Name::from(sym.name().unwrap())
                 .demangle(DemangleOptions::name_only())
                 .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
+
+            let mut name = if let Some(idx) = demangle_name.rfind("::") {
+                demangle_name[(idx + 2)..].to_string()
+            } else {
+                demangle_name.clone()
+            };
+            if name.contains('<') {
+                name = re.replace_all(&name, "").to_string();
+            }
+            assert!(
+                !name.is_empty(),
+                "demangle_name: {}, name: {}",
+                demangle_name,
+                name
+            );
 
             let es = ElfSymbol {
                 name,
@@ -222,7 +239,26 @@ impl ElfFile {
             if sym.is_undefined() || sym.kind() != SymbolKind::Text {
                 continue;
             }
-            let name = demangle(sym.name().unwrap()).to_string();
+            let demangle_name = Name::from(sym.name().unwrap())
+                .demangle(DemangleOptions::name_only())
+                .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
+
+            let mut name = if let Some(idx) = demangle_name.rfind("::") {
+                demangle_name[(idx + 2)..].to_string()
+            } else {
+                demangle_name.clone()
+            };
+
+            if name.contains('<') {
+                name = re.replace_all(&name, "").to_string();
+            }
+
+            assert!(
+                !name.is_empty(),
+                "demangle_name: {}, name: {}",
+                demangle_name,
+                name
+            );
             let es = ElfSymbol {
                 name,
                 start: sym.address(),
@@ -391,7 +427,12 @@ impl ElfFile {
                         let delta = UserStackDelta {
                             addr: row.start_address(),
                             hint,
-                            info: get_unwind_info(&eh_frame, fde.cie().encoding(), row),
+                            info: get_unwind_info(
+                                row.start_address(),
+                                &eh_frame,
+                                fde.cie().encoding(),
+                                row,
+                            ),
                         };
                         deltas.push(delta);
                         hint = UNWIND_HINT_NONE;
@@ -460,6 +501,7 @@ impl ElfFile {
 }
 
 fn get_unwind_info<R: Reader>(
+    addr: u64,
     eh_frame: &gimli::EhFrame<R>,
     enc: Encoding,
     row: &UnwindTableRow<R::Offset>,
@@ -510,8 +552,26 @@ fn get_unwind_info<R: Reader>(
             }
         }
         RegisterRule::Expression(expr) => {
-            // TODO: support this
-            log::error!("unsupported register expression")
+            let expr = expr.get(eh_frame).unwrap();
+            let mut eval = expr.evaluation(enc);
+            let res = eval.evaluate().unwrap();
+            match res {
+                EvaluationResult::RequiresRegister {
+                    register,
+                    base_type,
+                } => {
+                    if register == X86_64::RBP {
+                        info.set_fpopcode(UNWIND_OPCODE_BASE_FP as u8);
+                    }
+                }
+                _ => {
+                    log::error!(
+                        "unsupported register expression, addr: {:x}, eval: {:?}",
+                        addr,
+                        res
+                    )
+                }
+            }
         }
 
         _ => {}

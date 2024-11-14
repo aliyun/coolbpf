@@ -215,10 +215,13 @@ impl<'a> Profiler<'a> {
 
             let va = info.file_offset_to_virtual_address(map.offset).unwrap();
             let bias = map.start - va;
-            let exe = self
+            let exe = match self
                 .executables
-                .get_or_insert(&mut self.probes, info, map, bias)?
-                .unwrap();
+                .get_or_insert(&mut self.probes, info, map, bias)
+            {
+                Ok(a) => a.unwrap(),
+                Err(_) => continue,
+            };
             if self.enable_symbolizer {
                 let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
                 let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
@@ -252,8 +255,11 @@ impl<'a> Profiler<'a> {
                 if let Some(tsd) = &proc.tsd_info {
                     instance.update_tsd_info(&self.probes, proc.pid(), tsd.clone())?;
                 }
-                instance.sync_maps(&mut self.probes).unwrap();
-                self.interpreters.insert(proc.pid, instance);
+
+                if let Ok(mut instance) = Interpreter::parse(i_info, proc, bias) {
+                    instance.sync_maps(&mut self.probes).unwrap();
+                    self.interpreters.insert(proc.pid, instance);
+                }
             }
         }
         Ok(())

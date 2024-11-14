@@ -118,12 +118,11 @@ impl PythonData {
         let vms = &mut self.vm_structs;
         let type_data_address = type_data;
 
-
         if let Ok(data) =
             ElfFile::read_at(elf, type_data_address + vms.py_type_object.basic_size, 8)
         {
             vms.py_code_object.sizeof = NativeEndian::read_u64(data) as u32;
-            println!("sizeof: {}",  vms.py_code_object.sizeof);
+            println!("sizeof: {}", vms.py_code_object.sizeof);
         }
 
         let members_ptr =
@@ -689,7 +688,6 @@ impl PythonInstance {
         let ptr = frame.file_id;
         let last_i = (frame.addr_or_line >> 32) & 0x0fffffff;
         let object_id = frame.addr_or_line as u32;
-
 
         // let sf_counter = successfailurecounter::new(&mut p.success_count, &mut p.fail_count);
         // defer!(sf_counter.default_to_failure());

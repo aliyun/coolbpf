@@ -1,10 +1,10 @@
-use structopt::StructOpt;
 use profiler::livetrace_profiler_create;
 use profiler::livetrace_profiler_ctrl;
 use profiler::livetrace_profiler_read;
 use profiler::utils::process::find_processes_by_comm;
 use std::ffi::CStr;
 use std::ffi::CString;
+use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "rtrace", about = "Diagnosing tools of kernel network")]

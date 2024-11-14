@@ -130,12 +130,10 @@ fn has_fs_segment(ops: &Vec<ArchOperand>) -> bool {
             if mem.segment() == X86Reg::X86_REG_FS.into() {
                 return true;
             }
-            
         }
     }
     false
 }
-
 
 pub fn decode_pthread_getspecific(code: &[u8]) -> u32 {
     let mut regs = [RegInfo::default(); 18];
@@ -186,7 +184,7 @@ pub fn decode_pthread_getspecific(code: &[u8]) -> u32 {
                 regs[dest_ndx].multiplier <<= value;
             }
             "add" => {
-                if has_fs_segment(&ops) && regs[dest_ndx].state == TSDINDEX{
+                if has_fs_segment(&ops) && regs[dest_ndx].state == TSDINDEX {
                     regs[dest_ndx].state = TSDELEMENTBASE;
                     continue;
                 }
@@ -196,10 +194,8 @@ pub fn decode_pthread_getspecific(code: &[u8]) -> u32 {
                         || (regs[dest_ndx].state == TSDINDEX && regs[src_ndx].state == TSDBASE)
                     {
                         regs[dest_ndx].offset += regs[src_ndx].offset;
-                        regs[dest_ndx].multiplier = max(
-                            regs[dest_ndx].multiplier,
-                            regs[src_ndx].multiplier,
-                        );
+                        regs[dest_ndx].multiplier =
+                            max(regs[dest_ndx].multiplier, regs[src_ndx].multiplier);
                         regs[dest_ndx].state = TSDELEMENTBASE;
                         continue;
                     }

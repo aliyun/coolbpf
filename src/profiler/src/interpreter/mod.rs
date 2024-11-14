@@ -78,7 +78,12 @@ impl Interpreter {
         }
     }
 
-    pub fn update_tsd_info(&mut self, probes: &Probes, pid: u32, tsd_info: bpf::TSDInfo) -> Result<()>{
+    pub fn update_tsd_info(
+        &mut self,
+        probes: &Probes,
+        pid: u32,
+        tsd_info: bpf::TSDInfo,
+    ) -> Result<()> {
         match self {
             Interpreter::Hotspot(_hs) => Ok(()),
             Interpreter::Python(py) => py.update_tsd_info(probes, pid, tsd_info),

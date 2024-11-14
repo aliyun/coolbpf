@@ -315,7 +315,7 @@ impl<'a> Probes<'a> {
             interpreter_offset_map: InterpreterOffsetMap::new(
                 MapHandle::try_clone(skel.maps().interpreter_offsets()).unwrap(),
             ),
-            
+
             skel,
             sched_skel,
             hotspot_skel,
@@ -476,12 +476,7 @@ impl<'a> Probes<'a> {
                 MapFlags::ANY,
             )
             .unwrap();
-        let fd = self
-            .python_skel
-            .progs()
-            .unwind_python()
-            .as_fd()
-            .as_raw_fd();
+        let fd = self.python_skel.progs().unwind_python().as_fd().as_raw_fd();
         self.skel
             .maps_mut()
             .progs()

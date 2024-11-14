@@ -5,7 +5,8 @@
  */
 // Rewrite with gpt
 
-use anyhow::{bail, Result};
+use anyhow::bail;
+use anyhow::Result;
 use object::ObjectSymbol;
 use regex::Regex;
 
@@ -30,17 +31,17 @@ pub fn extract_tsd_info(elf: &object::File) -> Result<bpf::TSDInfo> {
         bail!("getspecific function size is {}", symtab.size())
     }
 
-    let  code = ElfFile::read_at(elf, symtab.address(), symtab.size() as usize)?;
+    let code = ElfFile::read_at(elf, symtab.address(), symtab.size() as usize)?;
 
-    let info =
-        extract_tsd_info_native(&code)?;
+    let info = extract_tsd_info_native(&code)?;
 
     Ok(info)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tsd_info, ElfFile};
+    use super::extract_tsd_info;
+    use super::ElfFile;
 
     #[test]
     fn test_parse_elf2() {
@@ -48,8 +49,5 @@ mod tests {
         let mut elf = ElfFile::new("/lib64/libpthread-2.32.so").unwrap();
         let file = elf.object_file();
         extract_tsd_info(&file).unwrap();
-
     }
 }
-
-
