@@ -5,6 +5,16 @@
  */
 // Rewrite with gpt
 
+use crate::probes::probes::Probes;
+use crate::probes::types::any_as_u8_slice;
+use crate::probes::types::bpf;
+use crate::probes::types::bpf::TracePrograms_PROG_UNWIND_PYTHON;
+use crate::process::memory::ProcessMemory;
+use crate::process::process::Process;
+use crate::stack::Stack;
+use crate::symbollizer::elf::ElfFile;
+use crate::symbollizer::file_id::FileId64;
+use crate::symbollizer::symbolizer::Symbol;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
@@ -21,16 +31,6 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use crate::probes::probes::Probes;
-use crate::probes::types::any_as_u8_slice;
-use crate::probes::types::bpf;
-use crate::probes::types::bpf::TracePrograms_PROG_UNWIND_PYTHON;
-use crate::process::memory::ProcessMemory;
-use crate::process::process::Process;
-use crate::stack::Stack;
-use crate::symbollizer::elf::ElfFile;
-use crate::symbollizer::file_id::FileId64;
-use crate::symbollizer::symbolizer::Symbol;
 
 use super::decode::decode_stub_argument_wrapper;
 

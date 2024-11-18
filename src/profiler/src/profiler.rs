@@ -219,8 +219,8 @@ impl<'a> Profiler<'a> {
                 .executables
                 .get_or_insert(&mut self.probes, info, map, bias)
             {
-                Ok(a) => a.unwrap(),
-                Err(_) => continue,
+                Ok(Some(a)) => a,
+                Ok(None) | Err(_) => continue,
             };
             if self.enable_symbolizer {
                 let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
