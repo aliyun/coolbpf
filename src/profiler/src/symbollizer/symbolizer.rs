@@ -1,6 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
 use lru::LruCache;
+use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::read_to_string;
@@ -72,6 +73,8 @@ pub struct Symbolizer {
     //
     files: HashMap<FileId64, FileSymbol>,
     kernel: FileSymbol,
+
+    adb_regex: Option<Regex>,
 }
 
 impl Symbolizer {
@@ -82,6 +85,8 @@ impl Symbolizer {
             procs: LruCache::new(NonZeroUsize::new(MAX_NUM_OF_PROCESSES).unwrap()),
             files: HashMap::default(),
             kernel: FileSymbol::default(),
+            adb_regex: std::env::var("ADB_CMDLINE_REGEX")
+                .map_or(None, |x| Some(Regex::new(&x).unwrap())),
         };
         symer
     }
@@ -168,8 +173,15 @@ impl Symbolizer {
                 });
             }
             psyms.sort_by_key(|x| x.pc.start);
-            let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
-            comm.pop();
+            let comm = if let Some(reg) = &self.adb_regex {
+                let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
+                reg.find(&cmdline)
+                    .map_or("non-match".to_owned(), |x| x.as_str().to_owned())
+            } else {
+                let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
+                comm.pop();
+                comm
+            };
             Ok(ProcInfo { comm, syms: psyms })
         })
     }
@@ -221,8 +233,15 @@ impl Symbolizer {
     pub fn proc_comm(&mut self, pid: u32) -> Result<&String> {
         self.procs
             .try_get_or_insert(pid, || -> Result<ProcInfo> {
-                let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
-                comm.pop();
+                let comm = if let Some(reg) = &self.adb_regex {
+                    let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
+                    reg.find(&cmdline)
+                        .map_or("non-match".to_owned(), |x| x.as_str().to_owned())
+                } else {
+                    let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
+                    comm.pop();
+                    comm
+                };
                 Ok(ProcInfo { comm, syms: vec![] })
             })
             .map(|x| &x.comm)
