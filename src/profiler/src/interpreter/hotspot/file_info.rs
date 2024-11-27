@@ -136,8 +136,7 @@ impl HotspotVmInfo {
     pub fn new(file_info: &HotspotFileInfo, pm: &ProcessMemory, bias: u64) -> Result<Self> {
         let mut info = HotspotVmInfo::default();
         info.vm_structs = VmStructs::new();
-        info.parse_introspection(&file_info.type_ptrs, pm, bias)
-            .unwrap();
+        info.parse_introspection(&file_info.type_ptrs, pm, bias)?;
 
         info.parse_introspection(&file_info.struct_ptrs, pm, bias)?;
 
