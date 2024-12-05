@@ -87,6 +87,7 @@ static struct net_env_t
 	struct perf_buffer *pbs[MAX_HAND];
 	struct callback_t callback[MAX_HAND];
 	int32_t page_count[MAX_HAND];
+	int32_t cid_prefix_len;
 	struct lost_callback_t lost_callback;
 	net_print_fn_t libbpf_print;
 	char version[64];
@@ -250,6 +251,19 @@ static void handle_lost_stat_event(void *ctx, int cpu, __u64 lost_cnt)
 	{
 		env.lost_callback.func(env.lost_callback.custom_data, STAT_HAND, lost_cnt);
 	}
+}
+
+static int user_config_cid(int config_fd)
+{
+	int ret;
+	uint32_t index = ContainerIdIndex;
+	ret = bpf_map_update_elem(config_fd, &index, &env.cid_prefix_len, BPF_ANY);
+	if (ret)
+		net_log(LOG_TYPE_WARN, "Could not update map for cid prefix len %d: %s\n", env.cid_prefix_len, strerror(-ret));
+	else
+		net_log(LOG_TYPE_INFO, "success to update map for cid prefix len: %d\n", env.cid_prefix_len);
+
+	return ret;
 }
 
 static int user_config_tgid(int config_fd)
@@ -504,6 +518,11 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count,
 		value = (int32_t *)(params[0]);
 		env.page_count[opt2] = *value;
 		break;
+	case CONTAINER_ID_FILTER:
+		value = (int32_t *)(params[0]);
+		env.cid_prefix_len = *value;
+		user_config_cid(bpf_map__fd(obj->maps.config_tgid_map));
+		break;
 	defaults:
 		user_config_proto(bpf_map__fd(obj->maps.config_protocol_map));
 		user_config_tgid(bpf_map__fd(obj->maps.config_tgid_map));
@@ -658,4 +677,35 @@ void ebpf_disable_process(uint32_t pid, bool drop)
 
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type)
 {
+}
+
+bool ebpf_set_cid_filter(const char* container_id, size_t length, bool update)
+{
+	struct net_bpf *obj = env.obj;
+	int map_fd = bpf_map__fd(obj->maps.enable_container_ids);
+
+	// Prepare the key for update/delete
+    struct container_id_key key = {
+        .prefixlen = CONTAINER_ID_MAX_LENGTH * 8  // Full length as prefix length in bits
+    };
+    memset(key.data, 0, CONTAINER_ID_MAX_LENGTH);
+    memcpy(key.data, container_id, length);
+	__u8 value = 1;
+	bool ret;
+
+    if (update) {
+        ret = bpf_map_update_elem(map_fd, &key, &value, BPF_ANY);
+        if (ret) {
+            net_log(LOG_TYPE_WARN, "Failed to update element: %s\n", strerror(errno));
+            return false;
+        }
+    } else {
+        ret = bpf_map_delete_elem(map_fd, &key);
+        if (ret) {
+            net_log(LOG_TYPE_WARN, "Failed to delete element: %s\n", strerror(errno));
+            return false;
+        }
+    }
+	
+	return true;
 }

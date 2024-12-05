@@ -169,6 +169,22 @@ struct
   __uint(max_entries, 1);
 } connect_info_heap SEC(".maps");
 
+struct
+{
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __type(key, u32);
+  __type(value, struct container_id_key);
+  __uint(max_entries, 1);
+} container_id_heap SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+  __uint(max_entries, 1024);
+  __type(key, __u8[sizeof(struct container_id_key)]); // Need to specify as byte array as wouldn't take struct as key type
+  __type(value, __u8);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+} enable_container_ids SEC(".maps");
+
 struct trace_event_raw_sys_enter_comp
 {
   struct trace_entry ent;
@@ -217,6 +233,51 @@ static __always_inline void set_addr_pair_by_sock(struct sock *sk, struct addr_p
   ap->dport = bpf_ntohs(ap->dport);
 }
 
+static __always_inline bool match_container_id(struct connect_info_t* conn_info) 
+{
+  u32 index = ContainerIdIndex;
+  int64_t *cid_prefix_length = bpf_map_lookup_elem(&config_tgid_map, &index);
+  if (cid_prefix_length == NULL) {
+    bpf_printk("cid_prefix_length null! pid:%u\n", conn_info->conn_id.tgid);
+    return true;
+  }
+
+  u32 trim_len = *cid_prefix_length;
+  if (trim_len <= 0 || trim_len > KN_NAME_LENGTH) {
+    bpf_printk("trim_len invalid! pid:%u trim_len:%u\n", conn_info->conn_id.tgid, trim_len);
+    return false;
+  }
+
+  if (conn_info->docker_id_length == 0) {
+    bpf_printk("dockerid length is zero! pid:%u docker_id_length:%u\n", conn_info->conn_id.tgid, conn_info->docker_id_length);
+    return false;
+  }
+  int length = conn_info->docker_id_length >= KN_NAME_LENGTH? KN_NAME_LENGTH : conn_info->docker_id_length;
+  int real_length = length - trim_len;
+  if (real_length <=0 ) {
+    bpf_printk("reallen invalid! pid:%u real_length:%u\n", conn_info->conn_id.tgid, real_length);
+    return false;
+  }
+  if (real_length >= CONTAINER_ID_MAX_LENGTH) real_length = CONTAINER_ID_MAX_LENGTH;
+
+  // check config
+  u32 zero = 0;
+  struct container_id_key* prefix = bpf_map_lookup_elem(&container_id_heap, &zero);
+  if (!prefix) return false;
+  __builtin_memset(prefix, 0, sizeof(struct container_id_key));
+  bpf_printk("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, real_length);
+  bpf_probe_read(prefix->data, real_length, conn_info->docker_id + trim_len);
+  prefix->prefixlen = real_length << 3;
+  __u8* ppass = bpf_map_lookup_elem(&enable_container_ids, prefix);
+  if (ppass) {
+    bpf_printk("bingo! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
+    // in whitelist
+    return true;
+  }
+  bpf_printk("blacklist! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
+  return false;
+}
+
 static __always_inline enum support_tgid_e match_tgid(const uint32_t tgid)
 {
   u32 index = TgidIndex;
@@ -249,6 +310,83 @@ static __always_inline enum support_tgid_e match_tgid(const uint32_t tgid)
   return TgidUnmatch;
 }
 
+#ifndef unlikely
+# define unlikely(X)		__builtin_expect(!!(X), 0)
+#endif
+
+static __always_inline const char *get_cgroup_name(const struct cgroup *cgrp)
+{
+  const char *name;
+
+  if (unlikely(!cgrp))
+    return NULL;
+
+  if (BPF_CORE_READ_INTO(&name, cgrp, kn, name) != 0)
+    return NULL;
+
+  return name;
+}
+
+#define EVENT_ERROR_CGROUP_NAME 0x010000
+#define EVENT_ERROR_CGROUPS 0x100000
+#define EVENT_ERROR_CGROUP_SUBSYSCGRP 0x040000
+#define EVENT_ERROR_CGROUP_SUBSYS     0x080000
+#define VALID_HEX_LENGTH 64
+
+// Function to check if a character is a hex digit [a-f0-9]
+static __always_inline bool is_hex_digit(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+/* Gather current task cgroup name */
+static __always_inline __u32 __event_get_current_cgroup_name(struct cgroup *cgrp, struct connect_info_t * conn_info)
+{
+  const char *name;
+
+  name = get_cgroup_name(cgrp);
+  conn_info->docker_id_length = 0;
+  if (!name) return EVENT_ERROR_CGROUP_NAME;
+
+  int ret = bpf_probe_read_str(conn_info->docker_id, KN_NAME_LENGTH, name);
+  bpf_printk("pid:%u docker_id:%s ret:%u \n", conn_info->conn_id.tgid, conn_info->docker_id, ret);
+  conn_info->docker_id_length = ret;
+
+  return name ? 0 : EVENT_ERROR_CGROUP_NAME;
+}
+
+static __always_inline struct cgroup *
+get_task_cgroup(struct task_struct *task)
+{
+  __u32 subsys_idx = 0;
+  __u32 flags = 0;
+  struct cgroup_subsys_state *subsys;
+  struct css_set *cgroups;
+  struct cgroup *cgrp = NULL;
+
+  bpf_probe_read(&cgroups, sizeof(cgroups), __builtin_preserve_access_index(&task->cgroups));
+  if (unlikely(!cgroups)) {
+    flags |= EVENT_ERROR_CGROUPS;
+    return cgrp;
+  }
+
+  if (unlikely(subsys_idx > pids_cgrp_id)) {
+    flags |= EVENT_ERROR_CGROUP_SUBSYS;
+    return cgrp;
+  }
+
+  bpf_probe_read(&subsys, sizeof(subsys), __builtin_preserve_access_index(&cgroups->subsys[subsys_idx]));
+  if (unlikely(!subsys)) {
+    flags |= EVENT_ERROR_CGROUP_SUBSYS;
+    return cgrp;
+  }
+
+  bpf_probe_read(&cgrp, sizeof(cgrp), __builtin_preserve_access_index(&subsys->cgroup));
+  if (!cgrp)
+    flags |= EVENT_ERROR_CGROUP_SUBSYSCGRP;
+
+  return cgrp;
+}
+
 static __always_inline uint64_t get_start_time()
 {
   struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -258,11 +396,24 @@ static __always_inline uint64_t get_start_time()
                  sizeof(struct task_struct *),
                  (uint8_t *)task + gl_off);
 
-  uint64_t st_off = offsetof(struct task_struct, start_time);
   uint64_t start_time = 0;
-  bpf_probe_read(&start_time,
+
+  if (bpf_core_field_exists(group_leader_ptr->start_time))
+  {
+    uint64_t st_off = offsetof(struct task_struct, start_time);
+    bpf_probe_read(&start_time,
                  sizeof(uint64_t),
                  (uint8_t *)group_leader_ptr + st_off);
+  }
+  else if (bpf_core_field_exists(group_leader_ptr->start_boottime))
+  {
+    uint64_t st_off = offsetof(struct task_struct, start_boottime);
+    bpf_probe_read(&start_time,
+                 sizeof(uint64_t),
+                 (uint8_t *)group_leader_ptr + st_off);
+  } else {
+    start_time = bpf_ktime_get_ns();
+  }
 
   return start_time;
   // return nsec_to_clock_t(start_time);
@@ -281,7 +432,7 @@ static __always_inline void init_conn_id(uint32_t tgid,
   conn_id->fd = fd;
   // currently use kernel time for connection id.
   conn_id->start = bpf_ktime_get_ns();
-  ;
+  // conn_id->start = get_start_time();
 }
 
 static __always_inline void init_conn_info(uint32_t tgid,
@@ -293,6 +444,11 @@ static __always_inline void init_conn_info(uint32_t tgid,
   conn_info->addr.sa.sa_family = AF_UNKNOWN;
   conn_info->is_sample = true;
   conn_info->protocol = ProtoUnknown;
+  struct task_struct *task = bpf_get_current_task();
+  struct cgroup *cgrp = get_task_cgroup(task);
+  if (!cgrp)
+    return;
+  __event_get_current_cgroup_name(cgrp, conn_info);
 }
 
 static __always_inline int32_t get_buf_32(const char *buf)
@@ -912,7 +1068,9 @@ static __always_inline void try_event_output(void *ctx, struct connect_info_t *i
       struct conn_data_event_t *data = &info->wr_min_ts;
       data->conn_id = info->conn_id;
       u64 total_size = (u64)(&data->msg[0]) - (u64)data + info->request_len + info->response_len;
-      bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU, data, total_size & (PACKET_MAX_SIZE * 2 - 1));
+      if (match_container_id(info)) {
+        bpf_perf_event_output(ctx, &connect_data_events_map, BPF_F_CURRENT_CPU, data, total_size & (PACKET_MAX_SIZE * 2 - 1));
+      }
     }
     reset_sock_info(info);
   }
@@ -946,6 +1104,8 @@ static __always_inline struct conn_stats_event_t *add_conn_stats(struct connect_
   }
 
   event->conn_id = conn_info->conn_id;
+  event->protocol = conn_info->protocol;
+  bpf_probe_read_str(event->docker_id, KN_NAME_LENGTH, conn_info->docker_id);
   event->addr = conn_info->addr;
   event->role = conn_info->role;
   event->wr_bytes = conn_info->wr_bytes;
@@ -1212,6 +1372,43 @@ static __always_inline enum support_role_e get_sock_role(const struct socket *so
   return max_ack_backlog == 0 ? IsClient : IsServer;
 }
 
+
+static __always_inline void output_conn_stats(struct trace_event_raw_sys_exit_comp *ctx,
+                                              struct connect_info_t *conn_info,
+                                              enum support_direction_e direction,
+                                              ssize_t return_bytes, bool force)
+{
+  switch (direction)
+  {
+  case DirEgress:
+    conn_info->wr_bytes += return_bytes;
+    conn_info->wr_pkts++;
+    break;
+  case DirIngress:
+    conn_info->rd_bytes += return_bytes;
+    conn_info->rd_pkts++;
+    break;
+  }
+
+  uint64_t total_bytes = conn_info->wr_bytes + conn_info->rd_bytes;
+  uint32_t total_pkts = conn_info->wr_pkts + conn_info->rd_pkts;
+
+  bool real_threshold = (total_bytes >= conn_info->last_output_rd_bytes + conn_info->last_output_wr_bytes + ConnStatsBytesThreshold) || (total_pkts >= conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts + ConnStatsPacketsThreshold);
+  if (real_threshold || force || !conn_info->ever_sent)
+  {
+    struct conn_stats_event_t *event = add_conn_stats(conn_info);
+    if (event != NULL)
+    {
+      bpf_perf_event_output(ctx, &connect_stats_events_map, BPF_F_CURRENT_CPU, event, sizeof(struct conn_stats_event_t));
+    }
+    conn_info->last_output_wr_bytes = conn_info->wr_bytes;
+    conn_info->last_output_rd_bytes = conn_info->rd_bytes;
+    conn_info->last_output_wr_pkts = conn_info->wr_pkts;
+    conn_info->last_output_rd_pkts = conn_info->rd_pkts;
+    conn_info->ever_sent = true;
+  }
+}
+
 static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *ctx,
                                          const struct sockaddr *addr,
                                          const struct socket *socket,
@@ -1223,6 +1420,10 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *c
   {
     return;
   }
+
+  conn_info->ever_sent = false;
+
+  // __builtin_memset(conn_info, 0, sizeof(struct connect_info_t));
 
   uint32_t tgid = tg_role->tgid;
   int32_t fd = tg_role->fd;
@@ -1261,6 +1462,7 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *c
   uint64_t tgid_fd = combine_tgid_fd(tgid, fd);
   // net_bpf_print("start ====add_conn\n");
   bpf_map_update_elem(&connect_info_map, &tgid_fd, conn_info, BPF_ANY);
+  output_conn_stats(ctx, conn_info, DirUnknown, 0, true);
   bpf_map_update_elem(&socket_pidfd_map, &socket, &tgid_fd, BPF_ANY);
   if (!need_trace_family(conn_info->addr.sa.sa_family))
   {
@@ -1282,40 +1484,6 @@ static __always_inline void add_one_conn(struct trace_event_raw_sys_exit_comp *c
 #endif
 }
 
-static __always_inline void output_conn_stats(struct trace_event_raw_sys_exit_comp *ctx,
-                                              struct connect_info_t *conn_info,
-                                              enum support_direction_e direction,
-                                              ssize_t return_bytes)
-{
-  switch (direction)
-  {
-  case DirEgress:
-    conn_info->wr_bytes += return_bytes;
-    conn_info->wr_pkts++;
-    break;
-  case DirIngress:
-    conn_info->rd_bytes += return_bytes;
-    conn_info->rd_pkts++;
-    break;
-  }
-
-  uint64_t total_bytes = conn_info->wr_bytes + conn_info->rd_bytes;
-  uint32_t total_pkts = conn_info->wr_pkts + conn_info->rd_pkts;
-
-  bool real_threshold = (total_bytes >= conn_info->last_output_rd_bytes + conn_info->last_output_wr_bytes + ConnStatsBytesThreshold) || (total_pkts >= conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts + ConnStatsPacketsThreshold);
-  if (real_threshold)
-  {
-    struct conn_stats_event_t *event = add_conn_stats(conn_info);
-    if (event != NULL)
-    {
-      bpf_perf_event_output(ctx, &connect_stats_events_map, BPF_F_CURRENT_CPU, event, sizeof(struct conn_stats_event_t));
-    }
-    conn_info->last_output_wr_bytes = conn_info->wr_bytes;
-    conn_info->last_output_rd_bytes = conn_info->rd_bytes;
-    conn_info->last_output_wr_pkts = conn_info->wr_pkts;
-    conn_info->last_output_rd_pkts = conn_info->rd_pkts;
-  }
-}
 
 static __always_inline void add_close_event(struct trace_event_raw_sys_exit_comp *ctx, struct connect_info_t *conn_info)
 {
@@ -1641,8 +1809,8 @@ static __always_inline void trace_exit_data(struct trace_event_raw_sys_exit_comp
       handle_server_recv_request(conn_info);
     }
   }
+  output_conn_stats(ctx, conn_info, direction, return_bytes, false);
   try_event_output(ctx, conn_info, direction);
-  output_conn_stats(ctx, conn_info, direction, return_bytes);
   // if (!conn_info->is_sample)
   // {
   //   return;
