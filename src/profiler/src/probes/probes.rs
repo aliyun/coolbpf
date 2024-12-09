@@ -207,7 +207,9 @@ impl<'a> Probes<'a> {
             inners.push(inner);
         }
 
-        let mut skel = openskel.load().unwrap();
+        let mut skel = openskel
+            .load()
+            .expect("failed to load bpf program, please check btf if exists");
         let mut maps: HashMap<String, MapHandle> = HashMap::default();
 
         for map in skel.obj.maps_iter() {
