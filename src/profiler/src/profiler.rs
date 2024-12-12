@@ -137,7 +137,7 @@ impl<'a> Profiler<'a> {
         Ok(())
     }
 
-    fn process_exit(&mut self, pid: u32) -> Result<()> {
+    pub fn process_exit(&mut self, pid: u32) -> Result<()> {
         self.probes
             .pid_maps_info_map
             .delete(pid, &vec![Prefix::dummy()])?;

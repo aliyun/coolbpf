@@ -61,7 +61,7 @@ pub extern "C" fn livetrace_profiler_destroy(profiler: *mut Profiler) {
 #[no_mangle]
 pub extern "C" fn livetrace_profiler_ctrl(
     profiler: *mut Profiler,
-    _op: libc::c_int,
+    op: libc::c_int,
     pids: *const libc::c_char,
 ) -> i32 {
     let pids = unsafe { CStr::from_ptr(pids) };
@@ -82,10 +82,20 @@ pub extern "C" fn livetrace_profiler_ctrl(
         None => return -1,
     };
 
-    match profiler.populate_pids(pids) {
-        Ok(()) => 0,
-        Err(_e) => -1,
+    if op == 1 {
+        return match profiler.populate_pids(pids.clone()) {
+            Ok(()) => 0,
+            Err(_e) => -1,
+        };
+    } else if op == 0 {
+        for pid in pids {
+            match profiler.process_exit(pid) {
+                Ok(()) => continue,
+                Err(_e) => return -1,
+            };
+        }
     }
+    -1
 }
 
 #[no_mangle]
