@@ -64,7 +64,7 @@ impl PidMapsInfoMap {
         Ok(())
     }
 
-    fn __delete(&self, pid: u32, prefix: &Prefix) -> Result<()> {
+    pub fn __delete(&self, pid: u32, prefix: &Prefix) -> Result<()> {
         let pp = PidAddr::new(prefix, pid);
         self.map.delete(pp.slice())?;
         Ok(())

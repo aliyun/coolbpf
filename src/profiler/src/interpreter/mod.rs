@@ -102,4 +102,11 @@ impl Interpreter {
 
         Ok(())
     }
+
+    pub fn exit(&mut self, probes: &mut Probes) -> Result<()> {
+        match self {
+            Interpreter::Hotspot(hs) => hs.exit(probes),
+            Interpreter::Python(py) => Ok(()),
+        }
+    }
 }

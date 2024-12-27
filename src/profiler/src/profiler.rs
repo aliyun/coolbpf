@@ -145,6 +145,10 @@ impl<'a> Profiler<'a> {
             proc.exit(&mut self.probes, &mut self.executables)?;
         }
 
+        if let Some(mut int) = self.interpreters.remove(&pid) {
+            int.exit(&mut self.probes)?;
+        }
+
         Ok(())
     }
 
@@ -283,5 +287,26 @@ mod tests {
         assert!(prof.probes.pid_maps_info_map.is_empty());
         assert!(prof.probes.stack_delta_page_map.is_empty());
         assert!(prof.probes.stack_delta_map.is_empty());
+    }
+
+
+    #[test]
+    fn test_java_process_exit() {
+        let mut prof = Profiler::new();
+        prof.sync_process(1158).unwrap();
+        prof.process_exit(1158).unwrap();
+
+        assert!(prof.pids.is_empty());
+        assert!(prof.executables.executables.is_empty());
+        assert!(prof.interpreters.is_empty());
+
+        assert!(prof.probes.pid_maps_info_map.is_empty());
+        assert!(prof.probes.stack_delta_page_map.is_empty());
+        assert!(prof.probes.stack_delta_map.is_empty());
+
+        // test eBPF map of java
+        assert!(prof.interpreters.is_empty());
+        assert!(prof.probes.pid_maps_info_map.is_empty());
+        assert!(prof.probes.hotspot_skel.maps().hotspot_procs().keys().next().is_none());
     }
 }
