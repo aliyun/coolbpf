@@ -19,6 +19,7 @@ else(ELF_LIBRARY)
 endif(ELF_LIBRARY)
 
 add_subdirectory(bpf)
+add_subdirectory(security)
 if (ENABLE_PROFILE)
   add_subdirectory(profiler)
 endif()
@@ -42,6 +43,7 @@ file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
 # share library
 add_library(coolbpf SHARED ${sources})
 add_dependencies(coolbpf net_skel)
+add_dependencies(coolbpf security_skel)
 target_link_libraries(coolbpf PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY} pthread)
 set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION
                                                             ${VERSION})
@@ -54,6 +56,14 @@ set_target_properties(coolbpf_static PROPERTIES OUTPUT_NAME "coolbpf")
 
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
 install(TARGETS coolbpf_static ARCHIVE DESTINATION ${INSTALL_LIB_DIR})
+
+# install skeleton headers
+file(GLOB skel_headers ${CMAKE_CURRENT_BINARY_DIR}/bpf/*.skel.h ${CMAKE_CURRENT_BINARY_DIR}/security/*.skel.h)
+install(FILES ${skel_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
+
+# install security headers
+file(GLOB security_headers security/*.h)
+install(FILES ${security_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/security)
 
 # install coolbpf headers
 file(GLOB headers "*.h")

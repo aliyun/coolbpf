@@ -444,7 +444,7 @@ static __always_inline void init_conn_info(uint32_t tgid,
   conn_info->addr.sa.sa_family = AF_UNKNOWN;
   conn_info->is_sample = true;
   conn_info->protocol = ProtoUnknown;
-  struct task_struct *task = bpf_get_current_task();
+  struct task_struct *task = (struct task_struct *)bpf_get_current_task();
   struct cgroup *cgrp = get_task_cgroup(task);
   if (!cgrp)
     return;
