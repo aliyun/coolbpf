@@ -18,6 +18,14 @@ else(ELF_LIBRARY)
   message("Not found libelf library: ${ELF_LIBRARY}")
 endif(ELF_LIBRARY)
 
+if(NOT DEFINED INSTALL_LIB_DIR)
+  set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
+endif()
+
+if(NOT DEFINED INSTALL_INCLUDE_DIR)
+  set(INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include)
+endif()
+
 add_subdirectory(bpf)
 add_subdirectory(security)
 if (ENABLE_PROFILE)
@@ -29,14 +37,6 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}/bpf)
-
-if(NOT DEFINED INSTALL_LIB_DIR)
-  set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
-endif()
-
-if(NOT DEFINED INSTALL_INCLUDE_DIR)
-  set(INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include)
-endif()
 
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
      ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
@@ -57,9 +57,10 @@ set_target_properties(coolbpf_static PROPERTIES OUTPUT_NAME "coolbpf")
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
 install(TARGETS coolbpf_static ARCHIVE DESTINATION ${INSTALL_LIB_DIR})
 
-# install skeleton headers
-file(GLOB skel_headers ${CMAKE_CURRENT_BINARY_DIR}/bpf/*.skel.h ${CMAKE_CURRENT_BINARY_DIR}/security/*.skel.h)
-install(FILES ${skel_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
+# file(GLOB skel_headers ${CMAKE_CURRENT_BINARY_DIR}/bpf/*.skel.h ${CMAKE_CURRENT_BINARY_DIR}/security/*.skel.h)
+# install(FILES ${skel_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
+
+message(STATUS "in coolbpf/src INSTALL_INCLUDE_DIR: ${INSTALL_INCLUDE_DIR}")
 
 # install security headers
 file(GLOB security_headers security/*.h)

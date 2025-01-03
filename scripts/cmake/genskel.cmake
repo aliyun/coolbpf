@@ -41,5 +41,8 @@ macro(genskel name)
         ${name}_skel
         DEPENDS ${BPF_S_FILE}
     )
+        # install skeleton headers
+    message(STATUS "gen skel INSTALL_INCLUDE_DIR: ${INSTALL_INCLUDE_DIR}")
+    install(FILES ${BPF_S_FILE} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 endmacro()
 

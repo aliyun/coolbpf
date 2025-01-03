@@ -1251,12 +1251,12 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   path_arg = _(&file->f_path);
   long ret = copy_path(stack->file_data.path, path_arg);
   int path_len = *(int *)stack->file_data.path;
-  u32 flag_prefix = 4 + path_len;
+  const u32 flag_prefix = 4 + path_len;
   int flag = -1;
-  if (flag_prefix < 2000 && flag_prefix > 0) bpf_probe_read(&flag, 4, stack->file_data.path + flag_prefix);
-  u32 mode_prefix = 8 + path_len;
+  if (flag_prefix < 2000 && flag_prefix >= 0) bpf_probe_read(&flag, 4, stack->file_data.path + flag_prefix);
+  const u32 mode_prefix = 8 + path_len;
   short mode = -1;
-  if (mode_prefix < 2000 && mode_prefix > 0) mode = bpf_probe_read(&mode, 2, stack->file_data.path + mode_prefix);
+  if (mode_prefix < 2000 && mode_prefix >= 0) bpf_probe_read(&mode, 2, stack->file_data.path + mode_prefix);
   bpf_printk("[kprobe][tailcall][permission] before ~ stack path length:%d, ret:%lld, flag:%d", path_len, ret, flag);
   bpf_printk("[kprobe][tailcall][permission] before ~ stack path+4:%s, mode:%d", &stack->file_data.path[4], mode);
 
@@ -1354,4 +1354,4 @@ int kprobe_security_path_truncate(struct pt_regs *ctx)
   return 0;
 }
 
-//char _license[] SEC("license") = "GPL";
+// char _license[] SEC("license") = "GPL";
