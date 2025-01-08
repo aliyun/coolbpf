@@ -6,13 +6,14 @@
 #ifndef COOLBPF_NET_H
 #define COOLBPF_NET_H
 
+#if defined(__linux__)
 #ifndef __VMLINUX_H__
 #include <argp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <stdbool.h>
 #endif
-
+#endif
 // request or reponse
 #define PACKET_MAX_SIZE 8192
 
@@ -395,7 +396,7 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count, void **params
  * @param stop_flag 是否需要立即退出
  * @return int32_t 正数，返回处理的事件数； -100，stop_flag触发；其他，错误码
  */
-int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag);
+int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag, int timeout_ms);
 
 // 启动时，会调用init，然后调用start
 /*

@@ -445,7 +445,7 @@ int main(int argc, char **argv)
 	printf("net start end...\n");
 	while (1)
 	{
-		err = ebpf_poll_events(100, &stop_flag);
+		err = ebpf_poll_events(100, &stop_flag, 0);
 		if (exiting)
 		{
 			if (env_para.file != stdout)

@@ -531,7 +531,7 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count,
 	}
 }
 
-int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag)
+int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag, int timeout_ms)
 {
 	int j;
 	/* 100 times one by one ?*/
@@ -540,7 +540,7 @@ int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag)
 	{
 		if (g_poll_callback_count < max_events && !*stop_flag)
 		{
-			int rst = perf_buffer__poll(env.pbs[j], 0);
+			int rst = perf_buffer__poll(env.pbs[j], timeout_ms);
 			if (rst < 0 && errno != EINTR)
 			{
 				net_log(LOG_TYPE_WARN, "Error polling perf buffer: %d, hand_type:%d\n",
