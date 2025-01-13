@@ -117,18 +117,22 @@ impl Symbolizer {
     }
 
     pub fn proc_comm(&mut self, pid: u32) -> Result<&String> {
+        let get_comm = || {
+            let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
+            comm.pop();
+            Ok(comm)
+        };
+
         self.procs
             .try_get_or_insert(pid, || -> Result<String> {
                 let comm = if let Some(reg) = &self.adb_regex {
                     let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
                     reg.find(&cmdline)
-                        .map_or("non-match".to_owned(), |x| x.as_str().to_owned())
+                        .map_or_else(|| get_comm(), |x| Ok(x.as_str().to_owned()))
                 } else {
-                    let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
-                    comm.pop();
-                    comm
+                    get_comm()
                 };
-                Ok(comm)
+                comm
             })
             .map(|x| x)
     }

@@ -222,23 +222,23 @@ impl ElfFile {
                 .demangle(DemangleOptions::name_only())
                 .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
 
-            let mut name = if let Some(idx) = demangle_name.rfind("::") {
-                demangle_name[(idx + 2)..].to_string()
-            } else {
-                demangle_name.clone()
-            };
-            if name.contains('<') {
-                name = re.replace_all(&name, "").to_string();
-            }
-            assert!(
-                !name.is_empty(),
-                "demangle_name: {}, name: {}",
-                demangle_name,
-                name
-            );
+            // let mut name = if let Some(idx) = demangle_name.rfind("::") {
+            //     demangle_name[(idx + 2)..].to_string()
+            // } else {
+            //     demangle_name.clone()
+            // };
+            // if name.contains('<') {
+            //     name = re.replace_all(&name, "").to_string();
+            // }
+            // assert!(
+            //     !name.is_empty(),
+            //     "demangle_name: {}, name: {}",
+            //     demangle_name,
+            //     name
+            // );
 
             let es = ElfSymbol {
-                name,
+                name: demangle_name,
                 start: sym.address(),
                 end: sym.address() + sym.size(),
             };
@@ -253,24 +253,24 @@ impl ElfFile {
                 .demangle(DemangleOptions::name_only())
                 .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
 
-            let mut name = if let Some(idx) = demangle_name.rfind("::") {
-                demangle_name[(idx + 2)..].to_string()
-            } else {
-                demangle_name.clone()
-            };
+            // let mut name = if let Some(idx) = demangle_name.rfind("::") {
+            //     demangle_name[(idx + 2)..].to_string()
+            // } else {
+            //     demangle_name.clone()
+            // };
 
-            if name.contains('<') {
-                name = re.replace_all(&name, "").to_string();
-            }
+            // if name.contains('<') {
+            //     name = re.replace_all(&name, "").to_string();
+            // }
 
-            assert!(
-                !name.is_empty(),
-                "demangle_name: {}, name: {}",
-                demangle_name,
-                name
-            );
+            // assert!(
+            //     !name.is_empty(),
+            //     "demangle_name: {}, name: {}",
+            //     demangle_name,
+            //     name
+            // );
             let es = ElfSymbol {
-                name,
+                name: demangle_name,
                 start: sym.address(),
                 end: sym.address() + sym.size(),
             };
