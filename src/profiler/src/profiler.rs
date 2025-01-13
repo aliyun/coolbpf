@@ -232,12 +232,16 @@ impl<'a> Profiler<'a> {
                 Ok(Some(a)) => a,
                 Ok(None) | Err(_) => continue,
             };
-            if self.enable_symbolizer {
-                let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
-                let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
-                self.symbolizer.add_file(info.file_id, object, bias);
-            } else {
-                self.symbolizer.bias_cache.insert(info.file_id, bias);
+
+            if !map.is_vdso() {
+                if self.enable_symbolizer {
+                    let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
+                    let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                    self.symbolizer
+                        .add_parsed_file(info.file_id, object, map.file_path(pid));
+                } else {
+                    self.symbolizer.bias_cache.insert(info.file_id, bias);
+                }
             }
 
             // 计算该maps对应的
@@ -295,7 +299,6 @@ mod tests {
         assert!(prof.probes.stack_delta_map.is_empty());
     }
 
-
     #[test]
     fn test_java_process_exit() {
         let mut prof = Profiler::new();
@@ -313,6 +316,13 @@ mod tests {
         // test eBPF map of java
         assert!(prof.interpreters.is_empty());
         assert!(prof.probes.pid_maps_info_map.is_empty());
-        assert!(prof.probes.hotspot_skel.maps().hotspot_procs().keys().next().is_none());
+        assert!(prof
+            .probes
+            .hotspot_skel
+            .maps()
+            .hotspot_procs()
+            .keys()
+            .next()
+            .is_none());
     }
 }

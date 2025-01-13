@@ -32,6 +32,7 @@ procfs = "0.16.0"
 protobuf = "3.5.1"
 read-process-memory = "0.1.6"
 regex = "1.10.5"
+schnellru = "0.2.4"
 sha2 = "0.10.8"
 structopt = "0.3.26"
 symbolic-common = "12.10.0"
@@ -44,6 +45,8 @@ uname = "0.1.1"
 # [profile.release]
 # debug = true
 
+[profile.dev]
+debug-assertions = false
 
 [build-dependencies]
 libbpf-cargo = "0.23.3"

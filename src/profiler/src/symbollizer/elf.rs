@@ -149,11 +149,21 @@ struct State {
     stack_idx: i32,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ElfSymbol {
     pub name: String,
     pub start: u64,
     pub end: u64,
+}
+
+impl ElfSymbol {
+    pub fn not_found(addr: u64) -> Self {
+        ElfSymbol {
+            name: format!("!{:x}", addr),
+            start: u64::MAX,
+            end: u64::MAX,
+        }
+    }
 }
 
 impl State {}

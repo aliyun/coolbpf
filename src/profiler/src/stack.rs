@@ -38,12 +38,12 @@ impl UserStack {
         if addrs.is_empty() {
             bail!("miss kernel stack for id: {id}")
         }
-        let frames = symer.proc_symbolize(pid, &addrs)?;
+        let frames = symer.proc_symbolize(pid, &addrs);
         Ok(UserStack { syms: frames })
     }
 
     pub fn new(symer: &mut Symbolizer, pid: u32, addrs: &Vec<u64>) -> Result<Self> {
-        let frames = symer.proc_symbolize(pid, &addrs)?;
+        let frames = symer.proc_symbolize(pid, &addrs);
         Ok(UserStack { syms: frames })
     }
 }

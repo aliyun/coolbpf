@@ -20,6 +20,8 @@ use super::elf::ElfSymbol;
 use super::file_cache::FileInfo;
 use super::file_id::FileId;
 use super::file_id::FileId64;
+use super::lru_file_symbols::LruFileSymbols;
+use super::lru_process_files::LruProcessFiles;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Symbol {
@@ -49,30 +51,16 @@ impl Deref for FileSymbol {
     }
 }
 
-#[derive(Debug, Default)]
-struct ProcSymbol {
-    bias: u64,
-    pc: Range<u64>,
-    syms: FileSymbol,
-}
-
-#[derive(Debug, Default)]
-struct ProcInfo {
-    syms: Vec<ProcSymbol>,
-    comm: String,
-}
-
 #[derive(Debug)]
 pub struct Symbolizer {
     pub bias_cache: HashMap<FileId64, u64>,
 
-    symbols: Vec<ElfSymbol>,
-
-    // pid <-> (pc, sym)
-    procs: LruCache<u32, ProcInfo>,
+    // pid <-> comm
+    procs: LruCache<u32, String>,
+    file_symbols: LruFileSymbols,
+    proc_files: LruProcessFiles,
     //
-    files: HashMap<FileId64, FileSymbol>,
-    kernel: FileSymbol,
+    kernel: Vec<ElfSymbol>,
 
     adb_regex: Option<Regex>,
 }
@@ -81,10 +69,10 @@ impl Symbolizer {
     pub fn new() -> Self {
         let symer = Symbolizer {
             bias_cache: HashMap::default(),
-            symbols: Vec::new(),
             procs: LruCache::new(NonZeroUsize::new(MAX_NUM_OF_PROCESSES).unwrap()),
-            files: HashMap::default(),
-            kernel: FileSymbol::default(),
+            file_symbols: LruFileSymbols::new(),
+            proc_files: LruProcessFiles::new(),
+            kernel: vec![],
             adb_regex: std::env::var("ADB_CMDLINE_REGEX")
                 .map_or(None, |x| Some(Regex::new(&x).unwrap())),
         };
@@ -95,29 +83,20 @@ impl Symbolizer {
         self.bias_cache.get(id)
     }
 
-    pub fn add_file(&mut self, file_id: FileId64, file: object::File, bias: u64) {
-        let start = self.symbols.len();
-        ElfFile::parse_symbols2(file, &mut self.symbols);
-        let end = self.symbols.len();
-
-        let fsym = FileSymbol(start..end);
-        self.files.insert(file_id, fsym);
-        self.bias_cache.insert(file_id, bias);
-    }
-
-    fn __sort_symbols(&mut self, s: usize, e: usize) {
-        self.symbols[s..e].sort_by_key(|x| x.start);
-    }
-
-    fn __find_symbol(&self, s: usize, e: usize, addr: u64) -> &ElfSymbol {
-        match self.symbols[s..e].binary_search_by(|x| x.start.cmp(&addr)) {
-            Ok(x) => &self.symbols[s + x],
-            Err(x) => &self.symbols[s + x - 1],
+    pub fn add_parsed_file(&mut self, file_id: FileId64, file: object::File, path: String) {
+        if path.is_empty() {
+            return;
         }
+        self.file_symbols
+            .get_or_insert(file_id, || -> Vec<ElfSymbol> {
+                let mut symbols = vec![];
+                ElfFile::parse_symbols2(file, &mut symbols);
+                symbols
+            });
+        self.file_symbols.record_file_path(file_id, path);
     }
 
     pub fn add_kernel(&mut self, path: &str) {
-        let start = self.symbols.len();
         let file = File::open(path).unwrap();
         let lines = io::BufReader::new(file).lines();
         for line in lines {
@@ -126,7 +105,7 @@ impl Symbolizer {
                 if parts[1].contains("T") || parts[1].contains("t") {
                     let addr = u64::from_str_radix(parts[0], 16).unwrap();
                     let sym = parts[2].to_string();
-                    self.symbols.push(ElfSymbol {
+                    self.kernel.push(ElfSymbol {
                         name: sym,
                         start: addr,
                         end: 0,
@@ -134,105 +113,12 @@ impl Symbolizer {
                 }
             }
         }
-        let end = self.symbols.len();
-        self.__sort_symbols(start, end);
-        self.kernel = FileSymbol(start..end);
-    }
-
-    fn get_or_insert_proc(&mut self, pid: u32) -> Result<&ProcInfo> {
-        self.procs.try_get_or_insert(pid, || -> Result<ProcInfo> {
-            let mut psyms = vec![];
-            let maps = ProcessMaps::new(pid)?;
-            for (_addr, map) in maps.iter() {
-                if (map.inode == 0 && !map.is_vdso()) || !map.is_executable() {
-                    continue;
-                }
-
-                let path = map.file_path(pid);
-                if path.is_empty() {
-                    // TODO: handle vdso
-                    continue;
-                }
-
-                let info = FileInfo::from_path(path.as_str())?;
-                let id = info.file_id;
-                let fsym = self.files.entry(id).or_insert_with(|| {
-                    let start = self.symbols.len();
-                    let mmap_ref = unsafe { memmap2::Mmap::map(&info.file).unwrap() };
-                    let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
-                    ElfFile::parse_symbols2(object, &mut self.symbols);
-                    let end = self.symbols.len();
-                    let fsym = FileSymbol(start..end);
-                    fsym
-                });
-
-                psyms.push(ProcSymbol {
-                    bias: map.start - info.file_offset_to_virtual_address(map.offset).unwrap(),
-                    syms: fsym.clone(),
-                    pc: map.start..map.end,
-                });
-            }
-            psyms.sort_by_key(|x| x.pc.start);
-            let comm = if let Some(reg) = &self.adb_regex {
-                let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
-                reg.find(&cmdline)
-                    .map_or("non-match".to_owned(), |x| x.as_str().to_owned())
-            } else {
-                let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
-                comm.pop();
-                comm
-            };
-            Ok(ProcInfo { comm, syms: psyms })
-        })
-    }
-
-    pub fn proc_symbolize(&mut self, pid: u32, addrs: &Vec<u64>) -> Result<Vec<Symbol>> {
-        let mut syms = Vec::with_capacity(addrs.len());
-        let mut slices = Vec::with_capacity(addrs.len());
-        match self.get_or_insert_proc(pid) {
-            Ok(pi) => {
-                for &addr in addrs {
-                    match pi.syms.binary_search_by(|a| {
-                        if a.pc.contains(&addr) {
-                            Ordering::Equal
-                        } else if a.pc.start > addr {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Less
-                        }
-                    }) {
-                        Ok(x) => {
-                            let psym = &pi.syms[x];
-                            let start = psym.syms.start;
-                            let end = psym.syms.end;
-                            slices.push((start, end, addr - psym.bias));
-                        }
-                        Err(_e) => {
-                            slices.push((usize::MAX, 0, addr));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                bail!("failed to get procinfo: {pid}, error: {e}")
-            }
-        }
-
-        for (s, e, a) in slices {
-            let sym = if s == usize::MAX {
-                Symbol::new(format!("!{:x}", a))
-            } else {
-                let elf_sym = self.__find_symbol(s, e, a);
-                Symbol::new(elf_sym.name.clone())
-            };
-            syms.push(sym);
-        }
-        Ok(syms)
+        self.kernel.sort_by_key(|x| x.start);
     }
 
     pub fn proc_comm(&mut self, pid: u32) -> Result<&String> {
         self.procs
-            .try_get_or_insert(pid, || -> Result<ProcInfo> {
+            .try_get_or_insert(pid, || -> Result<String> {
                 let comm = if let Some(reg) = &self.adb_regex {
                     let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
                     reg.find(&cmdline)
@@ -242,23 +128,34 @@ impl Symbolizer {
                     comm.pop();
                     comm
                 };
-                Ok(ProcInfo { comm, syms: vec![] })
+                Ok(comm)
             })
-            .map(|x| &x.comm)
+            .map(|x| x)
     }
 
-    pub fn fileid_symbolize(&self, fileid: &FileId64, addr: u64) -> Symbol {
-        let fsym = self.files.get(fileid).unwrap();
-        let sym = self.__find_symbol(fsym.start, fsym.end, addr);
+    pub fn proc_symbolize(&mut self, pid: u32, addrs: &Vec<u64>) -> Vec<Symbol> {
+        let mut syms = Vec::with_capacity(addrs.len());
+        for sym in self
+            .proc_files
+            .symbolize(pid, &mut self.file_symbols, addrs)
+        {
+            syms.push(Symbol::new(sym.name.clone()));
+        }
+        syms
+    }
+
+    pub fn fileid_symbolize(&mut self, fileid: &FileId64, addr: u64) -> Symbol {
+        let sym = self.file_symbols.symbolize(*fileid, addr);
         Symbol::new(sym.name.clone())
     }
 
     pub fn kernel_symbolize(&self, addrs: &Vec<u64>) -> Vec<Symbol> {
         let mut syms = Vec::with_capacity(addrs.len());
-        let s = self.kernel.start;
-        let e = self.kernel.end;
         for &addr in addrs {
-            let sym = self.__find_symbol(s, e, addr);
+            let sym = match self.kernel.binary_search_by(|x| x.start.cmp(&addr)) {
+                Ok(x) => &self.kernel[x],
+                Err(x) => &self.kernel[x - 1],
+            };
             syms.push(Symbol::new(sym.name.clone()));
         }
         syms
@@ -278,7 +175,7 @@ mod tests {
         symer.add_kernel("tests/data/kallsyms");
 
         let mut prev = 0;
-        for sym in symer.symbols.iter() {
+        for sym in symer.kernel.iter() {
             assert!(sym.start >= prev, "prev: {:x}, now: {:x}", prev, sym.start);
             prev = sym.start;
         }
@@ -299,13 +196,8 @@ mod tests {
         let id = FileId64::from(&id);
         let mmap_ref = unsafe { memmap2::Mmap::map(&file).unwrap() };
         let elf = object::File::parse(&*mmap_ref).unwrap();
-        // symer.add_file(id, elf);
 
-        let mut prev = 0;
-        for sym in symer.symbols.iter() {
-            assert!(sym.start >= prev, "prev: {:x}, now: {:x}", prev, sym.start);
-            prev = sym.start;
-        }
+        symer.add_parsed_file(id, elf, "tests/data/ld-2.32.so".to_owned());
 
         assert_eq!(
             symer.fileid_symbolize(&id, 0x18780),
@@ -329,9 +221,7 @@ mod tests {
         let pid = unsafe { libc::getpid() };
 
         let func_addr = do_nothing_func as *const () as u64;
-        let syms = symer
-            .proc_symbolize(pid as u32, &vec![func_addr, func_addr + 1])
-            .unwrap();
+        let syms = symer.proc_symbolize(pid as u32, &vec![func_addr, func_addr + 1]);
         let name = Name::from(&syms[0].name);
         let name = name.try_demangle(DemangleOptions::complete());
         assert!(name.contains("do_nothing_func"));
