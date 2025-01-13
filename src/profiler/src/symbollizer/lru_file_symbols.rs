@@ -60,7 +60,7 @@ impl LruFileSymbols {
                 }
                 bail!("internal bug: ID-{:?} file path not found", file_id)
             }) {
-            Ok(Some(syms)) => binary_find_symbol(syms, addr).clone(),
+            Ok(Some(syms)) => binary_find_symbol(syms, addr),
             Ok(None) | Err(_) => ElfSymbol::not_found(addr),
         }
     }
@@ -77,15 +77,21 @@ impl LruFileSymbols {
                 ElfFile::parse_symbols2(object, &mut syms);
                 return Ok(syms);
             }) {
-            Ok(Some(syms)) => binary_find_symbol(syms, addr).clone(),
+            Ok(Some(syms)) => binary_find_symbol(syms, addr),
             Ok(None) | Err(_) => ElfSymbol::not_found(addr),
         }
     }
 }
 
-fn binary_find_symbol(syms: &Vec<ElfSymbol>, addr: u64) -> &ElfSymbol {
+fn binary_find_symbol(syms: &Vec<ElfSymbol>, addr: u64) -> ElfSymbol {
     match syms.binary_search_by(|x| x.start.cmp(&addr)) {
-        Ok(x) => &syms[x],
-        Err(x) => &syms[x - 1],
+        Ok(x) => syms[x].clone(),
+        Err(x) => {
+            if x == 0 {
+                ElfSymbol::not_found(addr)
+            } else {
+                syms[x - 1].clone()
+            }
+        }
     }
 }
