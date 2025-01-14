@@ -240,9 +240,13 @@ impl StackAggregator {
             if !stacks.is_empty() {
                 symbolized_stacks.push(SymbolizedStack {
                     pid: *pid,
-                    comm: match symer.proc_comm(*pid) {
-                        Ok(comm) => comm.clone(),
-                        Err(_) => String::new(),
+                    comm: if *pid == 0 {
+                        "idle".to_owned()
+                    } else {
+                        match symer.proc_comm(*pid) {
+                            Ok(comm) => comm.clone(),
+                            Err(_) => String::from("unknown"),
+                        }
                     },
                     stacks,
                     count,
