@@ -1,5 +1,4 @@
 use crate::interpreter::Interpreter;
-use crate::pb::ustack;
 use crate::pb::LivetraceCell;
 use crate::pb::LivetraceList;
 use crate::pb::Ustack;

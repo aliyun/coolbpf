@@ -230,7 +230,11 @@ impl<'a> Profiler<'a> {
                 .get_or_insert(&mut self.probes, info, map, bias)
             {
                 Ok(Some(a)) => a,
-                Ok(None) | Err(_) => continue,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::error!("failed to get executable: {e}");
+                    continue;
+                }
             };
 
             if !map.is_vdso() {
