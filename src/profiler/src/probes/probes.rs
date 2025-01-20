@@ -52,6 +52,7 @@ use std::os::fd::AsRawFd;
 use std::path;
 use std::path::PathBuf;
 use std::thread::panicking;
+use std::thread::JoinHandle;
 
 mod native {
     include!(concat!(env!("OUT_DIR"), "/native_stack.skel.rs"));
@@ -168,6 +169,9 @@ pub struct Probes<'a> {
 
     pid: u32,
     nspid: u32,
+
+    trace_thread_handle: JoinHandle<()>,
+    report_thread_handle: JoinHandle<()>,
 }
 
 impl<'a> Probes<'a> {
@@ -246,7 +250,8 @@ impl<'a> Probes<'a> {
         let python_skel = load_skel!(maps, python::PythonSkelBuilder);
 
         let (tx, rx) = crossbeam_channel::unbounded();
-        {
+
+        let trace_thread_handle = {
             let mut cloned_tx = tx.clone();
             let stack_map =
                 StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap());
@@ -260,17 +265,20 @@ impl<'a> Probes<'a> {
                 .build()
                 .unwrap();
 
-            std::thread::spawn(move || {
-                log::debug!("start trace event polling thread");
-                loop {
-                    perf.consume().unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            });
-        }
+            std::thread::Builder::new()
+                .name("profiler-trace".into())
+                .spawn(move || {
+                    log::debug!("start trace event polling thread");
+                    loop {
+                        perf.consume().unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                })
+                .unwrap()
+        };
 
         let sched_skel = load_skel!(maps, sched::SchedMonitorSkelBuilder);
-        {
+        let report_thread_handle = {
             let mut cloned_tx = tx.clone();
             let handle_event = move |cpu: i32, data: &[u8]| {
                 thread_poll_report_event(&mut cloned_tx, cpu, data);
@@ -283,13 +291,16 @@ impl<'a> Probes<'a> {
                 .build()
                 .unwrap();
 
-            std::thread::spawn(move || {
-                log::debug!("start report event polling thread");
-                loop {
-                    perf.poll(std::time::Duration::from_millis(200)).unwrap();
-                }
-            });
-        }
+            std::thread::Builder::new()
+                .name("profiler-report".into())
+                .spawn(move || {
+                    log::debug!("start report event polling thread");
+                    loop {
+                        perf.poll(std::time::Duration::from_millis(200)).unwrap();
+                    }
+                })
+                .unwrap()
+        };
 
         let mut nspid_skel = load_skel!(maps, nspid_pid::NspidPidSkelBuilder);
         let nspid_map =
@@ -334,6 +345,8 @@ impl<'a> Probes<'a> {
 
             pid,
             nspid: nspid as u32,
+            trace_thread_handle,
+            report_thread_handle,
         };
 
         if probe.pid != probe.nspid && is_system_profiling() {
@@ -556,4 +569,17 @@ fn probe_has_batch_ops(map_type: MapType) -> bool {
 
 fn probe_has_generic_batch_ops() -> bool {
     probe_has_batch_ops(MapType::Hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_threads_exit() {
+        loop {
+            let mut probe = Probes::new();
+            drop(probe);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
 }
