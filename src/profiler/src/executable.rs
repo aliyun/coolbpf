@@ -79,9 +79,7 @@ impl ExecutableCache {
             let mut ebpf_deltas = vec![];
 
             let deltas = match ElfFile::parse_eh_frame(&elf.file) {
-                Ok(deltas) => {
-                    deltas
-                }
+                Ok(deltas) => deltas,
                 Err(e) => {
                     bail!("internal error: {e}")
                 }

@@ -51,6 +51,8 @@ use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread::panicking;
 use std::thread::JoinHandle;
 
@@ -130,6 +132,20 @@ macro_rules! load_skel {
     }};
 }
 
+static THREAD_NEED_EXIT: AtomicBool = AtomicBool::new(false);
+
+fn thread_need_exit() -> bool {
+    THREAD_NEED_EXIT.load(Ordering::SeqCst)
+}
+
+fn reset_thread_need_exit() {
+    THREAD_NEED_EXIT.store(false, Ordering::SeqCst);
+}
+
+fn set_thread_need_exit() {
+    THREAD_NEED_EXIT.store(true, Ordering::SeqCst);
+}
+
 fn get_self_path() -> PathBuf {
     let pid = unsafe { libc::getpid() };
     let pm = ProcessMaps::new(pid as u32).unwrap();
@@ -170,12 +186,13 @@ pub struct Probes<'a> {
     pid: u32,
     nspid: u32,
 
-    trace_thread_handle: JoinHandle<()>,
-    report_thread_handle: JoinHandle<()>,
+    trace_thread_handle: Option<JoinHandle<()>>,
+    report_thread_handle: Option<JoinHandle<()>>,
 }
 
 impl<'a> Probes<'a> {
     pub fn new() -> Self {
+        reset_thread_need_exit();
         let has_generic_batchop = probe_has_generic_batch_ops();
         let mut builder = native::NativeStackSkelBuilder::default();
         if log::log_enabled!(log::Level::Debug) {
@@ -271,6 +288,9 @@ impl<'a> Probes<'a> {
                     log::debug!("start trace event polling thread");
                     loop {
                         perf.consume().unwrap();
+                        if thread_need_exit() {
+                            break;
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(250));
                     }
                 })
@@ -297,6 +317,9 @@ impl<'a> Probes<'a> {
                     log::debug!("start report event polling thread");
                     loop {
                         perf.poll(std::time::Duration::from_millis(200)).unwrap();
+                        if thread_need_exit() {
+                            break;
+                        }
                     }
                 })
                 .unwrap()
@@ -322,7 +345,6 @@ impl<'a> Probes<'a> {
         let pid = get_hostpid(nspid as u32, &nspid_map);
 
         log::debug!("nspid: {nspid}, hostpid: {pid}");
-
         let mut probe = Self {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
             interpreter_offset_map: InterpreterOffsetMap::new(
@@ -345,8 +367,8 @@ impl<'a> Probes<'a> {
 
             pid,
             nspid: nspid as u32,
-            trace_thread_handle,
-            report_thread_handle,
+            trace_thread_handle: Some(trace_thread_handle),
+            report_thread_handle: Some(report_thread_handle),
         };
 
         if probe.pid != probe.nspid && is_system_profiling() {
@@ -504,13 +526,26 @@ impl<'a> Probes<'a> {
     }
 }
 
+impl<'a> Drop for Probes<'a> {
+    fn drop(&mut self) {
+        set_thread_need_exit();
+        if let Some(thread) = self.trace_thread_handle.take() {
+            thread.join().unwrap();
+        }
+
+        if let Some(thread) = self.report_thread_handle.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
 fn thread_poll_report_event(tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8]) {
     let raw = data.as_ptr() as *const bpf::Event;
     let ty = unsafe { (*raw).event_type };
     match ty {
         bpf::EVENT_TYPE_PROCESS_EXIT => {
             let pid = unsafe { (*raw).pid };
-            tx.send(ProbeEvent::ProcessExit(pid)).unwrap();
+            let _ = tx.send(ProbeEvent::ProcessExit(pid));
         }
         _ => {}
     }
@@ -542,7 +577,7 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i3
             user: user_stack,
         }
     };
-    tx.send(ProbeEvent::Trace(rs)).unwrap();
+    let _ = tx.send(ProbeEvent::Trace(rs));
 }
 
 fn probe_has_batch_ops(map_type: MapType) -> bool {
