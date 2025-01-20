@@ -78,7 +78,14 @@ impl ExecutableCache {
             // b. load deltas, return mapref
             let mut ebpf_deltas = vec![];
 
-            let deltas = ElfFile::parse_eh_frame(&elf.file).unwrap();
+            let deltas = match ElfFile::parse_eh_frame(&elf.file) {
+                Ok(deltas) => {
+                    deltas
+                }
+                Err(e) => {
+                    bail!("internal error: {e}")
+                }
+            };
             if deltas.is_empty() {
                 self.errors.insert(elf.file_id);
                 bail!("no eh_frame")
@@ -126,7 +133,13 @@ impl ExecutableCache {
                             let mmap_ref = unsafe { memmap2::Mmap::map(&elf.file).unwrap() };
                             let object =
                                 object::File::parse(&*mmap_ref).expect("failed to parse elf file");
-                            Some(extract_tsd_info(&object).unwrap())
+                            match extract_tsd_info(&object) {
+                                Ok(info) => Some(info),
+                                Err(e) => {
+                                    log::error!("failed to extract tsd info: {e}");
+                                    None
+                                }
+                            }
                         }
                     })
                     .flatten(),

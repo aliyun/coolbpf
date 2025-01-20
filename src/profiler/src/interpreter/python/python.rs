@@ -210,7 +210,7 @@ impl PythonData {
         };
 
         if main_dso {
-            todo!()
+            bail!("not implemented")
             // let rm = match elf {
             //     let mut dyn_strings = vec![];
             //     object::File::Elf64(e) => {
