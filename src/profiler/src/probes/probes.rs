@@ -51,6 +51,7 @@ use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread::panicking;
@@ -378,7 +379,8 @@ impl<'a> Probes<'a> {
         probe.load_system_config(system_config_skel);
         probe.attach_sched_monitor();
         probe.load_unwinders();
-        probe.attach_perf_event(10000000);
+        let ms = profile_period() as u64;
+        probe.attach_perf_event(ms * 1000000);
         probe
     }
 
@@ -604,6 +606,19 @@ fn probe_has_batch_ops(map_type: MapType) -> bool {
 
 fn probe_has_generic_batch_ops() -> bool {
     probe_has_batch_ops(MapType::Hash)
+}
+
+fn profile_period() -> u32 {
+    match std::env::var("PROFILE_PERIOD_MS") {
+        Ok(value) => {
+            let period = match u32::from_str(&value) {
+                Ok(num) => num,
+                Err(_) => 50,
+            };
+            period
+        }
+        Err(_) => 50,
+    }
 }
 
 #[cfg(test)]

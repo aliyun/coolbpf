@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::hash::RandomState;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 
 #[derive(Debug)]
 struct WeightSymbols {
@@ -39,10 +40,25 @@ pub struct LruFileSymbols {
     path: HashMap<FileId64, String>,
 }
 
+// in mb
+fn symbols_cache_usage() -> u32 {
+    match std::env::var("SYMBOLS_CACHE_MB") {
+        Ok(value) => {
+            let period = match u32::from_str(&value) {
+                Ok(num) => num,
+                Err(_) => 100,
+            };
+            period
+        }
+        Err(_) => 100,
+    }
+}
+
 impl LruFileSymbols {
     pub fn new() -> Self {
+        let bytes = symbols_cache_usage() * 1024 * 1024;
         let cache = CLruCache::with_config(
-            CLruCacheConfig::new(NonZeroUsize::new(300 * 1024 * 1024).unwrap())
+            CLruCacheConfig::new(NonZeroUsize::new(bytes as usize).unwrap())
                 .with_scale(CustomScale),
         );
         LruFileSymbols {
