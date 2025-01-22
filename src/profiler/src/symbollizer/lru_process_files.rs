@@ -72,7 +72,7 @@ impl ProcessFiles {
                 Ok(x) => lru_files.symbolize_with_path(
                     self.files[x].file_id,
                     addr - self.files[x].bias,
-                    self.files[x].path.as_str(),
+                    &self.files[x].path,
                 ),
                 Err(_) => ElfSymbol::not_found(addr),
             };
@@ -92,7 +92,7 @@ impl LruProcessFiles {
         let cpus = num_cpus::get();
         LruProcessFiles {
             // 128B * 100(share library) * 1024 => 12MB for one cpu
-            lru: LruCache::new(NonZeroUsize::new(cpus * 1024).unwrap()),
+            lru: LruCache::new(NonZeroUsize::new(cpus * 32).unwrap()),
         }
     }
 

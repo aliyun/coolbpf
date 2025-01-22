@@ -1,3 +1,5 @@
+use crate::process::maps::ProcessMaps;
+use crate::MAX_NUM_OF_PROCESSES;
 use anyhow::bail;
 use anyhow::Result;
 use lru::LruCache;
@@ -11,9 +13,6 @@ use std::io::BufRead;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ops::Range;
-
-use crate::process::maps::ProcessMaps;
-use crate::MAX_NUM_OF_PROCESSES;
 
 use super::elf::ElfFile;
 use super::elf::ElfSymbol;
@@ -61,7 +60,6 @@ pub struct Symbolizer {
     proc_files: LruProcessFiles,
     //
     kernel: Vec<ElfSymbol>,
-
     adb_regex: Option<Regex>,
 }
 
@@ -87,12 +85,14 @@ impl Symbolizer {
         if path.is_empty() {
             return;
         }
-        self.file_symbols
-            .get_or_insert(file_id, || -> Vec<ElfSymbol> {
-                let mut symbols = vec![];
-                ElfFile::parse_symbols2(file, &mut symbols);
-                symbols
-            });
+
+        if self.file_symbols.contains(file_id) {
+            return;
+        }
+
+        let mut symbols = vec![];
+        ElfFile::parse_symbols2(file, &mut symbols);
+        self.file_symbols.add_symbols(file_id, symbols);
         self.file_symbols.record_file_path(file_id, path);
     }
 

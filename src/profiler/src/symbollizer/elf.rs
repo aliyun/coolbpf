@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
-use blazesym::IntoError;
 use byteorder::ByteOrder;
 use byteorder::NativeEndian;
 use gimli::write::CommonInformationEntry;
