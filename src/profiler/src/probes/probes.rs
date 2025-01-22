@@ -609,7 +609,7 @@ fn probe_has_generic_batch_ops() -> bool {
 }
 
 fn profile_period() -> u32 {
-    match std::env::var("PROFILE_PERIOD_MS") {
+    match std::env::var("LIVETRACE_PROFILE_PERIOD_MS") {
         Ok(value) => {
             let period = match u32::from_str(&value) {
                 Ok(num) => num,

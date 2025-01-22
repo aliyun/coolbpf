@@ -42,7 +42,7 @@ pub struct LruFileSymbols {
 
 // in mb
 fn symbols_cache_usage() -> u32 {
-    match std::env::var("SYMBOLS_CACHE_MB") {
+    match std::env::var("LIVETRACE_SYMBOLS_CACHE_MB") {
         Ok(value) => {
             let period = match u32::from_str(&value) {
                 Ok(num) => num,
