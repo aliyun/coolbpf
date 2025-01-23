@@ -35,7 +35,7 @@ endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
                ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc @ONLY)
 
-include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}
+include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/bpf
                     ${CMAKE_CURRENT_BINARY_DIR}/bpf)
 
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
