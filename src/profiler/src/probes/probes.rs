@@ -317,7 +317,7 @@ impl<'a> Probes<'a> {
                 .spawn(move || {
                     log::debug!("start report event polling thread");
                     loop {
-                        perf.poll(std::time::Duration::from_millis(200)).unwrap();
+                        let _ = perf.poll(std::time::Duration::from_millis(200));
                         if thread_need_exit() {
                             break;
                         }

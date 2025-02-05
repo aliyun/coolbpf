@@ -124,6 +124,7 @@ impl ToString for Stack {
 pub struct StackCounter {
     stacks: HashMap<RawStack, u32>,
     total: usize,
+    keep: bool,
 }
 
 impl StackCounter {
@@ -131,13 +132,15 @@ impl StackCounter {
         StackCounter {
             stacks: HashMap::new(),
             total: 0,
+            keep: false,
         }
     }
 
-    pub fn add(&mut self, raw: RawStack) {
+    pub fn add(&mut self, raw: RawStack, keep: bool) {
         let count = self.stacks.entry(raw).or_insert(0);
         *count += 1;
         self.total += 1;
+        self.keep = keep;
     }
 
     pub fn len(&self) -> usize {
@@ -152,14 +155,14 @@ pub struct StackAggregator {
 }
 
 impl StackAggregator {
-    pub fn add(&mut self, raw: RawStack) {
+    pub fn add(&mut self, raw: RawStack, keep: bool) {
         let sc = self.stacks.entry(raw.pid).or_insert(StackCounter::new());
         self.total += 1;
-        sc.add(raw);
+        sc.add(raw, keep);
     }
 
     pub fn filter(&mut self, threshold: usize) {
-        self.stacks.retain(|_, x| x.len() > threshold);
+        self.stacks.retain(|_, x| x.keep || x.len() > threshold);
     }
 
     pub fn serialize(

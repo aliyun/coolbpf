@@ -70,7 +70,10 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::Trace(data) => {
+                        let keep = self.pids.contains_key(&data.pid);
+                        stack_agg.add(data, keep);
+                    }
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
                 Err(_e) => break,
@@ -94,7 +97,7 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::Trace(data) => stack_agg.add(data, false),
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
                 Err(_e) => break,
