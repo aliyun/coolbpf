@@ -2,6 +2,7 @@ use profiler::Profiler;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 pub mod error;
 pub mod executable;
@@ -16,12 +17,14 @@ pub mod symbollizer;
 pub mod tpbase;
 pub mod utils;
 use ctor::*;
+use std::str::FromStr;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
 
 pub static SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
 pub static ENABLE_SYMBOLIZER: AtomicBool = AtomicBool::new(true);
+pub static SYMBOL_FILE_MAX_SIZE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 pub fn is_system_profiling() -> bool {
     SYSTEM_PROFILING.load(Ordering::SeqCst)
@@ -31,9 +34,32 @@ pub fn is_enable_symbolizer() -> bool {
     ENABLE_SYMBOLIZER.load(Ordering::SeqCst)
 }
 
+pub fn symbol_file_max_size() -> u64 {
+    SYMBOL_FILE_MAX_SIZE.load(Ordering::SeqCst)
+}
+
+pub fn symbol_file_max_symbols() -> u64 {
+    let sz = symbol_file_max_size();
+    if sz == u64::MAX {
+        return u64::MAX;
+    }
+    sz / 100
+}
+
 #[ctor]
 fn global_libarary_constructor() {
     env_logger::init();
+
+    match std::env::var("LIVETRACE_SYMBOL_FILE_MAX_MB") {
+        Ok(value) => {
+            let sz = match u64::from_str(&value) {
+                Ok(num) => num * 1024 * 1024,
+                Err(_) => 2 * 1024 * 1025,
+            };
+            SYMBOL_FILE_MAX_SIZE.store(sz, Ordering::SeqCst);
+        }
+        Err(_) => {}
+    };
 }
 
 #[no_mangle]

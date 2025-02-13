@@ -1,6 +1,7 @@
 use super::elf::ElfSymbol;
 use super::file_id::FileId64;
 use crate::symbollizer::elf::ElfFile;
+use crate::SYMBOL_FILE_MAX_SIZE;
 use anyhow::bail;
 use anyhow::Result;
 use clru::CLruCache;
@@ -11,6 +12,7 @@ use std::fs::File;
 use std::hash::RandomState;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 struct WeightSymbols {
@@ -20,8 +22,11 @@ struct WeightSymbols {
 
 impl WeightSymbols {
     pub fn new(symbols: Vec<ElfSymbol>) -> Self {
-        let weight = symbols.iter().map(|x| x.name.len() + 16).sum();
-        WeightSymbols { symbols, weight }
+        let weight: usize = symbols.iter().map(|x| x.name.len() + 16).sum();
+        WeightSymbols {
+            symbols,
+            weight: weight + 16,
+        }
     }
 }
 
@@ -38,6 +43,8 @@ impl WeightScale<FileId64, WeightSymbols> for CustomScale {
 pub struct LruFileSymbols {
     symbols: CLruCache<FileId64, WeightSymbols, RandomState, CustomScale>,
     path: HashMap<FileId64, String>,
+    max_sz: usize,
+    max_weight: usize,
 }
 
 // in mb
@@ -64,6 +71,8 @@ impl LruFileSymbols {
         LruFileSymbols {
             symbols: cache,
             path: HashMap::new(),
+            max_sz: SYMBOL_FILE_MAX_SIZE.load(Ordering::SeqCst) as usize,
+            max_weight: bytes as usize,
         }
     }
 
@@ -91,7 +100,6 @@ impl LruFileSymbols {
         addr: u64,
         path: Option<&String>,
     ) -> Result<ElfSymbol> {
-        let weight = self.symbols.weight();
         match self.symbols.get(&file_id) {
             Some(wsyms) => Ok(binary_find_symbol(&wsyms.symbols, addr)),
             None => {
@@ -102,10 +110,25 @@ impl LruFileSymbols {
                     let mmap_ref = unsafe { memmap2::Mmap::map(&file)? };
                     let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
                     ElfFile::parse_symbols2(object, &mut syms);
-                    log::info!("cache file symbols for {}, weight: {}", path, weight);
                     let sym = binary_find_symbol(&syms, addr);
                     let wsyms = WeightSymbols::new(syms);
-                    self.symbols.put_with_weight(file_id, wsyms).unwrap();
+                    log::debug!(
+                        "cache file symbols for {}, weight: {}, symbols len: {}",
+                        path,
+                        wsyms.weight,
+                        wsyms.symbols.len()
+                    );
+                    if wsyms.weight > self.max_sz || wsyms.weight > self.max_weight {
+                        log::warn!(
+                            "file symbols weight too large: {}, depreceated it",
+                            wsyms.weight
+                        );
+                        let new_wsyms = WeightSymbols::new(vec![]);
+                        self.symbols.put_with_weight(file_id, new_wsyms).unwrap();
+                    } else {
+                        self.symbols.put_with_weight(file_id, wsyms).unwrap();
+                    }
+
                     return Ok(sym);
                 }
                 bail!("internal bug: ID-{:?} file path not found", file_id)

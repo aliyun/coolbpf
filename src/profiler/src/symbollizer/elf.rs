@@ -55,6 +55,7 @@ use crate::probes::types::bpf::UNWIND_OPCODE_BASE_REG;
 use crate::probes::types::bpf::UNWIND_OPCODE_BASE_SP;
 use crate::probes::types::bpf::UNWIND_OPCODE_COMMAND;
 use crate::probes::unwind_info::UnwindInfo;
+use crate::symbol_file_max_symbols;
 
 use super::file_cache::ProgramAddress;
 
@@ -213,6 +214,16 @@ impl ElfFile {
     pub fn parse_symbols2(elf: object::File, dst: &mut Vec<ElfSymbol>) {
         let re = Regex::new(r#"<.*?>"#).unwrap();
         let start = dst.len();
+
+        let max_symbols = symbol_file_max_symbols();
+        if max_symbols != u64::MAX {
+            let len = elf.symbols().count() + elf.dynamic_symbols().count();
+            if len as u64 > max_symbols {
+                log::debug!("too many symbols: {}, support max: {}", len, max_symbols);
+                return;
+            }
+        }
+
         for sym in elf.symbols() {
             if sym.is_undefined() || sym.kind() != SymbolKind::Text {
                 continue;
