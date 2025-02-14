@@ -16,6 +16,14 @@
 struct data_event_id {
   __u64 pid;
   __u64 time;
+#ifdef __cplusplus
+  bool operator<(const data_event_id& other) const {
+        if (pid != other.pid) {
+            return pid < other.pid;
+        }
+        return time < other.time;
+    }
+#endif
 } __attribute__((packed));
 
 struct data_event_desc {
