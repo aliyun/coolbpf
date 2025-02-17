@@ -105,6 +105,17 @@ impl Stack {
     pub fn empty(&self) -> bool {
         self.frames.is_empty()
     }
+
+    pub fn is_idle(&self) -> bool {
+        if !self.frames.is_empty()
+            && (self.frames[0].name == "finish_task_switch"
+                || self.frames[0].name == "native_safe_halt"
+                || self.frames[0].name.contains("idle"))
+        {
+            return true;
+        }
+        false
+    }
 }
 
 impl ToString for Stack {
@@ -224,9 +235,24 @@ impl StackAggregator {
         for (pid, sc) in &self.stacks {
             let mut stacks = vec![];
             let mut count = 0;
+
+            let comm = {
+                if *pid == 0 {
+                    "idle".to_owned()
+                } else {
+                    match symer.proc_comm(*pid) {
+                        Ok(comm) => comm.to_string(),
+                        Err(_) => continue,
+                    }
+                }
+            };
+
             for (raw, &cnt) in &sc.stacks {
                 match Stack::new(symer, raw, inters, cnt) {
                     Ok(stack) => {
+                        if *pid == 0 && stack.is_idle() {
+                            continue;
+                        }
                         stacks.push(stack);
                         count += cnt;
                     }
@@ -242,14 +268,7 @@ impl StackAggregator {
             if !stacks.is_empty() {
                 symbolized_stacks.push(SymbolizedStack {
                     pid: *pid,
-                    comm: if *pid == 0 {
-                        "idle".to_owned()
-                    } else {
-                        match symer.proc_comm(*pid) {
-                            Ok(comm) => comm.clone(),
-                            Err(_) => String::from("unknown"),
-                        }
-                    },
+                    comm,
                     stacks,
                     count,
                 });
