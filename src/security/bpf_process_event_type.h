@@ -266,14 +266,17 @@ struct heap_exe {
   __u32 error;
 }; // All fields aligned so no 'packed' attribute.
 
+#define EXECVE_EVENT_COMMON_MEMBERS \
+    struct msg_common common; \
+    struct msg_k8s kube; \
+    struct msg_execve_key parent; \
+    __u64 parent_flags; \
+    struct msg_cred creds; \
+    struct msg_ns ns; \
+    struct msg_execve_key cleanup_key;
+
 struct msg_execve_event {
-  struct msg_common common;
-  struct msg_k8s kube;
-  struct msg_execve_key parent;
-  __u64 parent_flags;
-  struct msg_cred creds;
-  struct msg_ns ns;
-  struct msg_execve_key cleanup_key;
+  EXECVE_EVENT_COMMON_MEMBERS
   /* if add anything above please also update the args of
    * validate_msg_execve_size() in bpf_execve_event.c */
   union {
