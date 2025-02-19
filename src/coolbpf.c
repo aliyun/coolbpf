@@ -68,7 +68,7 @@ struct coolbpf_object *__coolbpf_object_open(skel_open open, skel_load load,
     void *skel_obj = open();
     if (!skel_obj) {
       free(obj);
-      error("failed to open skeleton object\n");
+      log_error("failed to open skeleton object\n");
       return NULL;
     }
 
@@ -139,14 +139,14 @@ void *perf_thread_worker(void *ctx)
     err = libbpf_get_error(pb);
     if (err)
     {
-        error("error new perf buffer: %s\n", strerror(-err));
+        log_error("error new perf buffer: %s\n", strerror(-err));
         return NULL;
     }
 
     if (!pb)
     {
         err = -errno;
-        error("failed to open perf buffer: %d\n", err);
+        log_error("failed to open perf buffer: %d\n", err);
         return NULL;
     }
 
@@ -155,7 +155,7 @@ void *perf_thread_worker(void *ctx)
         err = perf_buffer__poll(pb, timeout_ms);
         if (err < 0 && err != -EINTR)
         {
-            error("error polling perf buffer: %s\n", strerror(-err));
+            log_error("error polling perf buffer: %s\n", strerror(-err));
             goto cleanup;
         }
 

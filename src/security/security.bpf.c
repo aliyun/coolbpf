@@ -17,30 +17,14 @@
 #include "bpf_exit.h"
 #include "tailcall_stack.h"
 //#include "bpf_execve.h"
-// map in map
 
-// struct {
-// 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-// 	__uint(max_entries, 10);
-//   // __uint(key_size, sizeof(__u8) * sizeof(struct string_prefix_lpm_trie));
-//   // __uint(value_size, sizeof(__u8));
-// 	__type(key, __u8[sizeof(struct string_prefix_lpm_trie)]); // Need to specify as byte array as wouldn't take struct as key type
-// 	__type(value, __u8);
-// 	__uint(map_flags, BPF_F_NO_PREALLOC);
-// } ql_test_prefix_map SEC(".maps");
-
-// [0, SYSAK_SECURE_MAX_CIDR_LIMIT/2) for source addr
-// [SYSAK_SECURE_MAX_CIDR_LIMIT/2, SYSAK_SECURE_MAX_CIDR_LIMIT) for dest addr
 BPF_ARRAY(cidr_filter_list, struct cidr_entry, SYSAK_SECURE_MAX_CIDR_LIMIT);
-// [0, SYSAK_SECURE_MAX_PORT_LIMIT/2) for source port
-// [SYSAK_SECURE_MAX_PORT_LIMIT/2, SYSAK_SECURE_MAX_CIDR_LIMIT) for dest port
 BPF_ARRAY(port_filter_list, struct port_entry, SYSAK_SECURE_MAX_PORT_LIMIT);
 
 BPF_HASH(sock_secure_port_filter, u16, struct port_entry, 1024);
 BPF_PERF_OUTPUT(sock_secure_output, 1024);
 BPF_PERCPU_ARRAY(sock_secure_data_heap, struct tcp_data_t, 1);
 
-// [0, SYSAK_SECURE_MAX_PATH_LIMIT/2) for file path
 BPF_ARRAY(path_filter_list, struct path_entry, SYSAK_SECURE_MAX_PATH_LIMIT);
 BPF_PERF_OUTPUT(file_secure_output, 1024);
 BPF_PERCPU_ARRAY(file_secure_data_heap, struct file_data_t, 1);
