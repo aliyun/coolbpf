@@ -542,9 +542,9 @@ typedef struct Trace {
   // Monotonic kernel time in nanosecond precision.
 #if 0
   u64 ktime;
+#endif
   // The current COMM of the thread of this Trace.
   unsigned char comm[COMM_LEN];
-#endif
 #ifdef HAS_APM
   // APM transaction ID or all-zero if not present.
   ApmSpanID apm_transaction_id;

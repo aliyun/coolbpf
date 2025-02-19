@@ -22,7 +22,7 @@ use super::file_id::FileId64;
 use super::lru_file_symbols::LruFileSymbols;
 use super::lru_process_files::LruProcessFiles;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Symbol {
     pub name: String,
 }

@@ -579,7 +579,12 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i3
             user: user_stack,
         }
     };
-    let _ = tx.send(ProbeEvent::Trace(rs));
+    let comm = unsafe {
+        String::from_utf8_unchecked((*raw).comm.to_vec())
+            .trim_matches(char::from(0))
+            .to_owned()
+    };
+    let _ = tx.send(ProbeEvent::Trace((comm, rs)));
 }
 
 fn probe_has_batch_ops(map_type: MapType) -> bool {

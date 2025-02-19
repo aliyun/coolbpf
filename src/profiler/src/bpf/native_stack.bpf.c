@@ -925,11 +925,11 @@ static inline int collect_trace(struct pt_regs *ctx)
 #if 0
   u64 ktime = bpf_ktime_get_ns();
   trace->ktime = ktime;
+#endif
   if (bpf_get_current_comm(&(trace->comm), sizeof(trace->comm)) < 0)
   {
     increment_metric(metricID_ErrBPFCurrentComm);
   }
-#endif
 
   // Get the kernel mode stack trace first
   trace->kernel_stack_id = bpf_get_stackid(ctx, &kernel_stackmap, BPF_F_REUSE_STACKID);

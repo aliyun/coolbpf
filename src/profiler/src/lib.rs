@@ -1,4 +1,5 @@
 use profiler::Profiler;
+use stack::SymbolizedStack;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::atomic::AtomicBool;
@@ -135,9 +136,41 @@ pub extern "C" fn livetrace_profiler_read(
     };
 
     for proc in profiler.read() {
-        let cstr = CString::new(proc.to_string()).unwrap();
-        let comm = CString::new(proc.comm.clone()).unwrap();
-        unsafe { cb(proc.pid, comm.as_ptr(), cstr.as_ptr(), proc.count) };
+        send_symbolized_stack(proc, cb);
+    }
+}
+
+fn send_symbolized_stack(
+    proc: SymbolizedStack,
+    cb: unsafe extern "C" fn(libc::c_uint, *const libc::c_char, *const libc::c_char, libc::c_uint),
+) {
+    let mut cnt = 0;
+
+    loop {
+        let mut stack_cnt = 0;
+        let mut stack_data = Vec::new();
+        let mut data_len = 0;
+        for stack in proc.stacks[cnt..].iter() {
+            cnt += 1;
+            stack_cnt += stack.count;
+            let tmp = format!("{}:{};{}", proc.comm, proc.pid, stack.to_string());
+            data_len += tmp.len() + 1;
+            stack_data.push(tmp);
+            if data_len > 8 * 1024 * 1024 {
+                break;
+            }
+        }
+
+        if data_len == 0 {
+            break;
+        }
+
+        let data = stack_data.join("\n");
+        if let Ok(cstr) = CString::new(data) {
+            if let Ok(comm) = CString::new(proc.comm.clone()) {
+                unsafe { cb(proc.pid, comm.as_ptr(), cstr.as_ptr(), stack_cnt) };
+            }
+        }
     }
 }
 
@@ -156,5 +189,93 @@ pub extern "C" fn livetrace_profiler_read_bytes(
         unsafe {
             cb(bytes.as_ptr(), bytes.len() as u32);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::stack::Stack;
+    use crate::symbollizer::symbolizer::Symbol;
+
+    use super::*;
+
+    unsafe extern "C" fn test_send_data_call_back(
+        pid: libc::c_uint,
+        comm: *const libc::c_char,
+        stack: *const libc::c_char,
+        cnt: libc::c_uint,
+    ) {
+        let stack_cstring = CStr::from_ptr(stack);
+        assert!(stack_cstring.count_bytes() > 0);
+        assert!(stack_cstring.count_bytes() < 9 * 1024 * 1024);
+        assert!(pid == 1);
+        assert_ne!(cnt, 0);
+    }
+
+    #[test]
+    fn test_send_symbolized_stack_large() {
+        let mut proc = SymbolizedStack {
+            comm: "test".to_string(),
+            pid: 1,
+            count: 0,
+            stacks: vec![],
+        };
+
+        // 10kb
+        let stack = Stack {
+            count: 1,
+            frames: vec![
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+                Symbol::new("s".repeat(1024)),
+            ],
+        };
+
+        // 10kb * 10240 => 100mb
+        for _ in 0..10240 {
+            proc.stacks.push(stack.clone());
+        }
+
+        send_symbolized_stack(proc, test_send_data_call_back);
+    }
+
+    fn test_send_symbolized_stack_small() {
+        let mut proc = SymbolizedStack {
+            comm: "test".to_string(),
+            pid: 1,
+            count: 0,
+            stacks: vec![],
+        };
+
+        // 10b
+        let stack = Stack {
+            count: 1,
+            frames: vec![
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+                Symbol::new("s".repeat(1)),
+            ],
+        };
+
+        // 10b * 10240 => 100kb
+        for _ in 0..10240 {
+            proc.stacks.push(stack.clone());
+        }
+
+        send_symbolized_stack(proc, test_send_data_call_back);
     }
 }

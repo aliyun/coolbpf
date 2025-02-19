@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 pub enum ProbeEvent {
     ProcessExit(u32),
-    Trace(RawStack),
+    Trace((String, RawStack)),
 }
 
 #[derive(Debug)]

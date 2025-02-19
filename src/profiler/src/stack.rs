@@ -52,10 +52,10 @@ pub enum Frame {
     Java(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Stack {
-    count: u32,
-    frames: Vec<Symbol>,
+    pub count: u32,
+    pub frames: Vec<Symbol>,
 }
 
 impl Stack {
@@ -161,19 +161,23 @@ impl StackCounter {
 
 #[derive(Default)]
 pub struct StackAggregator {
-    stacks: HashMap<u32, StackCounter>,
+    stacks: HashMap<u32, (String, StackCounter)>,
     pub total: usize,
 }
 
 impl StackAggregator {
-    pub fn add(&mut self, raw: RawStack, keep: bool) {
-        let sc = self.stacks.entry(raw.pid).or_insert(StackCounter::new());
+    pub fn add(&mut self, comm: String, raw: RawStack, keep: bool) {
+        let (_, sc) = self
+            .stacks
+            .entry(raw.pid)
+            .or_insert((comm, StackCounter::new()));
         self.total += 1;
         sc.add(raw, keep);
     }
 
     pub fn filter(&mut self, threshold: usize) {
-        self.stacks.retain(|_, x| x.keep || x.len() > threshold);
+        self.stacks
+            .retain(|_, (_, x)| x.keep || x.len() > threshold);
     }
 
     pub fn serialize(
@@ -182,7 +186,7 @@ impl StackAggregator {
         inters: &mut HashMap<u32, Interpreter>,
     ) -> Vec<u8> {
         let mut list = LivetraceList::new();
-        for (pid, sc) in &self.stacks {
+        for (pid, (_, sc)) in &self.stacks {
             for (raw, cnt) in &sc.stacks {
                 let mut cell = LivetraceCell::new();
                 cell.pid = *pid;
@@ -232,20 +236,9 @@ impl StackAggregator {
         inters: &mut HashMap<u32, Interpreter>,
     ) -> Vec<SymbolizedStack> {
         let mut symbolized_stacks = vec![];
-        for (pid, sc) in &self.stacks {
+        for (pid, (comm, sc)) in &self.stacks {
             let mut stacks = vec![];
             let mut count = 0;
-
-            let comm = {
-                if *pid == 0 {
-                    "idle".to_owned()
-                } else {
-                    match symer.proc_comm(*pid) {
-                        Ok(comm) => comm.to_string(),
-                        Err(_) => continue,
-                    }
-                }
-            };
 
             for (raw, &cnt) in &sc.stacks {
                 match Stack::new(symer, raw, inters, cnt) {
@@ -268,7 +261,7 @@ impl StackAggregator {
             if !stacks.is_empty() {
                 symbolized_stacks.push(SymbolizedStack {
                     pid: *pid,
-                    comm,
+                    comm: comm.clone(),
                     stacks,
                     count,
                 });
@@ -282,7 +275,25 @@ pub struct SymbolizedStack {
     pub pid: u32,
     pub comm: String,
     pub count: u32,
-    stacks: Vec<Stack>,
+    pub stacks: Vec<Stack>,
+}
+
+impl SymbolizedStack {
+    pub fn half_split(mut self) -> (SymbolizedStack, SymbolizedStack) {
+        let len = self.stacks.len();
+        let pid = self.pid;
+        let comm = self.comm.clone();
+        let right = self.stacks.split_off(len / 2);
+        (
+            self,
+            SymbolizedStack {
+                pid,
+                comm,
+                count: 0,
+                stacks: right,
+            },
+        )
+    }
 }
 
 impl ToString for SymbolizedStack {

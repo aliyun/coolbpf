@@ -50,7 +50,7 @@ impl<'a> Profiler<'a> {
     pub fn poll(&mut self) {
         loop {
             match self.probes.recv() {
-                ProbeEvent::Trace(data) => {
+                ProbeEvent::Trace((_, data)) => {
                     let stack =
                         Stack::new(&mut self.symbolizer, &data, &mut self.interpreters, 1).unwrap();
                     if !stack.empty() {
@@ -70,9 +70,9 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => {
+                    ProbeEvent::Trace((comm, data)) => {
                         let keep = self.pids.contains_key(&data.pid);
-                        stack_agg.add(data, keep);
+                        stack_agg.add(comm, data, keep);
                     }
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
@@ -97,7 +97,7 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => stack_agg.add(data, false),
+                    ProbeEvent::Trace((comm, data)) => stack_agg.add(comm, data, false),
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
                 Err(_e) => break,
