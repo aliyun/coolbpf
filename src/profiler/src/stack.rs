@@ -240,6 +240,17 @@ impl StackAggregator {
             let mut stacks = vec![];
             let mut count = 0;
 
+            let comm = {
+                if *pid != 0 {
+                    match symer.proc_comm(*pid) {
+                        Ok(comm) => comm.to_string(),
+                        Err(_) => comm.clone(),
+                    }
+                } else {
+                    comm.clone()
+                }
+            };
+
             for (raw, &cnt) in &sc.stacks {
                 match Stack::new(symer, raw, inters, cnt) {
                     Ok(stack) => {
