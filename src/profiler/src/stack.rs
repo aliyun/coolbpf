@@ -247,7 +247,11 @@ impl StackAggregator {
                         Err(_) => comm.clone(),
                     }
                 } else {
-                    comm.clone()
+                    if comm.starts_with("swapper") {
+                        "swapper".to_string()
+                    } else {
+                        comm.clone()
+                    }
                 }
             };
 
