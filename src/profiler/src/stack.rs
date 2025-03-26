@@ -21,7 +21,11 @@ pub struct KernelStack {
 
 impl KernelStack {
     pub fn new(symer: &Symbolizer, addrs: &Vec<u64>) -> Result<Self> {
-        let frames = symer.kernel_symbolize(addrs);
+        let frames = if symer.need_function_offset {
+            symer.kernel_symbolize_with_offset(addrs)
+        } else {
+            symer.kernel_symbolize(addrs)
+        };
         Ok(KernelStack { syms: frames })
     }
 }

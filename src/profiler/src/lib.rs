@@ -27,9 +27,14 @@ pub static SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
 pub static ENABLE_SYMBOLIZER: AtomicBool = AtomicBool::new(true);
 pub static SYMBOL_FILE_MAX_SIZE: AtomicU64 = AtomicU64::new(u64::MAX);
 pub static LIVETRACE_ENABLE_CPU_INFO: AtomicBool = AtomicBool::new(false);
+pub static LIVETRACE_ENABLE_FUNCTION_OFFSET: AtomicBool = AtomicBool::new(false);
 
 pub fn is_enable_cpuno() -> bool {
     LIVETRACE_ENABLE_CPU_INFO.load(Ordering::SeqCst)
+}
+
+pub fn is_enable_function_offset() -> bool {
+    LIVETRACE_ENABLE_FUNCTION_OFFSET.load(Ordering::SeqCst)
 }
 
 pub fn is_system_profiling() -> bool {
@@ -71,6 +76,15 @@ fn global_libarary_constructor() {
         Ok(value) => {
             if value == "1" {
                 LIVETRACE_ENABLE_CPU_INFO.store(true, Ordering::SeqCst);
+            }
+        }
+        Err(_) => {}
+    };
+
+    match std::env::var("LIVETRACE_ENABLE_FUNCTION_OFFSET") {
+        Ok(value) => {
+            if value == "1" {
+                LIVETRACE_ENABLE_FUNCTION_OFFSET.store(true, Ordering::SeqCst);
             }
         }
         Err(_) => {}

@@ -1,4 +1,5 @@
 use crate::is_enable_cpuno;
+use crate::is_enable_function_offset;
 use crate::process::maps::ProcessMaps;
 use crate::MAX_NUM_OF_PROCESSES;
 use anyhow::bail;
@@ -64,6 +65,7 @@ pub struct Symbolizer {
     adb_regex: Option<Regex>,
 
     pub need_cpu: bool,
+    pub need_function_offset: bool,
 }
 
 impl Symbolizer {
@@ -77,6 +79,7 @@ impl Symbolizer {
             adb_regex: std::env::var("ADB_CMDLINE_REGEX")
                 .map_or(None, |x| Some(Regex::new(&x).unwrap())),
             need_cpu: is_enable_cpuno(),
+            need_function_offset: is_enable_function_offset(),
         };
         symer
     }
@@ -165,6 +168,18 @@ impl Symbolizer {
                 Err(x) => &self.kernel[x - 1],
             };
             syms.push(Symbol::new(sym.name.clone()));
+        }
+        syms
+    }
+
+    pub fn kernel_symbolize_with_offset(&self, addrs: &Vec<u64>) -> Vec<Symbol> {
+        let mut syms = Vec::with_capacity(addrs.len());
+        for &addr in addrs {
+            let (sym, offset) = match self.kernel.binary_search_by(|x| x.start.cmp(&addr)) {
+                Ok(x) => (&self.kernel[x], addr - self.kernel[x].start),
+                Err(x) => (&self.kernel[x - 1], addr - self.kernel[x - 1].start),
+            };
+            syms.push(Symbol::new(format!("{}+0x{:x}", sym.name, offset)));
         }
         syms
     }
