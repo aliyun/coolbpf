@@ -26,6 +26,11 @@ const MIN_PROCESS_SAMPLES: usize = 10;
 pub static SYSTEM_PROFILING: AtomicBool = AtomicBool::new(false);
 pub static ENABLE_SYMBOLIZER: AtomicBool = AtomicBool::new(true);
 pub static SYMBOL_FILE_MAX_SIZE: AtomicU64 = AtomicU64::new(u64::MAX);
+pub static LIVETRACE_ENABLE_CPU_INFO: AtomicBool = AtomicBool::new(false);
+
+pub fn is_enable_cpuno() -> bool {
+    LIVETRACE_ENABLE_CPU_INFO.load(Ordering::SeqCst)
+}
 
 pub fn is_system_profiling() -> bool {
     SYSTEM_PROFILING.load(Ordering::SeqCst)
@@ -58,6 +63,15 @@ fn global_libarary_constructor() {
                 Err(_) => 2 * 1024 * 1025,
             };
             SYMBOL_FILE_MAX_SIZE.store(sz, Ordering::SeqCst);
+        }
+        Err(_) => {}
+    };
+
+    match std::env::var("LIVETRACE_ENABLE_CPU_INFO") {
+        Ok(value) => {
+            if value == "1" {
+                LIVETRACE_ENABLE_CPU_INFO.store(true, Ordering::SeqCst);
+            }
         }
         Err(_) => {}
     };

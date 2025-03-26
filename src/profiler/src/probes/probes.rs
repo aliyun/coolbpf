@@ -553,7 +553,7 @@ fn thread_poll_report_event(tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8])
     }
 }
 
-fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8]) {
+fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, cpu: i32, data: &[u8]) {
     let raw = data.as_ptr() as *const bpf::Trace;
     let rs = unsafe {
         let stack_len = (*raw).stack_len as usize;
@@ -574,6 +574,7 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i3
         };
 
         RawStack {
+            cpu: cpu as u32,
             pid,
             kernel: kernel_stack,
             user: user_stack,

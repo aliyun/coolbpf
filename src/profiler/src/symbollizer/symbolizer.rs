@@ -1,3 +1,4 @@
+use crate::is_enable_cpuno;
 use crate::process::maps::ProcessMaps;
 use crate::MAX_NUM_OF_PROCESSES;
 use anyhow::bail;
@@ -61,6 +62,8 @@ pub struct Symbolizer {
     //
     kernel: Vec<ElfSymbol>,
     adb_regex: Option<Regex>,
+
+    pub need_cpu: bool,
 }
 
 impl Symbolizer {
@@ -73,6 +76,7 @@ impl Symbolizer {
             kernel: vec![],
             adb_regex: std::env::var("ADB_CMDLINE_REGEX")
                 .map_or(None, |x| Some(Regex::new(&x).unwrap())),
+            need_cpu: is_enable_cpuno(),
         };
         symer
     }

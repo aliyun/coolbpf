@@ -94,6 +94,12 @@ impl Stack {
             }
         }
 
+        if symer.need_cpu {
+            stack.push(Symbol {
+                name: format!("cpu:{}", raw.cpu),
+            });
+        }
+
         stack.count = cnt;
         Ok(stack)
     }

@@ -63,6 +63,7 @@ impl Eq for RawUserStack {}
 
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct RawStack {
+    pub cpu: u32,
     pub pid: u32,
     pub kernel: Vec<u64>,
     pub user: RawUserStack,
