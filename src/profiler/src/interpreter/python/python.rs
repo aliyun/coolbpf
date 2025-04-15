@@ -114,7 +114,6 @@ impl PythonData {
             ElfFile::read_at(elf, type_data_address + vms.py_type_object.basic_size, 8)
         {
             vms.py_code_object.sizeof = NativeEndian::read_u64(data) as u32;
-            println!("sizeof: {}", vms.py_code_object.sizeof);
         }
 
         let members_ptr =
@@ -130,7 +129,9 @@ impl PythonData {
             if name.is_empty() {
                 break;
             }
+
             let offset = ElfFile::read_u32(elf, addr + vms.py_member_def.offset as u64)?;
+            log::debug!("name: {}, offset: {}", name, offset);
             vms.py_code_object.set_field(&name, offset);
 
             addr += vms.py_member_def.sizeof;
@@ -210,7 +211,7 @@ impl PythonData {
         };
 
         if main_dso {
-            bail!("not implemented")
+            // bail!("not implemented")
             // let rm = match elf {
             //     let mut dyn_strings = vec![];
             //     object::File::Elf64(e) => {
@@ -267,7 +268,6 @@ impl PythonData {
         if version >= python_ver(3, 7) && auto_tls_key % 8 == 0 {
             auto_tls_key += 4;
         }
-
         let interp_ranges = match ElfFile::lookup_symbol(elf, "_PyEval_EvalFrameDefault") {
             Ok(sym) => sym.address()..(sym.address() + sym.size()),
             Err(_) => ElfFile::lookup_symbol(elf, "PyEval_EvalFrameEx")
@@ -321,9 +321,9 @@ impl PythonData {
             pd.vm_structs.py_c_frame.current_frame = 0;
             pd.vm_structs.py_ascii_object.data = 40;
         }
-        pd.read_introspection_data1(elf, 0, "PyCode_Type")?;
-        pd.read_introspection_data2(elf, 0, "PyFrame_Type")?;
-        pd.read_introspection_data3(elf, 0, "PyBytes_Type")?;
+        let _ = pd.read_introspection_data1(elf, 0, "PyCode_Type");
+        let _ = pd.read_introspection_data2(elf, 0, "PyFrame_Type");
+        let _ = pd.read_introspection_data3(elf, 0, "PyBytes_Type");
 
         log::debug!("{:?}", pd.vm_structs);
         probes.interpreter_offset_map.update(
