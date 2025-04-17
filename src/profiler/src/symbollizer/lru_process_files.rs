@@ -26,6 +26,7 @@ pub struct ProcessFiles {
 
 impl ProcessFiles {
     pub fn new(pid: u32) -> Result<Self> {
+        println!("Loading process files for pid {}", pid);
         let mut files = vec![];
         let maps = ProcessMaps::new(pid)?;
         for (_addr, map) in maps.iter() {
@@ -39,7 +40,13 @@ impl ProcessFiles {
                 continue;
             }
 
-            let info = FileInfo::from_path(path.as_str())?;
+            let info = match FileInfo::from_path(path.as_str()) {
+                Ok(x) => x,
+                Err(e) =>  {
+                    log::warn!("failed to get file info: {e}");
+                    continue;
+                }
+            };
             let voff = match info.file_offset_to_virtual_address(map.offset) {
                 Some(x) => x,
                 None => continue,
