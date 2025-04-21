@@ -26,7 +26,7 @@ pub struct ProcessFiles {
 
 impl ProcessFiles {
     pub fn new(pid: u32) -> Result<Self> {
-        println!("Loading process files for pid {}", pid);
+        log::debug!("Loading process files for pid {}", pid);
         let mut files = vec![];
         let maps = ProcessMaps::new(pid)?;
         for (_addr, map) in maps.iter() {
@@ -114,7 +114,8 @@ impl LruProcessFiles {
             .try_get_or_insert(pid, || -> Result<ProcessFiles> { ProcessFiles::new(pid) })
         {
             Ok(pf) => pf.symbolize(lru_files, addrs),
-            Err(_) => {
+            Err(e) => {
+                log::warn!("failed to add process files for pid {pid}: {e}");
                 let mut syms = Vec::with_capacity(addrs.len());
                 for &addr in addrs {
                     syms.push(ElfSymbol::not_found(addr));
