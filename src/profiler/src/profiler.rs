@@ -223,11 +223,16 @@ impl<'a> Profiler<'a> {
             let va = match info.file_offset_to_virtual_address(map.offset) {
                 Some(x) => x,
                 None => {
-                    log::warn!("executable program headers not found, skip it");
-                    continue;
+                    if map.offset == 0 {
+                        map.start
+                    } else {
+                        log::warn!("executable program headers not found, skip it");
+                        continue;
+                    }
                 }
             };
             let bias = map.start - va;
+            log::debug!("file bias: {:x?}", bias);
             let exe = match self
                 .executables
                 .get_or_insert(&mut self.probes, info, map, bias)
