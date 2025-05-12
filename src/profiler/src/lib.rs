@@ -20,7 +20,6 @@ pub mod utils;
 use ctor::*;
 use std::str::FromStr;
 pub mod heatmap;
-pub mod slscb;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
@@ -171,6 +170,49 @@ pub extern "C" fn livetrace_profiler_read(
     for proc in profiler.read() {
         send_symbolized_stack(proc, cb);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn livetrace_profiler_read_heatmap(
+    profiler: *mut Profiler,
+    cb: unsafe extern "C" fn(
+        libc::c_ulonglong,
+        libc::c_uint,
+        *const libc::c_char,
+        *const libc::c_char,
+    ),
+) {
+    let profiler = match unsafe { profiler.as_mut() } {
+        Some(profiler) => profiler,
+        None => return,
+    };
+
+    for heat in &profiler.heatmaps {
+        let beg = heat.base;
+        let pid = heat.pid;
+        let comm = match CString::new(heat.comm.clone()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let content = heat
+            .values
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+            .join(" ");
+
+        let content = match CString::new(content) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        unsafe {
+            cb(beg, pid, comm.as_ptr(), content.as_ptr());
+        }
+    }
+
+    profiler.heatmaps.clear();
 }
 
 fn send_symbolized_stack(

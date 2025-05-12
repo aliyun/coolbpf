@@ -1,5 +1,6 @@
 use crate::executable::ExecutableCache;
 use crate::heatmap::ProcessHeatMap;
+use crate::heatmap::TenSecHeatMap;
 use crate::interpreter::Interpreter;
 use crate::is_enable_symbolizer;
 use crate::is_system_profiling;
@@ -34,6 +35,7 @@ pub struct Profiler<'a> {
     enable_heatmap: bool,
     proc_heatmap: ProcessHeatMap,
     time_delta: u64,
+    pub heatmaps: Vec<TenSecHeatMap>,
 }
 
 impl<'a> Profiler<'a> {
@@ -52,6 +54,7 @@ impl<'a> Profiler<'a> {
             enable_heatmap: false,
             proc_heatmap: ProcessHeatMap::default(),
             time_delta: time_delta(),
+            heatmaps: vec![],
         }
     }
 
@@ -80,7 +83,12 @@ impl<'a> Profiler<'a> {
                 Ok(event) => match event {
                     ProbeEvent::Trace((comm, data)) => {
                         if self.enable_heatmap {
-                            self.proc_heatmap.add(data.pid, data.time + self.time_delta);
+                            match self.proc_heatmap.add(data.pid, data.time + self.time_delta) {
+                                Some(heat) => {
+                                    self.heatmaps.push(heat);
+                                }
+                                None => {}
+                            }
                         }
                         let keep = self.pids.contains_key(&data.pid);
                         stack_agg.add(comm, data, keep);

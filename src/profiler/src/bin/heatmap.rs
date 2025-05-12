@@ -1,7 +1,7 @@
 use profiler::livetrace_profiler_create;
 use profiler::livetrace_profiler_ctrl;
 use profiler::livetrace_profiler_read;
-use profiler::slscb::livetrace_slscb_register_heatmap_sender;
+use profiler::livetrace_profiler_read_heatmap;
 use std::ffi::CStr;
 use std::ffi::CString;
 use structopt::StructOpt;
@@ -41,10 +41,9 @@ fn main() {
     livetrace_profiler_ctrl(prof, 1, raw);
     livetrace_profiler_ctrl(prof, 2, raw);
 
-    livetrace_slscb_register_heatmap_sender(handle_heatmap);
-
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3));
         livetrace_profiler_read(prof, callback);
+        livetrace_profiler_read_heatmap(prof, handle_heatmap);
     }
 }

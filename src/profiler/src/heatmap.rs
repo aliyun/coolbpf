@@ -1,8 +1,7 @@
-use crate::slscb::slscb_call_heatmap_sender;
-use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::read_to_string;
 
+#[derive(Debug, Clone)]
 pub struct TenSecHeatMap {
     pub pid: u32,
     pub comm: String,
@@ -45,7 +44,8 @@ impl ProcessHeatMap {
         });
     }
 
-    pub fn add(&mut self, pid: u32, ts: u64) {
+    pub fn add(&mut self, pid: u32, ts: u64) -> Option<TenSecHeatMap> {
+        let mut ret = None;
         match self.heat_maps.get_mut(&pid) {
             Some(heat) => {
                 let ms = ts / 1000 / 1000;
@@ -54,7 +54,7 @@ impl ProcessHeatMap {
                 let slot = (ten_sec / 20) as usize;
                 if heat.base != base {
                     if heat.base != 0 {
-                        slscb_call_heatmap_sender(heat);
+                        ret = Some(heat.clone());
                         heat.values.iter_mut().for_each(|x| *x = 0);
                     }
                     heat.base = base;
@@ -63,5 +63,6 @@ impl ProcessHeatMap {
             }
             None => {}
         }
+        ret
     }
 }
