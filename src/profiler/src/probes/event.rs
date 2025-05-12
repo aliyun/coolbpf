@@ -65,6 +65,7 @@ impl Eq for RawUserStack {}
 pub struct RawStack {
     pub cpu: u32,
     pub pid: u32,
+    pub time: u64,
     pub kernel: Vec<u64>,
     pub user: RawUserStack,
 }

@@ -42,7 +42,7 @@ impl ProcessFiles {
 
             let info = match FileInfo::from_path(path.as_str()) {
                 Ok(x) => x,
-                Err(e) =>  {
+                Err(e) => {
                     log::warn!("failed to get file info: {e}");
                     continue;
                 }

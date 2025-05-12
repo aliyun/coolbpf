@@ -540,7 +540,7 @@ typedef struct Trace {
   // The process ID
   u32 pid;
   // Monotonic kernel time in nanosecond precision.
-#if 0
+#if 1
   u64 ktime;
 #endif
   // The current COMM of the thread of this Trace.

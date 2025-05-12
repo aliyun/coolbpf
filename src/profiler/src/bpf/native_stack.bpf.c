@@ -922,7 +922,7 @@ static inline int collect_trace(struct pt_regs *ctx)
 
   Trace *trace = &record->trace;
   trace->pid = pid;
-#if 0
+#if 1
   u64 ktime = bpf_ktime_get_ns();
   trace->ktime = ktime;
 #endif

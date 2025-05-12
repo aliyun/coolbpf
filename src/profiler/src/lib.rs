@@ -19,6 +19,8 @@ pub mod tpbase;
 pub mod utils;
 use ctor::*;
 use std::str::FromStr;
+pub mod heatmap;
+pub mod slscb;
 
 const MAX_NUM_OF_PROCESSES: usize = 4096;
 const MIN_PROCESS_SAMPLES: usize = 10;
@@ -149,6 +151,9 @@ pub extern "C" fn livetrace_profiler_ctrl(
                 Err(_e) => return -1,
             };
         }
+    } else if op == 2 {
+        // add heatmap process
+        profiler.add_heatmap_pids(pids);
     }
     -1
 }

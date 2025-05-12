@@ -576,6 +576,7 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, cpu: i32
         RawStack {
             cpu: cpu as u32,
             pid,
+            time: (*raw).ktime,
             kernel: kernel_stack,
             user: user_stack,
         }

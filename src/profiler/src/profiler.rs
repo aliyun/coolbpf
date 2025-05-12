@@ -1,4 +1,5 @@
 use crate::executable::ExecutableCache;
+use crate::heatmap::ProcessHeatMap;
 use crate::interpreter::Interpreter;
 use crate::is_enable_symbolizer;
 use crate::is_system_profiling;
@@ -13,8 +14,8 @@ use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
+use crate::utils::time::time_delta;
 use crate::MIN_PROCESS_SAMPLES;
-use crate::SYSTEM_PROFILING;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -29,6 +30,10 @@ pub struct Profiler<'a> {
 
     all_system_profiling: bool,
     enable_symbolizer: bool,
+
+    enable_heatmap: bool,
+    proc_heatmap: ProcessHeatMap,
+    time_delta: u64,
 }
 
 impl<'a> Profiler<'a> {
@@ -44,6 +49,9 @@ impl<'a> Profiler<'a> {
             interpreters: HashMap::new(),
             all_system_profiling: is_system_profiling(),
             enable_symbolizer: is_enable_symbolizer(),
+            enable_heatmap: false,
+            proc_heatmap: ProcessHeatMap::default(),
+            time_delta: time_delta(),
         }
     }
 
@@ -71,6 +79,9 @@ impl<'a> Profiler<'a> {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
                     ProbeEvent::Trace((comm, data)) => {
+                        if self.enable_heatmap {
+                            self.proc_heatmap.add(data.pid, data.time + self.time_delta);
+                        }
                         let keep = self.pids.contains_key(&data.pid);
                         stack_agg.add(comm, data, keep);
                     }
@@ -118,6 +129,13 @@ impl<'a> Profiler<'a> {
         }
         log::info!("populate all processes time: {:?}", start.elapsed());
         Ok(())
+    }
+
+    pub fn add_heatmap_pids(&mut self, pids: Vec<u32>) {
+        self.enable_heatmap = true;
+        for pid in pids {
+            self.proc_heatmap.add_process(pid)
+        }
     }
 
     fn sync_process(&mut self, pid: u32) -> Result<()> {
