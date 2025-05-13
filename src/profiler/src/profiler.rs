@@ -15,6 +15,7 @@ use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
+use crate::utils::time::init_tstamp;
 use crate::utils::time::time_delta;
 use crate::MIN_PROCESS_SAMPLES;
 use anyhow::Result;
@@ -42,6 +43,7 @@ impl<'a> Profiler<'a> {
     pub fn new() -> Self {
         let mut symer = Symbolizer::new();
         symer.add_kernel("/proc/kallsyms");
+        init_tstamp();
         Profiler {
             pids: HashMap::new(),
             probes: Probes::new(),

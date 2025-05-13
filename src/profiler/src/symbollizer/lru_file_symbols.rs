@@ -89,7 +89,7 @@ impl LruFileSymbols {
         match self.symbols.put_with_weight(file_id, wsyms) {
             Ok(_) => {}
             Err(e) => {
-                log::error!("add symbols failed: {:?}", e)
+                log::error!("add symbols failed, weight = {}", e.1.weight);
             }
         }
     }
