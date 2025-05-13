@@ -187,10 +187,10 @@ pub extern "C" fn livetrace_profiler_read_heatmap(
         None => return,
     };
 
-    for heat in &profiler.heatmaps {
+    for heat in profiler.proc_heatmap.flush() {
         let beg = heat.base;
         let pid = heat.pid;
-        let comm = match CString::new(heat.comm.clone()) {
+        let comm = match CString::new(heat.comm) {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -211,8 +211,6 @@ pub extern "C" fn livetrace_profiler_read_heatmap(
             cb(beg, pid, comm.as_ptr(), content.as_ptr());
         }
     }
-
-    profiler.heatmaps.clear();
 }
 
 fn send_symbolized_stack(

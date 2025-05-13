@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::LinkedList;
 use std::fs::read_to_string;
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ impl TenSecHeatMap {
 #[derive(Default)]
 pub struct ProcessHeatMap {
     pub heat_maps: HashMap<u32, TenSecHeatMap>,
+    pub done: LinkedList<TenSecHeatMap>,
 }
 
 impl ProcessHeatMap {
@@ -44,17 +46,29 @@ impl ProcessHeatMap {
         });
     }
 
-    pub fn add(&mut self, pid: u32, ts: u64) -> Option<TenSecHeatMap> {
-        let mut ret = None;
+    pub fn add(&mut self, pid: u32, ts: u64) {
         match self.heat_maps.get_mut(&pid) {
             Some(heat) => {
                 let ms = ts / 1000 / 1000;
                 let ten_sec = ms % (1000 * 10);
                 let base = ms / (1000 * 10);
                 let slot = (ten_sec / 20) as usize;
+
+                // find it in previous heatmap
+                if base < heat.base {
+                    for single in self.done.iter_mut() {
+                        if single.base == base {
+                            single.inc(slot);
+                            return;
+                        }
+                    }
+                    return;
+                }
+
+                // new period
                 if heat.base != base {
                     if heat.base != 0 {
-                        ret = Some(heat.clone());
+                        self.done.push_back(heat.clone());
                         heat.values.iter_mut().for_each(|x| *x = 0);
                     }
                     heat.base = base;
@@ -63,6 +77,19 @@ impl ProcessHeatMap {
             }
             None => {}
         }
-        ret
+    }
+
+    pub fn flush(&mut self) -> Vec<TenSecHeatMap> {
+        let mut res = vec![];
+
+        loop {
+            if self.done.len() <= 1 {
+                break;
+            }
+
+            res.push(self.done.pop_front().unwrap());
+        }
+
+        res
     }
 }
