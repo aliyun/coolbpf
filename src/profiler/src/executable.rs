@@ -1,12 +1,16 @@
 use crate::interpreter::IFileInfo;
 use crate::probes::probes::Probes;
 use crate::probes::stack_delta::StackDelta;
+use crate::probes::types::bpf;
 use crate::probes::types::bpf::STACK_DELTA_PAGE_BITS;
 use crate::probes::types::bpf::STACK_DELTA_PAGE_MASK;
 use crate::process::maps::ProcessMapsEntry;
 use crate::symbollizer::elf::ElfFile;
 use crate::symbollizer::file_cache::FileInfo;
 use crate::symbollizer::file_id::FileId64;
+use crate::tpbase::libc::extract_tsd_info;
+use crate::tpbase::libc::is_potential_tsd_dso;
+use anyhow::bail;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -20,6 +24,7 @@ pub struct LoadedDelta {
 pub struct Executable {
     map_info: LoadedDelta,
     pub i_info: Option<IFileInfo>,
+    pub tsd_info: Option<bpf::TSDInfo>,
     rc: u32,
 }
 
@@ -60,6 +65,7 @@ impl ExecutableCache {
         probes: &mut Probes,
         elf: &FileInfo,
         map: &ProcessMapsEntry,
+        bias: u64,
     ) -> Result<Option<&mut Executable>> {
         let file_id = elf.file_id;
         // 1. check erros
@@ -72,7 +78,16 @@ impl ExecutableCache {
             // b. load deltas, return mapref
             let mut ebpf_deltas = vec![];
 
-            let deltas = ElfFile::parse_eh_frame(&elf.file).unwrap();
+            let deltas = match ElfFile::parse_eh_frame(&elf.file) {
+                Ok(deltas) => deltas,
+                Err(e) => {
+                    bail!("internal error: {e}")
+                }
+            };
+            if deltas.is_empty() {
+                self.errors.insert(elf.file_id);
+                bail!("no eh_frame")
+            }
 
             let first_page = deltas[0].addr >> STACK_DELTA_PAGE_BITS;
             let first_page_addr = deltas[0].addr & !(STACK_DELTA_PAGE_MASK as u64);
@@ -106,10 +121,31 @@ impl ExecutableCache {
                     num_page: num_pages as u32,
                     start_page: first_page_addr,
                 },
+                tsd_info: map
+                    .path
+                    .as_ref()
+                    .map(|x| {
+                        if !is_potential_tsd_dso(x) {
+                            None
+                        } else {
+                            let mmap_ref = unsafe { memmap2::Mmap::map(&elf.file).unwrap() };
+                            let object =
+                                object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                            match extract_tsd_info(&object) {
+                                Ok(info) => Some(info),
+                                Err(e) => {
+                                    log::error!("failed to extract tsd info: {e}");
+                                    None
+                                }
+                            }
+                        }
+                    })
+                    .flatten(),
                 i_info: if let Some(p) = &map.path {
                     let mmap_ref = unsafe { memmap2::Mmap::map(&elf.file)? };
                     let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
-                    IFileInfo::parse(p.as_str(), &object)
+                    IFileInfo::parse(p.as_str(), &object, file_id, bias, probes)
+                    // PythonData::new(file_name, elf, id, bias, probes);
                 } else {
                     None
                 },

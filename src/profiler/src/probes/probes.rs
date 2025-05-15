@@ -4,6 +4,7 @@ use crate::process::maps::ProcessMaps;
 use super::event::ProbeEvent;
 use super::event::RawStack;
 use super::event::RawUserStack;
+use super::interpreter_offset::InterpreterOffsetMap;
 use super::nspid::NsPidMap;
 use super::pid_maps_info::PidMapsInfoMap;
 use super::stack::StackMap;
@@ -15,6 +16,7 @@ use super::types::any_as_u8_slice;
 use super::types::bpf;
 use super::types::bpf::TracePrograms_PROG_UNWIND_HOTSPOT;
 use super::types::bpf::TracePrograms_PROG_UNWIND_NATIVE;
+use super::types::bpf::TracePrograms_PROG_UNWIND_PYTHON;
 use super::types::bpf::TracePrograms_PROG_UNWIND_STOP;
 use super::types::bpf::STACK_DELTA_COMMAND_FLAG;
 use super::types::bpf::UNWIND_OPCODE_COMMAND;
@@ -49,7 +51,11 @@ use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread::panicking;
+use std::thread::JoinHandle;
 
 mod native {
     include!(concat!(env!("OUT_DIR"), "/native_stack.skel.rs"));
@@ -73,6 +79,10 @@ mod sched {
 
 mod nspid_pid {
     include!(concat!(env!("OUT_DIR"), "/nspid_pid.skel.rs"));
+}
+
+mod python {
+    include!(concat!(env!("OUT_DIR"), "/python.skel.rs"));
 }
 
 /// Handling Perf buffer loss events
@@ -123,6 +133,20 @@ macro_rules! load_skel {
     }};
 }
 
+static THREAD_NEED_EXIT: AtomicBool = AtomicBool::new(false);
+
+fn thread_need_exit() -> bool {
+    THREAD_NEED_EXIT.load(Ordering::SeqCst)
+}
+
+fn reset_thread_need_exit() {
+    THREAD_NEED_EXIT.store(false, Ordering::SeqCst);
+}
+
+fn set_thread_need_exit() {
+    THREAD_NEED_EXIT.store(true, Ordering::SeqCst);
+}
+
 fn get_self_path() -> PathBuf {
     let pid = unsafe { libc::getpid() };
     let pm = ProcessMaps::new(pid as u32).unwrap();
@@ -147,6 +171,7 @@ pub struct Probes<'a> {
     skel: native::NativeStackSkel<'a>,
     sched_skel: sched::SchedMonitorSkel<'a>,
     pub hotspot_skel: hotspot::HotspotSkel<'a>,
+    pub python_skel: python::PythonSkel<'a>,
     interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
     links: Vec<Link>,
     pub rx: Receiver<ProbeEvent>,
@@ -156,14 +181,19 @@ pub struct Probes<'a> {
     pub unwind_info_map: UnwindInfoMap,
     pub unwind_info_cache: HashMap<UnwindInfo, u16>,
     pub stack_map: StackMap,
+    pub interpreter_offset_map: InterpreterOffsetMap,
     has_generic_batchop: bool,
 
     pid: u32,
     nspid: u32,
+
+    trace_thread_handle: Option<JoinHandle<()>>,
+    report_thread_handle: Option<JoinHandle<()>>,
 }
 
 impl<'a> Probes<'a> {
     pub fn new() -> Self {
+        reset_thread_need_exit();
         let has_generic_batchop = probe_has_generic_batch_ops();
         let mut builder = native::NativeStackSkelBuilder::default();
         if log::log_enabled!(log::Level::Debug) {
@@ -199,7 +229,9 @@ impl<'a> Probes<'a> {
             inners.push(inner);
         }
 
-        let mut skel = openskel.load().unwrap();
+        let mut skel = openskel
+            .load()
+            .expect("failed to load bpf program, please check btf if exists");
         let mut maps: HashMap<String, MapHandle> = HashMap::default();
 
         for map in skel.obj.maps_iter() {
@@ -233,9 +265,11 @@ impl<'a> Probes<'a> {
         let interpreter_dispatcher_skel =
             load_skel!(maps, dispatcher::InterpreterDispatcherSkelBuilder);
         let hotspot_skel = load_skel!(maps, hotspot::HotspotSkelBuilder);
+        let python_skel = load_skel!(maps, python::PythonSkelBuilder);
 
         let (tx, rx) = crossbeam_channel::unbounded();
-        {
+
+        let trace_thread_handle = {
             let mut cloned_tx = tx.clone();
             let stack_map =
                 StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap());
@@ -249,17 +283,23 @@ impl<'a> Probes<'a> {
                 .build()
                 .unwrap();
 
-            std::thread::spawn(move || {
-                log::debug!("start trace event polling thread");
-                loop {
-                    perf.consume().unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            });
-        }
+            std::thread::Builder::new()
+                .name("profiler-trace".into())
+                .spawn(move || {
+                    log::debug!("start trace event polling thread");
+                    loop {
+                        perf.consume().unwrap();
+                        if thread_need_exit() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                })
+                .unwrap()
+        };
 
         let sched_skel = load_skel!(maps, sched::SchedMonitorSkelBuilder);
-        {
+        let report_thread_handle = {
             let mut cloned_tx = tx.clone();
             let handle_event = move |cpu: i32, data: &[u8]| {
                 thread_poll_report_event(&mut cloned_tx, cpu, data);
@@ -272,13 +312,19 @@ impl<'a> Probes<'a> {
                 .build()
                 .unwrap();
 
-            std::thread::spawn(move || {
-                log::debug!("start report event polling thread");
-                loop {
-                    perf.poll(std::time::Duration::from_millis(200)).unwrap();
-                }
-            });
-        }
+            std::thread::Builder::new()
+                .name("profiler-report".into())
+                .spawn(move || {
+                    log::debug!("start report event polling thread");
+                    loop {
+                        let _ = perf.poll(std::time::Duration::from_millis(200));
+                        if thread_need_exit() {
+                            break;
+                        }
+                    }
+                })
+                .unwrap()
+        };
 
         let mut nspid_skel = load_skel!(maps, nspid_pid::NspidPidSkelBuilder);
         let nspid_map =
@@ -300,12 +346,16 @@ impl<'a> Probes<'a> {
         let pid = get_hostpid(nspid as u32, &nspid_map);
 
         log::debug!("nspid: {nspid}, hostpid: {pid}");
-
         let mut probe = Self {
             stack_map: StackMap::new(MapHandle::try_clone(skel.maps().kernel_stackmap()).unwrap()),
+            interpreter_offset_map: InterpreterOffsetMap::new(
+                MapHandle::try_clone(skel.maps().interpreter_offsets()).unwrap(),
+            ),
+
             skel,
             sched_skel,
             hotspot_skel,
+            python_skel,
             interpreter_dispatcher_skel,
             links: vec![],
             rx,
@@ -318,6 +368,8 @@ impl<'a> Probes<'a> {
 
             pid,
             nspid: nspid as u32,
+            trace_thread_handle: Some(trace_thread_handle),
+            report_thread_handle: Some(report_thread_handle),
         };
 
         if probe.pid != probe.nspid && is_system_profiling() {
@@ -327,7 +379,8 @@ impl<'a> Probes<'a> {
         probe.load_system_config(system_config_skel);
         probe.attach_sched_monitor();
         probe.load_unwinders();
-        probe.attach_perf_event(10000000);
+        let ms = profile_period() as u64;
+        probe.attach_perf_event(ms * 1000000);
         probe
     }
 
@@ -462,6 +515,29 @@ impl<'a> Probes<'a> {
                 MapFlags::ANY,
             )
             .unwrap();
+        let fd = self.python_skel.progs().unwind_python().as_fd().as_raw_fd();
+        self.skel
+            .maps_mut()
+            .progs()
+            .update(
+                &TracePrograms_PROG_UNWIND_PYTHON.to_ne_bytes(),
+                &fd.to_ne_bytes(),
+                MapFlags::ANY,
+            )
+            .unwrap();
+    }
+}
+
+impl<'a> Drop for Probes<'a> {
+    fn drop(&mut self) {
+        set_thread_need_exit();
+        if let Some(thread) = self.trace_thread_handle.take() {
+            thread.join().unwrap();
+        }
+
+        if let Some(thread) = self.report_thread_handle.take() {
+            thread.join().unwrap();
+        }
     }
 }
 
@@ -471,13 +547,13 @@ fn thread_poll_report_event(tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8])
     match ty {
         bpf::EVENT_TYPE_PROCESS_EXIT => {
             let pid = unsafe { (*raw).pid };
-            tx.send(ProbeEvent::ProcessExit(pid)).unwrap();
+            let _ = tx.send(ProbeEvent::ProcessExit(pid));
         }
         _ => {}
     }
 }
 
-fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i32, data: &[u8]) {
+fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, cpu: i32, data: &[u8]) {
     let raw = data.as_ptr() as *const bpf::Trace;
     let rs = unsafe {
         let stack_len = (*raw).stack_len as usize;
@@ -498,12 +574,19 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, _cpu: i3
         };
 
         RawStack {
+            cpu: cpu as u32,
             pid,
+            time: (*raw).ktime,
             kernel: kernel_stack,
             user: user_stack,
         }
     };
-    tx.send(ProbeEvent::Trace(rs)).unwrap();
+    let comm = unsafe {
+        String::from_utf8_unchecked((*raw).comm.to_vec())
+            .trim_matches(char::from(0))
+            .to_owned()
+    };
+    let _ = tx.send(ProbeEvent::Trace((comm, rs)));
 }
 
 fn probe_has_batch_ops(map_type: MapType) -> bool {
@@ -530,4 +613,30 @@ fn probe_has_batch_ops(map_type: MapType) -> bool {
 
 fn probe_has_generic_batch_ops() -> bool {
     probe_has_batch_ops(MapType::Hash)
+}
+
+fn profile_period() -> u32 {
+    match std::env::var("LIVETRACE_PROFILE_PERIOD_MS") {
+        Ok(value) => {
+            let period = match u32::from_str(&value) {
+                Ok(num) => num,
+                Err(_) => 50,
+            };
+            period
+        }
+        Err(_) => 50,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_threads_exit() {
+        loop {
+            let mut probe = Probes::new();
+            drop(probe);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
 }

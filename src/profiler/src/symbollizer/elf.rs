@@ -1,12 +1,8 @@
-use std::borrow;
-use std::collections::HashMap;
-use std::default;
-use std::fs::File;
-use std::io::ErrorKind;
-
 use anyhow::anyhow;
+use anyhow::bail;
 use anyhow::Result;
-use blazesym::IntoError;
+use byteorder::ByteOrder;
+use byteorder::NativeEndian;
 use gimli::write::CommonInformationEntry;
 use gimli::BaseAddresses;
 use gimli::CfaRule;
@@ -15,6 +11,7 @@ use gimli::EhFrameHdr;
 use gimli::EhHdrTable;
 use gimli::Encoding;
 use gimli::EndianReader;
+use gimli::EvaluationResult;
 use gimli::Operation;
 use gimli::Reader;
 use gimli::ReaderOffset as _;
@@ -34,9 +31,17 @@ use object::Object;
 use object::ObjectSection;
 use object::ObjectSymbol;
 use object::ObjectSymbolTable;
+use object::ReadRef;
+use object::Symbol;
 use object::SymbolKind;
+use regex::Regex;
+use std::borrow;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::default;
 use std::fmt;
+use std::fs::File;
+use std::io::ErrorKind;
 use symbolic_common::Name;
 use symbolic_demangle::demangle;
 use symbolic_demangle::Demangle;
@@ -50,6 +55,7 @@ use crate::probes::types::bpf::UNWIND_OPCODE_BASE_REG;
 use crate::probes::types::bpf::UNWIND_OPCODE_BASE_SP;
 use crate::probes::types::bpf::UNWIND_OPCODE_COMMAND;
 use crate::probes::unwind_info::UnwindInfo;
+use crate::symbol_file_max_symbols;
 
 use super::file_cache::ProgramAddress;
 
@@ -143,11 +149,21 @@ struct State {
     stack_idx: i32,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ElfSymbol {
     pub name: String,
     pub start: u64,
     pub end: u64,
+}
+
+impl ElfSymbol {
+    pub fn not_found(addr: u64) -> Self {
+        ElfSymbol {
+            name: format!("!{:x}", addr),
+            start: u64::MAX,
+            end: u64::MAX,
+        }
+    }
 }
 
 impl State {}
@@ -196,17 +212,43 @@ impl ElfFile {
     }
 
     pub fn parse_symbols2(elf: object::File, dst: &mut Vec<ElfSymbol>) {
+        let re = Regex::new(r#"<.*?>"#).unwrap();
         let start = dst.len();
+
+        let max_symbols = symbol_file_max_symbols();
+        if max_symbols != u64::MAX {
+            let len = elf.symbols().count() + elf.dynamic_symbols().count();
+            if len as u64 > max_symbols {
+                log::debug!("too many symbols: {}, support max: {}", len, max_symbols);
+                return;
+            }
+        }
+
         for sym in elf.symbols() {
             if sym.is_undefined() || sym.kind() != SymbolKind::Text {
                 continue;
             }
-            let name = Name::from(sym.name().unwrap())
+            let demangle_name = Name::from(sym.name().unwrap())
                 .demangle(DemangleOptions::name_only())
                 .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
 
+            // let mut name = if let Some(idx) = demangle_name.rfind("::") {
+            //     demangle_name[(idx + 2)..].to_string()
+            // } else {
+            //     demangle_name.clone()
+            // };
+            // if name.contains('<') {
+            //     name = re.replace_all(&name, "").to_string();
+            // }
+            // assert!(
+            //     !name.is_empty(),
+            //     "demangle_name: {}, name: {}",
+            //     demangle_name,
+            //     name
+            // );
+
             let es = ElfSymbol {
-                name,
+                name: demangle_name,
                 start: sym.address(),
                 end: sym.address() + sym.size(),
             };
@@ -217,9 +259,28 @@ impl ElfFile {
             if sym.is_undefined() || sym.kind() != SymbolKind::Text {
                 continue;
             }
-            let name = demangle(sym.name().unwrap()).to_string();
+            let demangle_name = Name::from(sym.name().unwrap())
+                .demangle(DemangleOptions::name_only())
+                .map_or_else(|| sym.name().unwrap().to_string(), |d| d);
+
+            // let mut name = if let Some(idx) = demangle_name.rfind("::") {
+            //     demangle_name[(idx + 2)..].to_string()
+            // } else {
+            //     demangle_name.clone()
+            // };
+
+            // if name.contains('<') {
+            //     name = re.replace_all(&name, "").to_string();
+            // }
+
+            // assert!(
+            //     !name.is_empty(),
+            //     "demangle_name: {}, name: {}",
+            //     demangle_name,
+            //     name
+            // );
             let es = ElfSymbol {
-                name,
+                name: demangle_name,
                 start: sym.address(),
                 end: sym.address() + sym.size(),
             };
@@ -227,6 +288,64 @@ impl ElfFile {
         }
 
         dst[start..].sort_by_key(|a| a.start);
+    }
+
+    pub fn read_at<'a>(elf: &'a object::File, addr: u64, sz: usize) -> Result<&'a [u8]> {
+        if let object::File::Elf64(elf) = elf {
+            for ph in elf.elf_program_headers() {
+                if ph.p_type(elf.endianness()) == PT_LOAD
+                    && addr >= ph.p_vaddr(elf.endianness())
+                    && addr < ph.p_vaddr(elf.endianness()) + ph.p_memsz(elf.endianness())
+                {
+                    let off = addr - ph.p_vaddr(elf.endianness());
+                    if off < ph.p_filesz(elf.endianness()) {
+                        let end = std::cmp::min(sz as u64, ph.p_filesz(elf.endianness()) - off);
+                        match elf
+                            .data()
+                            .read_bytes_at(ph.p_offset(elf.endianness()) + off, sz as u64)
+                        {
+                            Ok(data) => {
+                                return Ok(data);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        panic!("failed to read data")
+    }
+
+    pub fn read_u32(elf: &object::File, addr: u64) -> Result<u32> {
+        let data = ElfFile::read_at(elf, addr, 4)?;
+        Ok(NativeEndian::read_u32(data))
+    }
+
+    pub fn read_u64(elf: &object::File, addr: u64) -> Result<u64> {
+        let data = ElfFile::read_at(elf, addr, 8)?;
+        Ok(NativeEndian::read_u64(data))
+    }
+
+    pub fn read_string<'a>(elf: &'a object::File, addr: u64, sz: usize) -> Result<Cow<'a, str>> {
+        if let object::File::Elf64(elf) = elf {
+            for ph in elf.elf_program_headers() {
+                if ph.p_type(elf.endianness()) == PT_LOAD
+                    && addr >= ph.p_vaddr(elf.endianness())
+                    && addr < ph.p_vaddr(elf.endianness()) + ph.p_memsz(elf.endianness())
+                {
+                    let off = addr - ph.p_vaddr(elf.endianness());
+                    if off < ph.p_filesz(elf.endianness()) {
+                        let start = ph.p_offset(elf.endianness()) + off;
+                        let end =
+                            start + std::cmp::min(sz as u64, ph.p_filesz(elf.endianness()) - off);
+                        if let Ok(data) = elf.data().read_bytes_at_until(start..end, 0) {
+                            return Ok(String::from_utf8_lossy(data));
+                        }
+                    }
+                }
+            }
+        }
+        bail!("failed to read string")
     }
 
     pub fn parse_ph(file: &File) -> Result<Vec<ProgramAddress>> {
@@ -247,6 +366,19 @@ impl ElfFile {
         }
 
         Ok(progs)
+    }
+
+    pub fn lookup_symbol<'a>(elf: &'a object::File, name: &str) -> Result<Symbol<'a, 'a>> {
+        let name_bytes = name.as_bytes();
+        if let Some(sym) = elf
+            .dynamic_symbols()
+            .find(|x| x.name_bytes() == Ok(&name_bytes))
+        {
+            return Ok(sym);
+        }
+
+        elf.symbol_by_name_bytes(name_bytes)
+            .ok_or(anyhow!("symbol {} not found", name))
     }
 
     // parse eh_frame and return stack_deltas
@@ -315,7 +447,12 @@ impl ElfFile {
                         let delta = UserStackDelta {
                             addr: row.start_address(),
                             hint,
-                            info: get_unwind_info(&eh_frame, fde.cie().encoding(), row),
+                            info: get_unwind_info(
+                                row.start_address(),
+                                &eh_frame,
+                                fde.cie().encoding(),
+                                row,
+                            ),
                         };
                         deltas.push(delta);
                         hint = UNWIND_HINT_NONE;
@@ -384,6 +521,7 @@ impl ElfFile {
 }
 
 fn get_unwind_info<R: Reader>(
+    addr: u64,
     eh_frame: &gimli::EhFrame<R>,
     enc: Encoding,
     row: &UnwindTableRow<R::Offset>,
@@ -434,8 +572,26 @@ fn get_unwind_info<R: Reader>(
             }
         }
         RegisterRule::Expression(expr) => {
-            // TODO: support this
-            log::error!("unsupported register expression")
+            let expr = expr.get(eh_frame).unwrap();
+            let mut eval = expr.evaluation(enc);
+            let res = eval.evaluate().unwrap();
+            match res {
+                EvaluationResult::RequiresRegister {
+                    register,
+                    base_type,
+                } => {
+                    if register == X86_64::RBP {
+                        info.set_fpopcode(UNWIND_OPCODE_BASE_FP as u8);
+                    }
+                }
+                _ => {
+                    log::error!(
+                        "unsupported register expression, addr: {:x}, eval: {:?}",
+                        addr,
+                        res
+                    )
+                }
+            }
         }
 
         _ => {}

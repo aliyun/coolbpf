@@ -358,12 +358,17 @@ int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long u
 		net_log(LOG_TYPE_WARN, "failed to open BPF object\n");
 		return 1;
 	}
+
 	err = net_bpf__load(obj);
 	if (err)
 	{
 		net_log(LOG_TYPE_WARN, "failed to load BPF object: %d\n", err);
 		goto cleanup;
 	}
+	bpf_program__set_autoattach(obj->progs.cleanup_dog_probe, false);
+	bpf_program__set_autoattach(obj->progs.disable_process_probe, false);
+	bpf_program__set_autoattach(obj->progs.update_conn_role_probe, false);
+	bpf_program__set_autoattach(obj->progs.update_conn_addr_probe, false);
 	err = net_bpf__attach(obj);
 	if (err)
 	{
@@ -409,14 +414,10 @@ static int set_events_cont(int perf_fd, int page_count, handle_event_func_t even
 	{
 		page_count = 128;
 	}
-	struct perf_buffer_opts pb_opts = {
-	    .sample_cb = event_func,
-	    .lost_cb = lost_func,
-	};
 	struct perf_buffer *pb = NULL;
 	int err;
 
-	pb = perf_buffer__new(perf_fd, page_count, &pb_opts);
+	pb = perf_buffer__new(perf_fd, page_count, event_func, lost_func, NULL, NULL);
 	err = libbpf_get_error(pb);
 	if (err)
 	{

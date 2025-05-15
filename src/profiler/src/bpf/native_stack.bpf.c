@@ -54,6 +54,7 @@ STACK_DELTA_BUCKET(18);
 STACK_DELTA_BUCKET(19);
 STACK_DELTA_BUCKET(20);
 STACK_DELTA_BUCKET(21);
+STACK_DELTA_BUCKET(22);
 
 // Unwind info value for invalid stack delta
 #define STACK_DELTA_INVALID (STACK_DELTA_COMMAND_FLAG | UNWIND_COMMAND_INVALID)
@@ -153,6 +154,8 @@ static inline __attribute__((__always_inline__)) void *get_stack_delta_map(int m
     return &exe_id_to_20_stack_deltas;
   case 21:
     return &exe_id_to_21_stack_deltas;
+  case 22:
+    return &exe_id_to_22_stack_deltas;
   default:
     return NULL;
   }
@@ -919,14 +922,14 @@ static inline int collect_trace(struct pt_regs *ctx)
 
   Trace *trace = &record->trace;
   trace->pid = pid;
-#if 0
+#if 1
   u64 ktime = bpf_ktime_get_ns();
   trace->ktime = ktime;
+#endif
   if (bpf_get_current_comm(&(trace->comm), sizeof(trace->comm)) < 0)
   {
     increment_metric(metricID_ErrBPFCurrentComm);
   }
-#endif
 
   // Get the kernel mode stack trace first
   trace->kernel_stack_id = bpf_get_stackid(ctx, &kernel_stackmap, BPF_F_REUSE_STACKID);

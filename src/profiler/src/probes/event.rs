@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 pub enum ProbeEvent {
     ProcessExit(u32),
-    Trace(RawStack),
+    Trace((String, RawStack)),
 }
 
 #[derive(Debug)]
@@ -63,7 +63,9 @@ impl Eq for RawUserStack {}
 
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct RawStack {
+    pub cpu: u32,
     pub pid: u32,
+    pub time: u64,
     pub kernel: Vec<u64>,
     pub user: RawUserStack,
 }

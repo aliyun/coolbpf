@@ -224,6 +224,107 @@ static inline void hist10_push(struct bpf_map_def *maps, long v)
     incr_hist(maps, k);
 }
 
+/* eNetSTL APIs */
+/**
+ * bpf_crc32_hash() - Calculate CRC32 hash on user-supplied byte array.
+ *
+ * @data: Data to perform hash on.
+ * @data__sz: How many bytes to use to calculate hash value.
+ * @init_val: Value to initialise hash generator.
+ * 
+ * Return: 32bit calculated hash value.
+ */
+extern __u32 bpf_crc32_hash(const void *data, __u32 data__sz, __u32 init_val) __ksym;
+
+/**
+ * bpf_xxh32_cnt32 - Calculate multiple xxhash on given input and increase u32 counters based on hash results.
+ *
+ * @input: Data to perform hash on.
+ * @input__sz: How many bytes to use to calculate hash value.
+ * @table: Table of counters 
+ * @table__sz: How many bytes of the total counter table
+ * @column_shift: The table has (1 << column_shift) columns
+ * 
+ * The number of hash functions (HASH_NUM) is table__sz / (1 << colunm_shift)
+ * Perform HASH_NUM xxhash calcualtions over input, for each results hashes[i], perform: 
+ *    j = hashes[i] & (COL_NUM - 1);
+ *	  *((u32*)table + i * column_count + j) += 1;
+ */
+extern void bpf_xxh32_cnt32(const void *input, __u64 input__sz,
+				                  void *table, __u64 table__sz,
+				                  __u32 column_shift) __ksym;
+
+/**
+ * bpf_fasthash32_cnt32 - Calculate multiple fasthash on given input and increase u32 counters based on hash results.
+ *
+ * @input: Data to perform hash on.
+ * @input__sz: How many bytes to use to calculate hash value.
+ * @table: Table of counters 
+ * @table__sz: How many bytes of the total counter table
+ * @column_shift: The table has (1 << column_shift) columns
+ * 
+ * The number of hash functions (HASH_NUM) is table__sz / (1 << colunm_shift)
+ * Perform HASH_NUM xxhash calcualtions over input, for each results hashes[i], perform: 
+ *    j = hashes[i] & (COL_NUM - 1);
+ *	  *((u32*)table + i * column_count + j) += 1;
+ */
+extern void bpf_fasthash32_cnt32(const void *input, size_t input__sz,
+				                       void *table, size_t table__sz,
+				                       __u32 column_shift) __ksym;
+
+/**
+ * bpf_cmp_eq() - Compare two values for equality.
+ *
+ * @key1: Pointer to first value.
+ * @key1__sz: Size of first value
+ * @key2: Pointer to second value.
+ * @key2__sz: Size of second value (should be greater or equal to key1__sz).
+ *
+ * Return: 0 if equal, 1 otherwise, -EINVAL, invalid key1_sz
+ */
+extern int bpf_cmp_eq(const void *key1, size_t key1_sz,
+			             const void *key2, size_t key2_sz) __ksym;
+
+/**
+ * bpf_find_mask_u16_avx() - Find 16-bit value in array of 16 16-bit values.
+ *
+ * @arr: Pointer to at least 16 16-bit values.
+ * @arr__sz: number of bytes of arr.
+ * @val: Value to find in the array.
+ *
+ * Return: 32-bit mask, if ith u16 equals val, the 2*i and 2*i + 1 bit are set to one 
+ */
+extern __u32 bpf_find_mask_u16(void *arr, size_t arr__sz, __u16 val) __ksym;
+
+/**
+ * bpf_find_u16() - Find 16-bit value in array of 16 16-bit values.
+ *
+ * @arr: Pointer to at least 16 16-bit values.
+ * @arr__sz: number of bytes of arr.
+ * @val: Value to find in the array.
+ *
+ * Return: index of first value found; 16 if not found
+ */
+extern __u32 bpf_find_u16(void *arr, size_t arr__sz, __u16 val) __ksym;
+
+/**
+ * bpf_tzcnt_u32() - Count trailing zero bits in 32-bit value.
+ *
+ * @val: 32-bit value
+ *
+ * Return: number of trailing zero bits
+ */
+extern __u32 bpf_tzcnt_u32(__u32 val) __ksym;
+
+/**
+ * bpf_ffs() - find the first set bit in a word.
+ *
+ * @val: bitmap word.
+ *
+ * Return: the first set bit
+ */
+extern u64 bpf_ffs(unsigned long val) __ksym;
+
 char _license[] SEC("license") = "GPL";
 
 #endif

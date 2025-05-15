@@ -2,7 +2,7 @@ use anyhow::bail;
 use anyhow::Result;
 use std::io::Read;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProcessMemory {
     pid: u32,
     bias: u64,

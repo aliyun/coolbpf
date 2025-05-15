@@ -9,6 +9,7 @@
 #include <linux/if_ether.h>
 #include <linux/pkt_cls.h>
 #include <linux/rtnetlink.h>
+#include <linux/netdev.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <time.h>
@@ -27,13 +28,28 @@ typedef int (*libbpf_dump_nlmsg_t)(void *cookie, void *msg, struct nlattr **tb);
 typedef int (*__dump_nlmsg_t)(struct nlmsghdr *nlmsg, libbpf_dump_nlmsg_t,
 			      void *cookie);
 
+struct xdp_link_info {
+	__u32 prog_id;
+	__u32 drv_prog_id;
+	__u32 hw_prog_id;
+	__u32 skb_prog_id;
+	__u8 attach_mode;
+};
+
 struct xdp_id_md {
 	int ifindex;
 	__u32 flags;
 	struct xdp_link_info info;
+	__u64 feature_flags;
 };
 
-static int libbpf_netlink_open(__u32 *nl_pid)
+struct xdp_features_md {
+	int ifindex;
+	__u32 xdp_zc_max_segs;
+	__u64 flags;
+};
+
+static int libbpf_netlink_open(__u32 *nl_pid, int proto)
 {
 	struct sockaddr_nl sa;
 	socklen_t addrlen;
@@ -43,7 +59,7 @@ static int libbpf_netlink_open(__u32 *nl_pid)
 	memset(&sa, 0, sizeof(sa));
 	sa.nl_family = AF_NETLINK;
 
-	sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, proto);
 	if (sock < 0)
 		return -errno;
 
@@ -87,29 +103,75 @@ enum {
 	NL_DONE,
 };
 
+static int netlink_recvmsg(int sock, struct msghdr *mhdr, int flags)
+{
+	int len;
+
+	do {
+		len = recvmsg(sock, mhdr, flags);
+	} while (len < 0 && (errno == EINTR || errno == EAGAIN));
+
+	if (len < 0)
+		return -errno;
+	return len;
+}
+
+static int alloc_iov(struct iovec *iov, int len)
+{
+	void *nbuf;
+
+	nbuf = realloc(iov->iov_base, len);
+	if (!nbuf)
+		return -ENOMEM;
+
+	iov->iov_base = nbuf;
+	iov->iov_len = len;
+	return 0;
+}
+
 static int libbpf_netlink_recv(int sock, __u32 nl_pid, int seq,
 			       __dump_nlmsg_t _fn, libbpf_dump_nlmsg_t fn,
 			       void *cookie)
 {
+	struct iovec iov = {};
+	struct msghdr mhdr = {
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+	};
 	bool multipart = true;
 	struct nlmsgerr *err;
 	struct nlmsghdr *nh;
-	char buf[4096];
 	int len, ret;
+
+	ret = alloc_iov(&iov, 4096);
+	if (ret)
+		goto done;
 
 	while (multipart) {
 start:
 		multipart = false;
-		len = recv(sock, buf, sizeof(buf), 0);
+		len = netlink_recvmsg(sock, &mhdr, MSG_PEEK | MSG_TRUNC);
 		if (len < 0) {
-			ret = -errno;
+			ret = len;
+			goto done;
+		}
+
+		if (len > iov.iov_len) {
+			ret = alloc_iov(&iov, len);
+			if (ret)
+				goto done;
+		}
+
+		len = netlink_recvmsg(sock, &mhdr, 0);
+		if (len < 0) {
+			ret = len;
 			goto done;
 		}
 
 		if (len == 0)
 			break;
 
-		for (nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, len);
+		for (nh = (struct nlmsghdr *)iov.iov_base; NLMSG_OK(nh, len);
 		     nh = NLMSG_NEXT(nh, len)) {
 			if (nh->nlmsg_pid != nl_pid) {
 				ret = -LIBBPF_ERRNO__WRNGPID;
@@ -130,7 +192,8 @@ start:
 				libbpf_nla_dump_errormsg(nh);
 				goto done;
 			case NLMSG_DONE:
-				return 0;
+				ret = 0;
+				goto done;
 			default:
 				break;
 			}
@@ -142,27 +205,29 @@ start:
 				case NL_NEXT:
 					goto start;
 				case NL_DONE:
-					return 0;
+					ret = 0;
+					goto done;
 				default:
-					return ret;
+					goto done;
 				}
 			}
 		}
 	}
 	ret = 0;
 done:
+	free(iov.iov_base);
 	return ret;
 }
 
 static int libbpf_netlink_send_recv(struct libbpf_nla_req *req,
-				    __dump_nlmsg_t parse_msg,
+				    int proto, __dump_nlmsg_t parse_msg,
 				    libbpf_dump_nlmsg_t parse_attr,
 				    void *cookie)
 {
 	__u32 nl_pid = 0;
 	int sock, ret;
 
-	sock = libbpf_netlink_open(&nl_pid);
+	sock = libbpf_netlink_open(&nl_pid, proto);
 	if (sock < 0)
 		return sock;
 
@@ -179,6 +244,43 @@ static int libbpf_netlink_send_recv(struct libbpf_nla_req *req,
 out:
 	libbpf_netlink_close(sock);
 	return ret;
+}
+
+static int parse_genl_family_id(struct nlmsghdr *nh, libbpf_dump_nlmsg_t fn,
+				void *cookie)
+{
+	struct genlmsghdr *gnl = NLMSG_DATA(nh);
+	struct nlattr *na = (struct nlattr *)((void *)gnl + GENL_HDRLEN);
+	struct nlattr *tb[CTRL_ATTR_FAMILY_ID + 1];
+	__u16 *id = cookie;
+
+	libbpf_nla_parse(tb, CTRL_ATTR_FAMILY_ID, na,
+			 NLMSG_PAYLOAD(nh, sizeof(*gnl)), NULL);
+	if (!tb[CTRL_ATTR_FAMILY_ID])
+		return NL_CONT;
+
+	*id = libbpf_nla_getattr_u16(tb[CTRL_ATTR_FAMILY_ID]);
+	return NL_DONE;
+}
+
+static int libbpf_netlink_resolve_genl_family_id(const char *name,
+						 __u16 len, __u16 *id)
+{
+	struct libbpf_nla_req req = {
+		.nh.nlmsg_len	= NLMSG_LENGTH(GENL_HDRLEN),
+		.nh.nlmsg_type	= GENL_ID_CTRL,
+		.nh.nlmsg_flags	= NLM_F_REQUEST,
+		.gnl.cmd	= CTRL_CMD_GETFAMILY,
+		.gnl.version	= 2,
+	};
+	int err;
+
+	err = nlattr_add(&req, CTRL_ATTR_FAMILY_NAME, name, len);
+	if (err < 0)
+		return err;
+
+	return libbpf_netlink_send_recv(&req, NETLINK_GENERIC,
+					parse_genl_family_id, NULL, id);
 }
 
 static int __bpf_set_link_xdp_fd_replace(int ifindex, int fd, int old_fd,
@@ -214,32 +316,29 @@ static int __bpf_set_link_xdp_fd_replace(int ifindex, int fd, int old_fd,
 	}
 	nlattr_end_nested(&req, nla);
 
-	return libbpf_netlink_send_recv(&req, NULL, NULL, NULL);
+	return libbpf_netlink_send_recv(&req, NETLINK_ROUTE, NULL, NULL, NULL);
 }
 
-int bpf_set_link_xdp_fd_opts(int ifindex, int fd, __u32 flags,
-			     const struct bpf_xdp_set_link_opts *opts)
+int bpf_xdp_attach(int ifindex, int prog_fd, __u32 flags, const struct bpf_xdp_attach_opts *opts)
 {
-	int old_fd = -1, ret;
+	int old_prog_fd, err;
 
-	if (!OPTS_VALID(opts, bpf_xdp_set_link_opts))
+	if (!OPTS_VALID(opts, bpf_xdp_attach_opts))
 		return libbpf_err(-EINVAL);
 
-	if (OPTS_HAS(opts, old_fd)) {
-		old_fd = OPTS_GET(opts, old_fd, -1);
+	old_prog_fd = OPTS_GET(opts, old_prog_fd, 0);
+	if (old_prog_fd)
 		flags |= XDP_FLAGS_REPLACE;
-	}
+	else
+		old_prog_fd = -1;
 
-	ret = __bpf_set_link_xdp_fd_replace(ifindex, fd, old_fd, flags);
-	return libbpf_err(ret);
+	err = __bpf_set_link_xdp_fd_replace(ifindex, prog_fd, old_prog_fd, flags);
+	return libbpf_err(err);
 }
 
-int bpf_set_link_xdp_fd(int ifindex, int fd, __u32 flags)
+int bpf_xdp_detach(int ifindex, __u32 flags, const struct bpf_xdp_attach_opts *opts)
 {
-	int ret;
-
-	ret = __bpf_set_link_xdp_fd_replace(ifindex, fd, 0, flags);
-	return libbpf_err(ret);
+	return bpf_xdp_attach(ifindex, -1, flags, opts);
 }
 
 static int __dump_link_nlmsg(struct nlmsghdr *nlh,
@@ -303,70 +402,132 @@ static int get_xdp_info(void *cookie, void *msg, struct nlattr **tb)
 	return 0;
 }
 
-int bpf_get_link_xdp_info(int ifindex, struct xdp_link_info *info,
-			  size_t info_size, __u32 flags)
+static int parse_xdp_features(struct nlmsghdr *nh, libbpf_dump_nlmsg_t fn,
+			      void *cookie)
 {
-	struct xdp_id_md xdp_id = {};
-	__u32 mask;
-	int ret;
+	struct genlmsghdr *gnl = NLMSG_DATA(nh);
+	struct nlattr *na = (struct nlattr *)((void *)gnl + GENL_HDRLEN);
+	struct nlattr *tb[NETDEV_CMD_MAX + 1];
+	struct xdp_features_md *md = cookie;
+	__u32 ifindex;
+
+	libbpf_nla_parse(tb, NETDEV_CMD_MAX, na,
+			 NLMSG_PAYLOAD(nh, sizeof(*gnl)), NULL);
+
+	if (!tb[NETDEV_A_DEV_IFINDEX] || !tb[NETDEV_A_DEV_XDP_FEATURES])
+		return NL_CONT;
+
+	ifindex = libbpf_nla_getattr_u32(tb[NETDEV_A_DEV_IFINDEX]);
+	if (ifindex != md->ifindex)
+		return NL_CONT;
+
+	md->flags = libbpf_nla_getattr_u64(tb[NETDEV_A_DEV_XDP_FEATURES]);
+	if (tb[NETDEV_A_DEV_XDP_ZC_MAX_SEGS])
+		md->xdp_zc_max_segs =
+			libbpf_nla_getattr_u32(tb[NETDEV_A_DEV_XDP_ZC_MAX_SEGS]);
+	return NL_DONE;
+}
+
+int bpf_xdp_query(int ifindex, int xdp_flags, struct bpf_xdp_query_opts *opts)
+{
 	struct libbpf_nla_req req = {
 		.nh.nlmsg_len      = NLMSG_LENGTH(sizeof(struct ifinfomsg)),
 		.nh.nlmsg_type     = RTM_GETLINK,
 		.nh.nlmsg_flags    = NLM_F_DUMP | NLM_F_REQUEST,
 		.ifinfo.ifi_family = AF_PACKET,
 	};
+	struct xdp_id_md xdp_id = {};
+	struct xdp_features_md md = {
+		.ifindex = ifindex,
+	};
+	__u16 id;
+	int err;
 
-	if (flags & ~XDP_FLAGS_MASK || !info_size)
+	if (!OPTS_VALID(opts, bpf_xdp_query_opts))
+		return libbpf_err(-EINVAL);
+
+	if (xdp_flags & ~XDP_FLAGS_MASK)
 		return libbpf_err(-EINVAL);
 
 	/* Check whether the single {HW,DRV,SKB} mode is set */
-	flags &= (XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE | XDP_FLAGS_HW_MODE);
-	mask = flags - 1;
-	if (flags && flags & mask)
+	xdp_flags &= XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE | XDP_FLAGS_HW_MODE;
+	if (xdp_flags & (xdp_flags - 1))
 		return libbpf_err(-EINVAL);
 
 	xdp_id.ifindex = ifindex;
-	xdp_id.flags = flags;
+	xdp_id.flags = xdp_flags;
 
-	ret = libbpf_netlink_send_recv(&req, __dump_link_nlmsg,
+	err = libbpf_netlink_send_recv(&req, NETLINK_ROUTE, __dump_link_nlmsg,
 				       get_xdp_info, &xdp_id);
-	if (!ret) {
-		size_t sz = min(info_size, sizeof(xdp_id.info));
+	if (err)
+		return libbpf_err(err);
 
-		memcpy(info, &xdp_id.info, sz);
-		memset((void *) info + sz, 0, info_size - sz);
+	OPTS_SET(opts, prog_id, xdp_id.info.prog_id);
+	OPTS_SET(opts, drv_prog_id, xdp_id.info.drv_prog_id);
+	OPTS_SET(opts, hw_prog_id, xdp_id.info.hw_prog_id);
+	OPTS_SET(opts, skb_prog_id, xdp_id.info.skb_prog_id);
+	OPTS_SET(opts, attach_mode, xdp_id.info.attach_mode);
+
+	if (!OPTS_HAS(opts, feature_flags))
+		return 0;
+
+	err = libbpf_netlink_resolve_genl_family_id("netdev", sizeof("netdev"), &id);
+	if (err < 0) {
+		if (err == -ENOENT) {
+			opts->feature_flags = 0;
+			goto skip_feature_flags;
+		}
+		return libbpf_err(err);
 	}
 
-	return libbpf_err(ret);
+	memset(&req, 0, sizeof(req));
+	req.nh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+	req.nh.nlmsg_flags = NLM_F_REQUEST;
+	req.nh.nlmsg_type = id;
+	req.gnl.cmd = NETDEV_CMD_DEV_GET;
+	req.gnl.version = 2;
+
+	err = nlattr_add(&req, NETDEV_A_DEV_IFINDEX, &ifindex, sizeof(ifindex));
+	if (err < 0)
+		return libbpf_err(err);
+
+	err = libbpf_netlink_send_recv(&req, NETLINK_GENERIC,
+				       parse_xdp_features, NULL, &md);
+	if (err)
+		return libbpf_err(err);
+
+	OPTS_SET(opts, feature_flags, md.flags);
+	OPTS_SET(opts, xdp_zc_max_segs, md.xdp_zc_max_segs);
+
+skip_feature_flags:
+	return 0;
 }
 
-static __u32 get_xdp_id(struct xdp_link_info *info, __u32 flags)
+int bpf_xdp_query_id(int ifindex, int flags, __u32 *prog_id)
 {
+	LIBBPF_OPTS(bpf_xdp_query_opts, opts);
+	int ret;
+
+	ret = bpf_xdp_query(ifindex, flags, &opts);
+	if (ret)
+		return libbpf_err(ret);
+
 	flags &= XDP_FLAGS_MODES;
 
-	if (info->attach_mode != XDP_ATTACHED_MULTI && !flags)
-		return info->prog_id;
-	if (flags & XDP_FLAGS_DRV_MODE)
-		return info->drv_prog_id;
-	if (flags & XDP_FLAGS_HW_MODE)
-		return info->hw_prog_id;
-	if (flags & XDP_FLAGS_SKB_MODE)
-		return info->skb_prog_id;
+	if (opts.attach_mode != XDP_ATTACHED_MULTI && !flags)
+		*prog_id = opts.prog_id;
+	else if (flags & XDP_FLAGS_DRV_MODE)
+		*prog_id = opts.drv_prog_id;
+	else if (flags & XDP_FLAGS_HW_MODE)
+		*prog_id = opts.hw_prog_id;
+	else if (flags & XDP_FLAGS_SKB_MODE)
+		*prog_id = opts.skb_prog_id;
+	else
+		*prog_id = 0;
 
 	return 0;
 }
 
-int bpf_get_link_xdp_id(int ifindex, __u32 *prog_id, __u32 flags)
-{
-	struct xdp_link_info info;
-	int ret;
-
-	ret = bpf_get_link_xdp_info(ifindex, &info, sizeof(info), flags);
-	if (!ret)
-		*prog_id = get_xdp_id(&info, flags);
-
-	return libbpf_err(ret);
-}
 
 typedef int (*qdisc_config_t)(struct libbpf_nla_req *req);
 
@@ -439,7 +600,7 @@ static int tc_qdisc_modify(struct bpf_tc_hook *hook, int cmd, int flags)
 	if (ret < 0)
 		return ret;
 
-	return libbpf_netlink_send_recv(&req, NULL, NULL, NULL);
+	return libbpf_netlink_send_recv(&req, NETLINK_ROUTE, NULL, NULL, NULL);
 }
 
 static int tc_qdisc_create_excl(struct bpf_tc_hook *hook)
@@ -533,12 +694,13 @@ static int get_tc_info(struct nlmsghdr *nh, libbpf_dump_nlmsg_t fn,
 
 static int tc_add_fd_and_name(struct libbpf_nla_req *req, int fd)
 {
-	struct bpf_prog_info info = {};
+	struct bpf_prog_info info;
 	__u32 info_len = sizeof(info);
 	char name[256];
 	int len, ret;
 
-	ret = bpf_obj_get_info_by_fd(fd, &info, &info_len);
+	memset(&info, 0, info_len);
+	ret = bpf_prog_get_info_by_fd(fd, &info, &info_len);
 	if (ret < 0)
 		return ret;
 
@@ -618,7 +780,8 @@ int bpf_tc_attach(const struct bpf_tc_hook *hook, struct bpf_tc_opts *opts)
 
 	info.opts = opts;
 
-	ret = libbpf_netlink_send_recv(&req, get_tc_info, NULL, &info);
+	ret = libbpf_netlink_send_recv(&req, NETLINK_ROUTE, get_tc_info, NULL,
+				       &info);
 	if (ret < 0)
 		return libbpf_err(ret);
 	if (!info.processed)
@@ -684,7 +847,7 @@ static int __bpf_tc_detach(const struct bpf_tc_hook *hook,
 			return ret;
 	}
 
-	return libbpf_netlink_send_recv(&req, NULL, NULL, NULL);
+	return libbpf_netlink_send_recv(&req, NETLINK_ROUTE, NULL, NULL, NULL);
 }
 
 int bpf_tc_detach(const struct bpf_tc_hook *hook,
@@ -749,7 +912,8 @@ int bpf_tc_query(const struct bpf_tc_hook *hook, struct bpf_tc_opts *opts)
 
 	info.opts = opts;
 
-	ret = libbpf_netlink_send_recv(&req, get_tc_info, NULL, &info);
+	ret = libbpf_netlink_send_recv(&req, NETLINK_ROUTE, get_tc_info, NULL,
+				       &info);
 	if (ret < 0)
 		return libbpf_err(ret);
 	if (!info.processed)

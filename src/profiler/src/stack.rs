@@ -1,5 +1,4 @@
 use crate::interpreter::Interpreter;
-use crate::pb::ustack;
 use crate::pb::LivetraceCell;
 use crate::pb::LivetraceList;
 use crate::pb::Ustack;
@@ -22,7 +21,11 @@ pub struct KernelStack {
 
 impl KernelStack {
     pub fn new(symer: &Symbolizer, addrs: &Vec<u64>) -> Result<Self> {
-        let frames = symer.kernel_symbolize(addrs);
+        let frames = if symer.need_function_offset {
+            symer.kernel_symbolize_with_offset(addrs)
+        } else {
+            symer.kernel_symbolize(addrs)
+        };
         Ok(KernelStack { syms: frames })
     }
 }
@@ -38,12 +41,12 @@ impl UserStack {
         if addrs.is_empty() {
             bail!("miss kernel stack for id: {id}")
         }
-        let frames = symer.proc_symbolize(pid, &addrs)?;
+        let frames = symer.proc_symbolize(pid, &addrs);
         Ok(UserStack { syms: frames })
     }
 
     pub fn new(symer: &mut Symbolizer, pid: u32, addrs: &Vec<u64>) -> Result<Self> {
-        let frames = symer.proc_symbolize(pid, &addrs)?;
+        let frames = symer.proc_symbolize(pid, &addrs);
         Ok(UserStack { syms: frames })
     }
 }
@@ -53,10 +56,10 @@ pub enum Frame {
     Java(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Stack {
-    count: u32,
-    frames: Vec<Symbol>,
+    pub count: u32,
+    pub frames: Vec<Symbol>,
 }
 
 impl Stack {
@@ -95,6 +98,12 @@ impl Stack {
             }
         }
 
+        if symer.need_cpu {
+            stack.push(Symbol {
+                name: format!("cpu:{}", raw.cpu),
+            });
+        }
+
         stack.count = cnt;
         Ok(stack)
     }
@@ -105,6 +114,17 @@ impl Stack {
 
     pub fn empty(&self) -> bool {
         self.frames.is_empty()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        if !self.frames.is_empty()
+            && (self.frames[0].name == "finish_task_switch"
+                || self.frames[0].name == "native_safe_halt"
+                || self.frames[0].name.contains("idle"))
+        {
+            return true;
+        }
+        false
     }
 }
 
@@ -125,6 +145,7 @@ impl ToString for Stack {
 pub struct StackCounter {
     stacks: HashMap<RawStack, u32>,
     total: usize,
+    keep: bool,
 }
 
 impl StackCounter {
@@ -132,13 +153,15 @@ impl StackCounter {
         StackCounter {
             stacks: HashMap::new(),
             total: 0,
+            keep: false,
         }
     }
 
-    pub fn add(&mut self, raw: RawStack) {
+    pub fn add(&mut self, raw: RawStack, keep: bool) {
         let count = self.stacks.entry(raw).or_insert(0);
         *count += 1;
         self.total += 1;
+        self.keep = keep;
     }
 
     pub fn len(&self) -> usize {
@@ -148,19 +171,23 @@ impl StackCounter {
 
 #[derive(Default)]
 pub struct StackAggregator {
-    stacks: HashMap<u32, StackCounter>,
+    stacks: HashMap<u32, (String, StackCounter)>,
     pub total: usize,
 }
 
 impl StackAggregator {
-    pub fn add(&mut self, raw: RawStack) {
-        let sc = self.stacks.entry(raw.pid).or_insert(StackCounter::new());
+    pub fn add(&mut self, comm: String, raw: RawStack, keep: bool) {
+        let (_, sc) = self
+            .stacks
+            .entry(raw.pid)
+            .or_insert((comm, StackCounter::new()));
         self.total += 1;
-        sc.add(raw);
+        sc.add(raw, keep);
     }
 
     pub fn filter(&mut self, threshold: usize) {
-        self.stacks.retain(|_, x| x.len() > threshold);
+        self.stacks
+            .retain(|_, (_, x)| x.keep || x.len() > threshold);
     }
 
     pub fn serialize(
@@ -169,7 +196,7 @@ impl StackAggregator {
         inters: &mut HashMap<u32, Interpreter>,
     ) -> Vec<u8> {
         let mut list = LivetraceList::new();
-        for (pid, sc) in &self.stacks {
+        for (pid, (_, sc)) in &self.stacks {
             for (raw, cnt) in &sc.stacks {
                 let mut cell = LivetraceCell::new();
                 cell.pid = *pid;
@@ -219,12 +246,31 @@ impl StackAggregator {
         inters: &mut HashMap<u32, Interpreter>,
     ) -> Vec<SymbolizedStack> {
         let mut symbolized_stacks = vec![];
-        for (pid, sc) in &self.stacks {
+        for (pid, (comm, sc)) in &self.stacks {
             let mut stacks = vec![];
             let mut count = 0;
+
+            let comm = {
+                if *pid != 0 {
+                    match symer.proc_comm(*pid) {
+                        Ok(comm) => comm.to_string(),
+                        Err(_) => comm.clone(),
+                    }
+                } else {
+                    if comm.starts_with("swapper") {
+                        "swapper".to_string()
+                    } else {
+                        comm.clone()
+                    }
+                }
+            };
+
             for (raw, &cnt) in &sc.stacks {
                 match Stack::new(symer, raw, inters, cnt) {
                     Ok(stack) => {
+                        if *pid == 0 && stack.is_idle() {
+                            continue;
+                        }
                         stacks.push(stack);
                         count += cnt;
                     }
@@ -240,10 +286,7 @@ impl StackAggregator {
             if !stacks.is_empty() {
                 symbolized_stacks.push(SymbolizedStack {
                     pid: *pid,
-                    comm: match symer.proc_comm(*pid) {
-                        Ok(comm) => comm.clone(),
-                        Err(_) => String::new(),
-                    },
+                    comm: comm.clone(),
                     stacks,
                     count,
                 });
@@ -257,7 +300,25 @@ pub struct SymbolizedStack {
     pub pid: u32,
     pub comm: String,
     pub count: u32,
-    stacks: Vec<Stack>,
+    pub stacks: Vec<Stack>,
+}
+
+impl SymbolizedStack {
+    pub fn half_split(mut self) -> (SymbolizedStack, SymbolizedStack) {
+        let len = self.stacks.len();
+        let pid = self.pid;
+        let comm = self.comm.clone();
+        let right = self.stacks.split_off(len / 2);
+        (
+            self,
+            SymbolizedStack {
+                pid,
+                comm,
+                count: 0,
+                stacks: right,
+            },
+        )
+    }
 }
 
 impl ToString for SymbolizedStack {

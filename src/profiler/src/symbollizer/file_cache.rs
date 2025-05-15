@@ -42,12 +42,14 @@ impl FileInfo {
     }
 
     pub fn file_offset_to_virtual_address(&self, offset: u64) -> Option<u64> {
+        log::debug!("{:x?}", self.pas);
         for p in &self.pas {
             let aligned_offset = p.offset & (!4095);
             if offset >= aligned_offset && offset < p.offset + p.filezs {
                 return Some(p.vaddr - (p.offset - offset));
             }
         }
+
         None
     }
 

@@ -9,9 +9,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1.0.86"
-blazesym = "0.2.0-rc.0"
 byteorder = "1.5.0"
 cached = "0.52.0"
+capstone = "0.12.0"
+chrono = "0.4.41"
+clru = "0.6.2"
 crossbeam-channel = "0.5.13"
 ctor = "0.2.8"
 env_logger = "0.11.5"
@@ -23,6 +25,7 @@ log = "0.4.22"
 log4rs = "1.3.0"
 lru = "0.12.3"
 memmap2 = "0.9.4"
+moka = { version = "0.12.10", features = ["sync"] }
 num_cpus = "1.16.0"
 object = "0.36.1"
 once_cell = "1.19.0"
@@ -34,7 +37,10 @@ regex = "1.10.5"
 sha2 = "0.10.8"
 structopt = "0.3.26"
 symbolic-common = "12.10.0"
-symbolic-demangle = { version = "12.10.0", default-features = false, features = ["rust", "cpp"] }
+symbolic-demangle = { version = "12.10.0", default-features = false, features = [
+    "rust",
+    "cpp",
+] }
 tempfile = "3.10.1"
 thiserror = "1.0.63"
 typed-arena = "2.0.2"
@@ -43,7 +49,10 @@ uname = "0.1.1"
 # [profile.release]
 # debug = true
 
+[profile.dev]
+debug-assertions = false
 
 [build-dependencies]
 libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
+cc = "1.1.31"

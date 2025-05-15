@@ -1,9 +1,0 @@
-
-
-kprobe:(struct sock *sk) {
-    sport = sk->__sk_common.skc_num;
-    if (sport == 5202) {
-        print("%s %s\n", timestr(ns()), ksym(reg("ip")));
-    }
-}
-

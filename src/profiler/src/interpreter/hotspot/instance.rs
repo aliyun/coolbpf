@@ -89,6 +89,22 @@ impl HotspotInstance {
         })
     }
 
+    pub fn exit(&mut self, probes: &mut Probes) -> Result<()> {
+        probes
+            .hotspot_skel
+            .maps_mut()
+            .hotspot_procs()
+            .delete(&self.pid.to_ne_bytes())?;
+        for prefix in &self.prefixes {
+            probes
+                .pid_maps_info_map
+                .__delete(self.pid, &prefix)
+                .unwrap();
+        }
+
+        Ok(())
+    }
+
     pub fn sync_maps(&mut self, probes: &mut Probes) -> Result<()> {
         self.sync_main_maps(probes).unwrap();
         self.sync_stup_maps();

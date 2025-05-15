@@ -1,4 +1,6 @@
 use crate::executable::ExecutableCache;
+use crate::heatmap::ProcessHeatMap;
+use crate::heatmap::TenSecHeatMap;
 use crate::interpreter::Interpreter;
 use crate::is_enable_symbolizer;
 use crate::is_system_profiling;
@@ -13,8 +15,9 @@ use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
+use crate::utils::time::init_tstamp;
+use crate::utils::time::time_delta;
 use crate::MIN_PROCESS_SAMPLES;
-use crate::SYSTEM_PROFILING;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -29,12 +32,17 @@ pub struct Profiler<'a> {
 
     all_system_profiling: bool,
     enable_symbolizer: bool,
+
+    enable_heatmap: bool,
+    pub proc_heatmap: ProcessHeatMap,
+    time_delta: u64,
 }
 
 impl<'a> Profiler<'a> {
     pub fn new() -> Self {
         let mut symer = Symbolizer::new();
         symer.add_kernel("/proc/kallsyms");
+        init_tstamp();
         Profiler {
             pids: HashMap::new(),
             probes: Probes::new(),
@@ -44,17 +52,21 @@ impl<'a> Profiler<'a> {
             interpreters: HashMap::new(),
             all_system_profiling: is_system_profiling(),
             enable_symbolizer: is_enable_symbolizer(),
+            enable_heatmap: false,
+            proc_heatmap: ProcessHeatMap::default(),
+            time_delta: time_delta(),
         }
     }
 
     pub fn poll(&mut self) {
         loop {
             match self.probes.recv() {
-                ProbeEvent::Trace(data) => {
+                ProbeEvent::Trace((_, data)) => {
                     let stack =
                         Stack::new(&mut self.symbolizer, &data, &mut self.interpreters, 1).unwrap();
                     if !stack.empty() {
-                        println!("{}", stack.to_string());
+                        // println!("raw: {:?}", data);
+                        println!("stack: {}", stack.to_string());
                     }
                 }
 
@@ -69,7 +81,13 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::Trace((comm, data)) => {
+                        if self.enable_heatmap {
+                            self.proc_heatmap.add(data.pid, data.time + self.time_delta);
+                        }
+                        let keep = self.pids.contains_key(&data.pid);
+                        stack_agg.add(comm, data, keep);
+                    }
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
                 Err(_e) => break,
@@ -93,7 +111,7 @@ impl<'a> Profiler<'a> {
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {
-                    ProbeEvent::Trace(data) => stack_agg.add(data),
+                    ProbeEvent::Trace((comm, data)) => stack_agg.add(comm, data, false),
                     ProbeEvent::ProcessExit(pid) => exited_pids.push(pid),
                 },
                 Err(_e) => break,
@@ -116,6 +134,13 @@ impl<'a> Profiler<'a> {
         Ok(())
     }
 
+    pub fn add_heatmap_pids(&mut self, pids: Vec<u32>) {
+        self.enable_heatmap = true;
+        for pid in pids {
+            self.proc_heatmap.add_process(pid)
+        }
+    }
+
     fn sync_process(&mut self, pid: u32) -> Result<()> {
         log::debug!("sync process pid: {pid}");
         match ProcessMaps::new(pid) {
@@ -136,12 +161,16 @@ impl<'a> Profiler<'a> {
         Ok(())
     }
 
-    fn process_exit(&mut self, pid: u32) -> Result<()> {
+    pub fn process_exit(&mut self, pid: u32) -> Result<()> {
         self.probes
             .pid_maps_info_map
             .delete(pid, &vec![Prefix::dummy()])?;
         if let Some(mut proc) = self.pids.remove(&pid) {
             proc.exit(&mut self.probes, &mut self.executables)?;
+        }
+
+        if let Some(mut int) = self.interpreters.remove(&pid) {
+            int.exit(&mut self.probes)?;
         }
 
         Ok(())
@@ -212,18 +241,40 @@ impl<'a> Profiler<'a> {
                 }
             };
 
-            let va = info.file_offset_to_virtual_address(map.offset).unwrap();
-            let exe = self
-                .executables
-                .get_or_insert(&mut self.probes, info, map)?
-                .unwrap();
+            let va = match info.file_offset_to_virtual_address(map.offset) {
+                Some(x) => x,
+                None => {
+                    if map.offset == 0 {
+                        map.start
+                    } else {
+                        log::warn!("executable program headers not found, skip it");
+                        continue;
+                    }
+                }
+            };
             let bias = map.start - va;
-            if self.enable_symbolizer {
-                let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
-                let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
-                self.symbolizer.add_file(info.file_id, object, bias);
-            } else {
-                self.symbolizer.bias_cache.insert(info.file_id, bias);
+            log::debug!("file bias: {:x?}", bias);
+            let exe = match self
+                .executables
+                .get_or_insert(&mut self.probes, info, map, bias)
+            {
+                Ok(Some(a)) => a,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::error!("failed to get executable: {e}");
+                    continue;
+                }
+            };
+
+            if !map.is_vdso() {
+                if self.enable_symbolizer {
+                    let mmap_ref = unsafe { memmap2::Mmap::map(&info.file)? };
+                    let object = object::File::parse(&*mmap_ref).expect("failed to parse elf file");
+                    self.symbolizer
+                        .add_parsed_file(info.file_id, object, map.file_path(pid));
+                } else {
+                    self.symbolizer.bias_cache.insert(info.file_id, bias);
+                }
             }
 
             // 计算该maps对应的
@@ -238,10 +289,24 @@ impl<'a> Profiler<'a> {
             };
             proc.add_maps_entry(info, &mut self.probes, exe_map)?;
 
-            if let Some(i_info) = &mut exe.i_info {
+            if let Some(tsd) = &exe.tsd_info {
+                proc.tsd_info = Some(tsd.clone());
+                self.interpreters.entry(proc.pid).and_modify(|x| {
+                    x.update_tsd_info(&self.probes, proc.pid(), tsd.clone())
+                        .unwrap();
+                });
+            }
+
+            if let Some(i_info) = &exe.i_info {
                 let mut instance = Interpreter::parse(i_info, proc, bias)?;
-                instance.sync_maps(&mut self.probes).unwrap();
-                self.interpreters.insert(proc.pid, instance);
+                if let Some(tsd) = &proc.tsd_info {
+                    instance.update_tsd_info(&self.probes, proc.pid(), tsd.clone())?;
+                }
+
+                if let Ok(mut instance) = Interpreter::parse(i_info, proc, bias) {
+                    instance.sync_maps(&mut self.probes).unwrap();
+                    self.interpreters.insert(proc.pid, instance);
+                }
             }
         }
         Ok(())
@@ -265,5 +330,32 @@ mod tests {
         assert!(prof.probes.pid_maps_info_map.is_empty());
         assert!(prof.probes.stack_delta_page_map.is_empty());
         assert!(prof.probes.stack_delta_map.is_empty());
+    }
+
+    #[test]
+    fn test_java_process_exit() {
+        let mut prof = Profiler::new();
+        prof.sync_process(1158).unwrap();
+        prof.process_exit(1158).unwrap();
+
+        assert!(prof.pids.is_empty());
+        assert!(prof.executables.executables.is_empty());
+        assert!(prof.interpreters.is_empty());
+
+        assert!(prof.probes.pid_maps_info_map.is_empty());
+        assert!(prof.probes.stack_delta_page_map.is_empty());
+        assert!(prof.probes.stack_delta_map.is_empty());
+
+        // test eBPF map of java
+        assert!(prof.interpreters.is_empty());
+        assert!(prof.probes.pid_maps_info_map.is_empty());
+        assert!(prof
+            .probes
+            .hotspot_skel
+            .maps()
+            .hotspot_procs()
+            .keys()
+            .next()
+            .is_none());
     }
 }

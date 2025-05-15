@@ -540,11 +540,11 @@ typedef struct Trace {
   // The process ID
   u32 pid;
   // Monotonic kernel time in nanosecond precision.
-#if 0
+#if 1
   u64 ktime;
+#endif
   // The current COMM of the thread of this Trace.
   unsigned char comm[COMM_LEN];
-#endif
 #ifdef HAS_APM
   // APM transaction ID or all-zero if not present.
   ApmSpanID apm_transaction_id;
@@ -850,7 +850,7 @@ void decode_bias_and_unwind_program(u64 bias_and_unwind_program, u64* bias, int*
 // Smallest stack delta bucket that holds up to 2^8 entries
 #define STACK_DELTA_BUCKET_SMALLEST 8
 // Largest stack delta bucket that holds up to 2^21 entries
-#define STACK_DELTA_BUCKET_LARGEST 21
+#define STACK_DELTA_BUCKET_LARGEST 22
 
 // Struct of the `system_config` map. Contains various configuration variables
 // determined and set by the host agent.
