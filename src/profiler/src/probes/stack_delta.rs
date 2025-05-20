@@ -131,17 +131,15 @@ impl StackDeltaMap {
     pub fn update(&self, file_id: FileId64, deltas: Vec<StackDelta>) -> Result<u32> {
         let map_id = get_map_id(deltas.len() as u32)?;
 
-        let inner = self
-            .create_inner_map(map_id)
-            .expect("failed to create inner map");
+        let inner = self.create_inner_map(map_id)?;
         let outer = self.outer_map(map_id);
 
         if self.batch {
-            update_batch_inner_map(&inner, deltas);
+            update_batch_inner_map(&inner, deltas)?;
         } else {
-            update_inner_map(&inner, deltas).expect("failed to update inner map");
+            update_inner_map(&inner, deltas)?;
         }
-        update_outer_map(outer, file_id, &inner).expect("failed to update outer map");
+        update_outer_map(outer, file_id, &inner)?;
 
         Ok(map_id)
     }
@@ -194,7 +192,7 @@ fn update_inner_map(inner: &MapHandle, deltas: Vec<StackDelta>) -> Result<()> {
     Ok(())
 }
 
-fn update_batch_inner_map(inner: &MapHandle, deltas: Vec<StackDelta>) {
+fn update_batch_inner_map(inner: &MapHandle, deltas: Vec<StackDelta>) -> Result<()> {
     let mut batch_key = Vec::with_capacity(deltas.len() * 4);
     let mut batch_val: Vec<u8> = Vec::with_capacity(deltas.len() * deltas[0].raw_size());
 
@@ -203,15 +201,14 @@ fn update_batch_inner_map(inner: &MapHandle, deltas: Vec<StackDelta>) {
         batch_key.extend(idx.to_ne_bytes());
         batch_val.extend(delta.slice());
     }
-    inner
-        .update_batch(
-            &batch_key,
-            &batch_val,
-            deltas.len() as u32,
-            MapFlags::ANY,
-            MapFlags::ANY,
-        )
-        .expect("failed to update inner map")
+    inner.update_batch(
+        &batch_key,
+        &batch_val,
+        deltas.len() as u32,
+        MapFlags::ANY,
+        MapFlags::ANY,
+    )?;
+    Ok(())
 }
 
 pub fn create_inner_map(map_id: u32) -> Result<MapHandle> {
