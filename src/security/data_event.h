@@ -24,10 +24,9 @@ __do_bytes(void *ctx, struct msg_data *msg, unsigned long uptr, size_t bytes)
   a:
   // < 5.3 verifier still requires value masking like 'val &= xxx'
 #ifndef __LARGE_BPF_PROG
-  asm volatile("%[bytes] &= 0x3fff;\n"
-    :
-    : [bytes] "+r"(bytes)
-  :);
+  asm volatile goto("if %[bytes] < 0x3fff goto %l[c]\n;" : : [bytes] "+r"(bytes)::c);
+  bytes = 0x3fff;
+  c:
 #endif
   err = bpf_probe_read(&msg->arg[0], bytes, (char *)uptr);
   if (err < 0)
@@ -177,7 +176,7 @@ FUNC_INLINE size_t data_event(
   } else {
     desc->error = 0;
     desc->pad = 0;
-    desc->leftover = size == -1 ? 0 : size - err;
+    desc->leftover = size == (size_t)-1 ? 0 : size - err;
     desc->size = err;
   }
   return sizeof(*desc);
