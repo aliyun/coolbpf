@@ -17,10 +17,12 @@ use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
 use crate::utils::time::init_tstamp;
 use crate::utils::time::time_delta;
+use crate::utils::process::get_comm_by_pid;
 use crate::MIN_PROCESS_SAMPLES;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
+
 
 pub struct Profiler<'a> {
     pids: HashMap<u32, Process>,
@@ -261,7 +263,7 @@ impl<'a> Profiler<'a> {
                 Ok(Some(a)) => a,
                 Ok(None) => continue,
                 Err(e) => {
-                    log::error!("failed to get executable: {e}");
+                    log::error!("failed to get executable for comm {}: {:?}, err: {e}", get_comm_by_pid(pid), map);
                     continue;
                 }
             };
