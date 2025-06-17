@@ -1,6 +1,7 @@
 #include "vmlinux.h"
 #include "../coolbpf.h"
 #include "../net.h"
+#include "../ebpf_log.h"
 
 #define AF_UNIX 1
 #define AF_INET 2   /* Internet IP Protocol 	*/
@@ -238,24 +239,24 @@ static __always_inline bool match_container_id(struct connect_info_t* conn_info)
   u32 index = ContainerIdIndex;
   int64_t *cid_prefix_length = bpf_map_lookup_elem(&config_tgid_map, &index);
   if (cid_prefix_length == NULL) {
-    bpf_printk("cid_prefix_length null! pid:%u\n", conn_info->conn_id.tgid);
+    BPF_DEBUG("cid_prefix_length null! pid:%u\n", conn_info->conn_id.tgid);
     return true;
   }
 
   u32 trim_len = *cid_prefix_length;
   if (trim_len <= 0 || trim_len > KN_NAME_LENGTH) {
-    bpf_printk("trim_len invalid! pid:%u trim_len:%u\n", conn_info->conn_id.tgid, trim_len);
+    BPF_DEBUG("trim_len invalid! pid:%u trim_len:%u\n", conn_info->conn_id.tgid, trim_len);
     return false;
   }
 
   if (conn_info->docker_id_length == 0) {
-    bpf_printk("dockerid length is zero! pid:%u docker_id_length:%u\n", conn_info->conn_id.tgid, conn_info->docker_id_length);
+    BPF_DEBUG("dockerid length is zero! pid:%u docker_id_length:%u\n", conn_info->conn_id.tgid, conn_info->docker_id_length);
     return false;
   }
   int length = conn_info->docker_id_length >= KN_NAME_LENGTH? KN_NAME_LENGTH : conn_info->docker_id_length;
   int real_length = length - trim_len;
   if (real_length <=0 ) {
-    bpf_printk("reallen invalid! pid:%u real_length:%u\n", conn_info->conn_id.tgid, real_length);
+    BPF_DEBUG("reallen invalid! pid:%u real_length:%u\n", conn_info->conn_id.tgid, real_length);
     return false;
   }
   if (real_length >= CONTAINER_ID_MAX_LENGTH) real_length = CONTAINER_ID_MAX_LENGTH;
@@ -265,16 +266,16 @@ static __always_inline bool match_container_id(struct connect_info_t* conn_info)
   struct container_id_key* prefix = bpf_map_lookup_elem(&container_id_heap, &zero);
   if (!prefix) return false;
   __builtin_memset(prefix, 0, sizeof(struct container_id_key));
-  bpf_printk("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, real_length);
+  BPF_DEBUG("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, real_length);
   bpf_probe_read(prefix->data, real_length, conn_info->docker_id + trim_len);
   prefix->prefixlen = real_length << 3;
   __u8* ppass = bpf_map_lookup_elem(&enable_container_ids, prefix);
   if (ppass) {
-    bpf_printk("bingo! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
+    BPF_DEBUG("bingo! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
     // in whitelist
     return true;
   }
-  bpf_printk("blacklist! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
+  BPF_DEBUG("blacklist! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
   return false;
 }
 
@@ -348,7 +349,7 @@ static __always_inline __u32 __event_get_current_cgroup_name(struct cgroup *cgrp
   if (!name) return EVENT_ERROR_CGROUP_NAME;
 
   int ret = bpf_probe_read_str(conn_info->docker_id, KN_NAME_LENGTH, name);
-  bpf_printk("pid:%u docker_id:%s ret:%u \n", conn_info->conn_id.tgid, conn_info->docker_id, ret);
+  BPF_DEBUG("pid:%u docker_id:%s ret:%u \n", conn_info->conn_id.tgid, conn_info->docker_id, ret);
   conn_info->docker_id_length = ret;
 
   return name ? 0 : EVENT_ERROR_CGROUP_NAME;

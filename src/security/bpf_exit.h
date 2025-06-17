@@ -15,6 +15,7 @@
 #include "bpf_rate.h"
 #include "process.h"
 #include "bpf_process_event.h"
+#include "../ebpf_log.h"
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -38,7 +39,7 @@ FUNC_INLINE void event_exit_send(void *ctx, __u32 tgid)
   enter = execve_map_get_noinit(tgid);
   if (!enter)
     return;
-  bpf_printk("[kprobe][event_exit_send] pid:%u already enter.", tgid);
+  BPF_DEBUG("[kprobe][event_exit_send] pid:%u already enter.", tgid);
   if (enter->key.ktime) {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     size_t size = sizeof(struct msg_exit);
@@ -76,9 +77,9 @@ FUNC_INLINE void event_exit_send(void *ctx, __u32 tgid)
 
     __event_get_cgroup_info(task, &kube);
 
-    bpf_printk("[kprobe][event_exit_send] pid:%u prepare to send event.", tgid);
+    BPF_DEBUG("[kprobe][event_exit_send] pid:%u prepare to send event.", tgid);
     if (cgroup_rate(ctx, &kube, exit->common.ktime)) {
-      bpf_printk("[kprobe][event_exit_send] pid:%u send event.", tgid);
+      BPF_DEBUG("[kprobe][event_exit_send] pid:%u send event.", tgid);
       perf_event_output_metric(ctx, MSG_OP_EXIT, &tcpmon_map,
                                BPF_F_CURRENT_CPU, exit, size);
     }

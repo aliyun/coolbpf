@@ -12,6 +12,7 @@
 #include "string_maps.h"
 #include "bpf_exit.h"
 #include "tailcall_stack.h"
+#include "../ebpf_log.h"
 
 BPF_PERCPU_ARRAY(sock_secure_data_heap, struct tcp_data_t, 1);
 BPF_PERCPU_ARRAY(tailcall_stack, struct secure_tailcall_stack, 1);
@@ -41,10 +42,10 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_sendmsg] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   // define event
   __u32 zero = 0;
@@ -91,9 +92,9 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
   stack->tcp_data.bytes = size;
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, daddr:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, daddr:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.daddr, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, sport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, sport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.sport, data->state);
 
 
@@ -109,10 +110,10 @@ int BPF_KPROBE(kprobe_tcp_close, struct sock *sk)
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_close] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_close] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   __u32 zero = 0;
   struct tcp_data_t* data = NULL;
@@ -155,9 +156,9 @@ int BPF_KPROBE(kprobe_tcp_close, struct sock *sk)
   stack->tcp_data.family = BPF_CORE_READ(sk, __sk_common.skc_family);
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, sport:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, sport:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.sport, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, dport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, dport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.dport, data->state);
 
 
@@ -172,10 +173,10 @@ int BPF_KPROBE(kprobe_tcp_connect, struct sock *sk) {
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_connect] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_connect] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   __u32 zero = 0;
   struct tcp_data_t* data = NULL;
@@ -220,9 +221,9 @@ int BPF_KPROBE(kprobe_tcp_connect, struct sock *sk) {
   stack->tcp_data.family = BPF_CORE_READ(sk, __sk_common.skc_family);
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, sport:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, sport:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.sport, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, dport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, dport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.dport, data->state);
 
 

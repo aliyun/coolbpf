@@ -17,6 +17,7 @@
 #include "bpf_exit.h"
 #include "tailcall_stack.h"
 //#include "bpf_execve.h"
+#include "../ebpf_log.h"
 
 BPF_ARRAY(cidr_filter_list, struct cidr_entry, SYSAK_SECURE_MAX_CIDR_LIMIT);
 BPF_ARRAY(port_filter_list, struct port_entry, SYSAK_SECURE_MAX_PORT_LIMIT);
@@ -98,7 +99,7 @@ read_args(void *ctx, struct msg_execve_event *event)
   off = bpf_probe_read_str(&heap->maxpath, 4096, (char *)start_stack);
   if (off < 0)
     return 0;
-  bpf_printk("[read_args] pid:%llu, args:%s", p->pid, heap->maxpath);
+  BPF_DEBUG("[read_args] pid:%llu, args:%s", p->pid, heap->maxpath);
 
   start_stack += off;
 
@@ -143,7 +144,7 @@ read_path(void *ctx, struct msg_execve_event *event, void *filename)
   earg = (void *)p + offsetof(struct msg_process, args);
 
   size = bpf_probe_read_str(earg, MAXARGLENGTH - 1, filename);
-  bpf_printk("[read_path] pid:%llu, path:%s", p->pid, earg);
+  BPF_DEBUG("[read_path] pid:%llu, path:%s", p->pid, earg);
   if (size < 0) {
     flags |= EVENT_ERROR_FILENAME;
     size = 0;
@@ -219,7 +220,7 @@ SEC("kprobe/wake_up_new_task")
 int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
 {
   __u32 cpid = bpf_get_current_pid_tgid() >> 32;
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u enter~", cpid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u enter~", cpid);
   struct execve_map_value *curr, *parent;
   struct msg_clone_event msg;
   struct msg_capabilities caps;
@@ -231,7 +232,7 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
     return 0;
 
   tgid = BPF_CORE_READ(task, tgid);
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u read tgid:%u ~", cpid, tgid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u read tgid:%u ~", cpid, tgid);
 
   /* Do not try to create any msg or calling execve_map_get
    * (that will add a new process in the execve_map) if we
@@ -240,18 +241,18 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
   parent = __event_find_parent(task);
   if (!parent)
     return 0;
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u tgid:%u has parent.", cpid, tgid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u has parent.", cpid, tgid);
   curr = execve_map_get(tgid);
   if (!curr)
     return 0;
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u tgid:%u new event in execve_map.", cpid, tgid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u new event in execve_map.", cpid, tgid);
   /* Generate an EVENT_COMMON_FLAG_CLONE event once per process,
    * that is, thread group.
    */
   if (curr->key.ktime != 0)
     return 0;
 
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin init event.", cpid, tgid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin init event.", cpid, tgid);
   /* Setup the execve_map entry. */
   curr->flags = EVENT_COMMON_FLAG_CLONE;
   curr->key.pid = tgid;
@@ -288,10 +289,10 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
 
   __event_get_cgroup_info(task, &kube);
 
-  bpf_printk("[kprobe][event_wake_up_new_task] pid:%u tgid:%u init event done.", cpid, tgid);
+  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u init event done.", cpid, tgid);
 
   if (cgroup_rate(ctx, &kube, msg.ktime)) {
-    bpf_printk("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin submit clone event.", cpid, tgid);
+    BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin submit clone event.", cpid, tgid);
     perf_event_output_metric(ctx, MSG_OP_CLONE, &tcpmon_map,
                              BPF_F_CURRENT_CPU, &msg, msg_size);
   }
@@ -343,7 +344,7 @@ int event_execve(struct trace_event_raw_sched_process_exec *ctx)
   p->size += read_path(ctx, event, filename);
   p->size += read_args(ctx, event);
   p->size += read_cwd(ctx, p);
-  bpf_printk("[event_execve] enter pid:%llu, filename:%s", p->pid, filename);
+  BPF_DEBUG("[event_execve] enter pid:%llu, filename:%s", p->pid, filename);
 
   event->common.op = MSG_OP_EXECVE;
   event->common.ktime = p->ktime;
@@ -387,7 +388,7 @@ int execve_rate(void *ctx)
 SEC("tracepoint/1")
 int execve_send(void *ctx)
 {
-  bpf_printk("[execve_send] enter ~");
+  BPF_DEBUG("[execve_send] enter ~");
   struct msg_execve_event *event;
   struct execve_map_value *curr;
   struct msg_process *p;
@@ -472,9 +473,9 @@ int execve_send(void *ctx)
     sizeof(struct msg_execve_key) + sizeof(__u64) +
     sizeof(struct msg_cred) + sizeof(struct msg_ns) +
     sizeof(struct msg_execve_key) + p->size);
-//  bpf_printk("[execve_send] before perf output ~");
+//  BPF_DEBUG("[execve_send] before perf output ~");
   perf_event_output_metric(ctx, MSG_OP_EXECVE, &tcpmon_map, BPF_F_CURRENT_CPU, event, size);
-//  bpf_printk("[execve_send] after perf output ~");
+//  BPF_DEBUG("[execve_send] after perf output ~");
   return 0;
 }
 
@@ -489,9 +490,9 @@ int event_exit_acct_process(struct pt_regs *ctx)
 {
   __u64 pid_tgid = bpf_get_current_pid_tgid();
   __u32 pid = pid_tgid >> 32;
-  bpf_printk("[kprobe][event_exit_acct_process] pid:%u enter~", pid);
+  BPF_DEBUG("[kprobe][event_exit_acct_process] pid:%u enter~", pid);
   event_exit_send(ctx, pid_tgid >> 32);
-  bpf_printk("[kprobe][event_exit_acct_process] pid:%u send done ~", pid);
+  BPF_DEBUG("[kprobe][event_exit_acct_process] pid:%u send done ~", pid);
   return 0;
 }
 
@@ -510,7 +511,7 @@ int event_exit_disassociate_ctty(struct pt_regs *ctx)
 {
   int on_exit = (int)PT_REGS_PARM1_CORE(ctx);
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
-  bpf_printk("[kprobe][event_exit_disassociate_ctty] pid:%u enter~", pid);
+  BPF_DEBUG("[kprobe][event_exit_disassociate_ctty] pid:%u enter~", pid);
 
   if (on_exit)
     event_exit_send(ctx, pid);
@@ -576,11 +577,11 @@ int port_filter(__u16 port, int direction) {
       break;
     }
     blacklist = entry->black;
-    bpf_printk("[kprobe][port_filter] black:%u, port:%u, income_port:%u", entry->black, entry->port, port);
+    BPF_DEBUG("[kprobe][port_filter] black:%u, port:%u, income_port:%u", entry->black, entry->port, port);
     if (port == entry->port) {
       if (blacklist == 1) {
         // blacklist
-        bpf_printk("[kprobe][port_filter] filtered by blacklist port, port:%u : disabled.",
+        BPF_DEBUG("[kprobe][port_filter] filtered by blacklist port, port:%u : disabled.",
                    port);
         return 1;
       } else if (blacklist == 0) {
@@ -596,7 +597,7 @@ int port_filter(__u16 port, int direction) {
   if (blacklist == 1) return 0;
   if (blacklist == 0) {
     // whitelist
-    bpf_printk("[kprobe][port_filter] filtered by whitelist port, port:%u . disabled.", port);
+    BPF_DEBUG("[kprobe][port_filter] filtered by whitelist port, port:%u . disabled.", port);
     return 1;
   }
 
@@ -624,12 +625,12 @@ int addr_filter(__u32 addr, int direction) {
     int tmp = start + key;
     struct cidr_entry *entry = bpf_map_lookup_elem(&cidr_filter_list, &tmp);
     if (!entry || entry->inited == 0) break;
-    bpf_printk("[kprobe][addr_filter] black:%u, net:%u, mask:%u", entry->black, entry->net, entry->mask);
+    BPF_DEBUG("[kprobe][addr_filter] black:%u, net:%u, mask:%u", entry->black, entry->net, entry->mask);
     blacklist = entry->black;
     if (cidr_match(addr, entry->net, entry->mask)) {
       if (blacklist == 1) {
         // bingo black list
-        bpf_printk("[kprobe][addr_filter] filtered by blacklist cidr, ip:%u net:%u mask:%u: disabled.",
+        BPF_DEBUG("[kprobe][addr_filter] filtered by blacklist cidr, ip:%u net:%u mask:%u: disabled.",
                    addr, entry->net, entry->mask);
         return 1;
       } else if (blacklist == 0) {
@@ -643,7 +644,7 @@ int addr_filter(__u32 addr, int direction) {
   if (blacklist == 1) return 0;
   if (blacklist == 0) {
     // whitelist
-    bpf_printk("[kprobe][addr_filter] filtered by white cidr, ip:%u disabled.",
+    BPF_DEBUG("[kprobe][addr_filter] filtered by white cidr, ip:%u disabled.",
                addr);
     return 1;
   }
@@ -664,10 +665,10 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_sendmsg] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   // define event
   __u32 zero = 0;
@@ -714,9 +715,9 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
   stack->tcp_data.bytes = size;
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, daddr:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] saddr:%u, daddr:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.daddr, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, sport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg][dump] daddr:%u, sport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.sport, data->state);
 
 
@@ -728,12 +729,12 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t s
   // sp = port_filter(data->sport, 0);
   // dp = port_filter(data->dport, 1);
   // if (sf || df || sp || dp) {
-  //   bpf_printk("[kprobe][kprobe_tcp_sendmsg] skip submit because of filters.");
+  //   BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] skip submit because of filters.");
   //   return 0;
   // }
 
   // bpf_perf_event_output(ctx, &sock_secure_output, BPF_F_CURRENT_CPU, data, sizeof(struct tcp_data_t));
-  // bpf_printk("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
+  // BPF_DEBUG("[kprobe][kprobe_tcp_sendmsg] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
   return 0;
 }
 
@@ -745,10 +746,10 @@ int BPF_KPROBE(kprobe_tcp_close, struct sock *sk)
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_close] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_close] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   __u32 zero = 0;
   struct tcp_data_t* data = NULL;
@@ -791,9 +792,9 @@ int BPF_KPROBE(kprobe_tcp_close, struct sock *sk)
   stack->tcp_data.family = BPF_CORE_READ(sk, __sk_common.skc_family);
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
-  bpf_printk("[kprobe][kprobe_tcp_close][dump] saddr:%u, daddr:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_close][dump] saddr:%u, daddr:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.daddr, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_close][dump] daddr:%u, sport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_close][dump] daddr:%u, sport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.sport, data->state);
 
 
@@ -806,13 +807,13 @@ int BPF_KPROBE(kprobe_tcp_close, struct sock *sk)
 //   sp = port_filter(data->sport, 0);
 //   dp = port_filter(data->dport, 1);
 //   if (sf || df || sp || dp) {
-//     bpf_printk("[kprobe][kprobe_tcp_close] skip submit because of filters.");
+//     BPF_DEBUG("[kprobe][kprobe_tcp_close] skip submit because of filters.");
 //     return 0;
 //   }
 
-// //  bpf_printk("Packet matched CIDR: %x/%x/%u/%u\n", entry->net, entry->mask, entry->enable, entry->src);
+// //  BPF_DEBUG("Packet matched CIDR: %x/%x/%u/%u\n", entry->net, entry->mask, entry->enable, entry->src);
 //   bpf_perf_event_output(ctx, &sock_secure_output, BPF_F_CURRENT_CPU, data, sizeof(struct tcp_data_t));
-//   bpf_printk("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
+//   BPF_DEBUG("[kprobe][kprobe_tcp_close] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
   return 0;
 }
 
@@ -823,10 +824,10 @@ int BPF_KPROBE(kprobe_tcp_connect, struct sock *sk) {
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0) {
-    bpf_printk("[kprobe][kprobe_tcp_connect] pid:%u never enter. skip collect", pid);
+    BPF_DEBUG("[kprobe][kprobe_tcp_connect] pid:%u never enter. skip collect", pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
 
   __u32 zero = 0;
   struct tcp_data_t* data = NULL;
@@ -885,9 +886,9 @@ int BPF_KPROBE(kprobe_tcp_connect, struct sock *sk) {
   stack->tcp_data.family = BPF_CORE_READ(sk, __sk_common.skc_family);
   stack->tcp_data.net_ns = get_netns(sk);
   stack->tcp_data.protocol = bpf_core_sock_sk_protocol_ak(sk);
-  bpf_printk("[kprobe][kprobe_tcp_connect][dump] saddr:%u, daddr:%u, family:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_connect][dump] saddr:%u, daddr:%u, family:%u",
              stack->tcp_data.saddr, stack->tcp_data.daddr, data->family);
-  bpf_printk("[kprobe][kprobe_tcp_connect][dump] daddr:%u, sport:%u, state:%u",
+  BPF_DEBUG("[kprobe][kprobe_tcp_connect][dump] daddr:%u, sport:%u, state:%u",
              stack->tcp_data.daddr, stack->tcp_data.sport, data->state);
 
   bpf_tail_call(ctx, &secure_tailcall_map, TAILCALL_FILTER_PROG);
@@ -899,13 +900,13 @@ int BPF_KPROBE(kprobe_tcp_connect, struct sock *sk) {
 //   sp = port_filter(data->sport, 0);
 //   dp = port_filter(data->dport, 1);
 //   if (sf || df || sp || dp) {
-//     bpf_printk("[kprobe][kprobe_tcp_connect] skip submit because of filters.");
+//     BPF_DEBUG("[kprobe][kprobe_tcp_connect] skip submit because of filters.");
 //     return 0;
 //   }
 
-// //  bpf_printk("Packet matched CIDR: %x/%x/%u/%u\n", entry->net, entry->mask, entry->enable, entry->src);
+// //  BPF_DEBUG("Packet matched CIDR: %x/%x/%u/%u\n", entry->net, entry->mask, entry->enable, entry->src);
 //   bpf_perf_event_output(ctx, &sock_secure_output, BPF_F_CURRENT_CPU, data, sizeof(struct tcp_data_t));
-//   bpf_printk("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
+//   BPF_DEBUG("[kprobe][kprobe_tcp_connect] pid:%u ktime:%llu send to perfbuffer.", pid, enter->key.ktime);
   return 0;
 }
 
@@ -982,7 +983,7 @@ void write_ipv6_addr32(u32 *dest, u32 *src)
 
 SEC("kprobe/tailcall_prog") 
 int filter_prog(struct pt_regs *ctx) {
-  bpf_printk("[secure][tailcall] enter filter_prog");
+  BPF_DEBUG("[secure][tailcall] enter filter_prog");
   __u32 zero = 0;
   struct secure_tailcall_stack *stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
   if (!stack)
@@ -1006,26 +1007,25 @@ int filter_prog(struct pt_regs *ctx) {
   for (; i < MAX_FILTER_FOR_PER_CALLNAME; i ++) {
     int idx = i;
     struct selector_filter filter = filters->filters[idx];
-    if (filter.filter_type != FILTER_TYPE_UNKNOWN) {
-      bpf_printk("get file prefix filter, callname idx:%u type:%u, map index:%u", call_name_idx, filter.filter_type, filter.map_idx[0]);
-      // bpf_printk("get file prefix filter, vallen:%u, plus 8:%u", filter.vallen, filter.vallen << 3);
-    }
+    // if (filter.filter_type != FILTER_TYPE_UNKNOWN) {
+    //   BPF_DEBUG("get file prefix filter, callname idx:%u type:%u, map index:%u", call_name_idx, filter.filter_type, filter.map_idx[0]);
+    //   // BPF_DEBUG("get file prefix filter, vallen:%u, plus 8:%u", filter.vallen, filter.vallen << 3);
+    // }
     struct addr4_lpm_trie arg4;
-    struct addr6_lpm_trie arg6;
+    // struct addr6_lpm_trie arg6;
     switch(filter.filter_type) {
     case FILTER_TYPE_SADDR: {
       uint32_t saddr = stack->tcp_data.saddr;
-      
       struct bpf_map* inner_map4 = NULL;
-      struct bpf_map* inner_map6 = NULL;
+      // struct bpf_map* inner_map6 = NULL;
       if (filter.map_idx[0] != -1) {
         inner_map4 = bpf_map_lookup_elem(&addr4lpm_maps, &filter.map_idx[0]);
       }
-      if (filter.map_idx[1] != -1) {
-        inner_map6 = bpf_map_lookup_elem(&addr6lpm_maps, &filter.map_idx[1]);
-      }
+      // if (filter.map_idx[1] != -1) {
+      //   inner_map6 = bpf_map_lookup_elem(&addr6lpm_maps, &filter.map_idx[1]);
+      // }
       if (inner_map4 == NULL) {
-        bpf_printk("there is something wrong with the lpm maps... callname idx:%u cannot find inner map for saddr, continue ... ", call_name_idx);
+        BPF_DEBUG("there is something wrong with the lpm maps... callname idx:%u cannot find inner map for saddr, continue ... ", call_name_idx);
         continue;
       }
       arg4.addr = saddr;
@@ -1040,13 +1040,13 @@ int filter_prog(struct pt_regs *ctx) {
       if (filter.op_type == OP_TYPE_IN) {
         // not in white list
         if (ppass4 == NULL) {
-          bpf_printk("callname idx:%u arg4 saddr:%u, prefix:%u not in whitelist", call_name_idx, arg4.addr, arg4.prefix);
+          BPF_DEBUG("callname idx:%u arg4 saddr:%u, prefix:%u not in whitelist", call_name_idx, arg4.addr, arg4.prefix);
           return 0;
         }
       } else if (filter.op_type == OP_TYPE_NOT_IN) {
         // or in black list
         if (ppass4 != NULL) {
-          bpf_printk("callname idx:%u arg4 saddr:%u, prefix:%u in blacklist", call_name_idx, arg4.addr, arg4.prefix);
+          BPF_DEBUG("callname idx:%u arg4 saddr:%u, prefix:%u in blacklist", call_name_idx, arg4.addr, arg4.prefix);
           return 0;
         }
       }
@@ -1058,7 +1058,7 @@ int filter_prog(struct pt_regs *ctx) {
       arg4.prefix = 32;
       struct bpf_map* inner_map = bpf_map_lookup_elem(&addr4lpm_maps, &filter.map_idx[0]);
       if (inner_map == NULL) {
-        bpf_printk("callname idx:%u cannot find inner map for daddr, continue ... ", call_name_idx);
+        BPF_DEBUG("callname idx:%u cannot find inner map for daddr, continue ... ", call_name_idx);
         continue;
       }
       __u8* ppass = NULL;
@@ -1066,12 +1066,12 @@ int filter_prog(struct pt_regs *ctx) {
       if (filter.op_type == OP_TYPE_IN) {
         // not in white list
         if (ppass == NULL) {
-          bpf_printk("callname idx:%u arg4 daddr:%u, prefix:%u not in whitelist", call_name_idx, arg4.addr, arg4.prefix);
+          BPF_DEBUG("callname idx:%u arg4 daddr:%u, prefix:%u not in whitelist", call_name_idx, arg4.addr, arg4.prefix);
           return 0;
         }
       } else if (filter.op_type == OP_TYPE_NOT_IN) {
         // or in black list
-        bpf_printk("callname idx:%u arg4 daddr:%u, prefix:%u in blacklist", call_name_idx, arg4.addr, arg4.prefix);
+        BPF_DEBUG("callname idx:%u arg4 daddr:%u, prefix:%u in blacklist", call_name_idx, arg4.addr, arg4.prefix);
         if (ppass != NULL) return 0;
       }
 
@@ -1081,7 +1081,7 @@ int filter_prog(struct pt_regs *ctx) {
       uint32_t sport = stack->tcp_data.sport;
       struct bpf_map* inner_map = bpf_map_lookup_elem(&port_maps, &filter.map_idx[0]);
       if (inner_map == NULL) {
-        bpf_printk("callname idx:%u cannot find inner map for sport, continue ... ", call_name_idx);
+        BPF_DEBUG("callname idx:%u cannot find inner map for sport, continue ... ", call_name_idx);
         continue;
       }
       __u8* ppass = NULL;
@@ -1089,13 +1089,13 @@ int filter_prog(struct pt_regs *ctx) {
       if (filter.op_type == OP_TYPE_IN) {
         // not in white list
         if (ppass == NULL) {
-          bpf_printk("callname idx:%u arg4 sport:%u not in whitelist", call_name_idx, sport);
+          BPF_DEBUG("callname idx:%u arg4 sport:%u not in whitelist", call_name_idx, sport);
           return 0;
         }
       } else if (filter.op_type == OP_TYPE_NOT_IN) {
         // or in black list
         if (ppass != NULL) {
-          bpf_printk("callname idx:%u arg4 sport:%u in blacklist", call_name_idx, sport);
+          BPF_DEBUG("callname idx:%u arg4 sport:%u in blacklist", call_name_idx, sport);
           return 0;
         }
       }
@@ -1104,7 +1104,7 @@ int filter_prog(struct pt_regs *ctx) {
       uint32_t dport = stack->tcp_data.dport;
       struct bpf_map* inner_map = bpf_map_lookup_elem(&port_maps, &filter.map_idx[0]);
       if (inner_map == NULL) {
-        bpf_printk("callname idx:%u cannot find inner map for dport, continue ... ", call_name_idx);
+        BPF_DEBUG("callname idx:%u cannot find inner map for dport, continue ... ", call_name_idx);
         continue;
       }
       __u8* ppass = NULL;
@@ -1112,64 +1112,47 @@ int filter_prog(struct pt_regs *ctx) {
       if (filter.op_type == OP_TYPE_IN) {
         // not in white list
         if (ppass == NULL) {
-          bpf_printk("callname idx:%u arg4 dport:%u not in whitelist", call_name_idx, dport);
+          BPF_DEBUG("callname idx:%u arg4 dport:%u not in whitelist", call_name_idx, dport);
           return 0;
         }
       } else if (filter.op_type == OP_TYPE_NOT_IN) {
         // or in black list
         if (ppass != NULL) {
-          bpf_printk("callname idx:%u arg4 dport:%u in blacklist", call_name_idx, dport);
+          BPF_DEBUG("callname idx:%u arg4 dport:%u in blacklist", call_name_idx, dport);
           return 0;
         }
       }
       break;
     }
-    case FILTER_TYPE_FILE_PREFIX: {
-      struct string_prefix_lpm_trie *prefix = NULL;
-      int zero = 0;
-      prefix = bpf_map_lookup_elem(&string_prefix_maps_heap, &zero);
-      if (prefix == NULL) {
-        bpf_printk("[kprobe][tailcall] callname idx:%u cannot lookup string_prefix_maps_heap", call_name_idx);
-        break;
-      }
-      // to bits
+    // case FILTER_TYPE_FILE_PREFIX: {
+    //   struct string_prefix_lpm_trie *prefix = NULL;
+    //   int zero = 0;
+    //   prefix = bpf_map_lookup_elem(&string_prefix_maps_heap, &zero);
+    //   if (prefix == NULL) {
+    //     BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot lookup string_prefix_maps_heap", call_name_idx);
+    //     break;
+    //   }
+    //   __u32 path_size = 0;
+    //   bpf_probe_read(&path_size, 4, stack->file_data.path);
+    //   prefix->prefixlen = path_size * 8;
+    //   bpf_probe_read(prefix->data, path_size & (STRING_PREFIX_MAX_LENGTH - 1), stack->file_data.path + 4);
+    //   int path_len = *(int *)stack->file_data.path;
+    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path length:%d", call_name_idx, path_len);
+    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path+4:%s", call_name_idx, &stack->file_data.path[4]);
+    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. prefix path:%s, path size:%u", call_name_idx, prefix->data, path_size);
       
-      // struct file_data_t* data = bpf_map_lookup_elem(&file_secure_data_heap, &zero);
-      // if (data == NULL) break;
-      // bpf_probe_read(&data, sizeof(struct file_data_t), &stack->file_data);
-      __u32 path_size = 0;
-      bpf_probe_read(&path_size, 4, stack->file_data.path);
-      prefix->prefixlen = path_size * 8;
-      bpf_probe_read(prefix->data, path_size & (STRING_PREFIX_MAX_LENGTH - 1), stack->file_data.path + 4);
-      // bpf_probe_read(prefix->data, filter.vallen & (STRING_PREFIX_MAX_LENGTH - 1), stack->file_data.path + 4);
-      int path_len = *(int *)stack->file_data.path;
-      bpf_printk("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path length:%d", call_name_idx, path_len);
-      bpf_printk("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path+4:%s", call_name_idx, &stack->file_data.path[4]);
-      bpf_printk("[kprobe][tailcall] callname idx:%u begin to query inner map. prefix path:%s, path size:%u", call_name_idx, prefix->data, path_size);
-      
-      struct bpf_map* inner_map = bpf_map_lookup_elem(&string_prefix_maps, &filter.map_idx[0]);
-      __u8* ppass = NULL;
-      if (inner_map != NULL) {
-        ppass = bpf_map_lookup_elem(inner_map, prefix);
-        if (ppass == NULL || *ppass == 0) pass &= 0;
-        else pass &= 1;
-        // if (ppass != NULL) {
-        //   bpf_printk("[kprobe][tailcall] bingo~ query for inner map, path:%s, val:%u", prefix->data, (__u32)*ppass);
-        //   pass &= (__u32)(*ppass);
-        //   // TODO @sym @fs
-        //   bpf_tail_call(ctx, &secure_tailcall_map, TAILCALL_SEND);
-        //   return 0;
-        // }
-        // else {
-        //   pass &= 0;
-        //   bpf_printk("[kprobe][tailcall] query for inner map, got null val");
-        // }
-      } else {
-        // no filters were set ...
-        bpf_printk("[kprobe][tailcall] callname idx:%u cannot find inner map, no filter set, pass", call_name_idx);
-      }
-      break;
-    }
+    //   struct bpf_map* inner_map = bpf_map_lookup_elem(&string_prefix_maps, &filter.map_idx[0]);
+    //   __u8* ppass = NULL;
+    //   if (inner_map != NULL) {
+    //     ppass = bpf_map_lookup_elem(inner_map, prefix);
+    //     if (ppass == NULL || *ppass == 0) pass &= 0;
+    //     else pass &= 1;
+    //   } else {
+    //     // no filters were set ...
+    //     BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot find inner map, no filter set, pass", call_name_idx);
+    //   }
+    //   break;
+    // }
     default:
       break;
     }
@@ -1178,7 +1161,7 @@ int filter_prog(struct pt_regs *ctx) {
   if (pass) {
     bpf_tail_call(ctx, &secure_tailcall_map, TAILCALL_SEND);
   } else {
-    bpf_printk("[filter_prog] skip submit due to the filter");
+    BPF_DEBUG("[filter_prog] skip submit due to the filter");
   }
 
   return 0;
@@ -1187,7 +1170,7 @@ int filter_prog(struct pt_regs *ctx) {
 SEC("kprobe/secure_data_send")
 int secure_data_send(struct pt_regs *ctx)
 {
-  bpf_printk("[secure][tailcall] enter secure_data_send");
+  BPF_DEBUG("[secure][tailcall] enter secure_data_send");
   // the max tail call, just flush event
   __u32 zero = 0;
   struct secure_tailcall_stack *data = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -1202,26 +1185,26 @@ int secure_data_send(struct pt_regs *ctx)
   case SECURE_FUNC_TRACEPOINT_FUNC_SYS_WRITE:
   case SECURE_FUNC_TRACEPOINT_FUNC_SYS_READ:{
     bpf_perf_event_output(ctx, &file_secure_output, BPF_F_CURRENT_CPU, &data->file_data, sizeof(struct file_data_t));
-    bpf_printk("[kprobe][secure_data_send][file] pid:%u, ktime:%u, func:%d send to perfbuffer.\n", data->file_data.key.pid, data->file_data.key.ktime, data->func);
+    BPF_DEBUG("[kprobe][secure_data_send][file] pid:%u, ktime:%u, func:%d send to perfbuffer.\n", data->file_data.key.pid, data->file_data.key.ktime, data->func);
     break;
   }
   case SECURE_FUNC_TRACEPOINT_FUNC_TCP_CLOSE:
   case SECURE_FUNC_TRACEPOINT_FUNC_TCP_CONNECT:
   case SECURE_FUNC_TRACEPOINT_FUNC_TCP_SENDMSG:
     bpf_perf_event_output(ctx, &sock_secure_output, BPF_F_CURRENT_CPU, &data->tcp_data, sizeof(struct tcp_data_t));
-    bpf_printk("[kprobe][secure_data_send][socket] pid:%u, ktime:%u, func:%d send to perfbuffer.\n", data->file_data.key.pid, data->file_data.key.ktime, data->func);
+    BPF_DEBUG("[kprobe][secure_data_send][socket] pid:%u, ktime:%u, func:%d send to perfbuffer.\n", data->file_data.key.pid, data->file_data.key.ktime, data->func);
   default:
     break;
   }
   // bpf_perf_event_output(ctx, &file_secure_output, BPF_F_CURRENT_CPU, data, sizeof(struct secure_tailcall_stack));
-  // bpf_printk("[kprobe][kprobe_security_file_permission] pid:%u, ktime:%u send to perfbuffer.\n", data->key.pid, data->key.ktime);
+  // BPF_DEBUG("[kprobe][kprobe_security_file_permission] pid:%u, ktime:%u send to perfbuffer.\n", data->key.pid, data->key.ktime);
   return 0;
 }
 
 SEC("kprobe/security_file_permission")
 int kprobe_security_file_permission(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][kprobe_security_file_permission] enter security_file_permission.");
+  BPF_DEBUG("[kprobe][kprobe_security_file_permission] enter security_file_permission.");
   __u32 zero = 0;
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -1238,19 +1221,19 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   const u32 mode_prefix = 8 + path_len;
   short mode = -1;
   if (mode_prefix < 2000 && mode_prefix >= 0) bpf_probe_read(&mode, 2, stack->file_data.path + mode_prefix);
-  bpf_printk("[kprobe][tailcall][permission] before ~ stack path length:%d, ret:%lld, flag:%d", path_len, ret, flag);
-  bpf_printk("[kprobe][tailcall][permission] before ~ stack path+4:%s, mode:%d", &stack->file_data.path[4], mode);
+  BPF_DEBUG("[kprobe][tailcall][permission] before ~ stack path length:%d, ret:%lld, flag:%d", path_len, ret, flag);
+  BPF_DEBUG("[kprobe][tailcall][permission] before ~ stack path+4:%s, mode:%d", &stack->file_data.path[4], mode);
 
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0)
   {
-    bpf_printk("[kprobe][tailcall][permission] no init!!! return! stack path:%s, pid:%u", stack->file_data.path, pid);
-    bpf_printk("[kprobe][tailcall][permission] no init!!! return! stack path+4:%s, pid:%u", &stack->file_data.path[4], pid);
+    BPF_DEBUG("[kprobe][tailcall][permission] no init!!! return! stack path:%s, pid:%u", stack->file_data.path, pid);
+    BPF_DEBUG("[kprobe][tailcall][permission] no init!!! return! stack path+4:%s, pid:%u", &stack->file_data.path[4], pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_security_file_permission] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_security_file_permission] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   // __u32 zero = 0;
   // struct secure_tailcall_stack* stack = NULL;
   // stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -1272,7 +1255,7 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
 SEC("kprobe/security_mmap_file")
 int kprobe_security_mmap_file(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][security_mmap_file] enter security_mmap_file.");
+  BPF_DEBUG("[kprobe][security_mmap_file] enter security_mmap_file.");
   __u32 zero = 0;
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -1283,8 +1266,8 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
   path_arg = _(&file->f_path);
   long ret = copy_path(stack->file_data.path, path_arg);
   int path_len = *(int *)stack->file_data.path;
-  bpf_printk("[kprobe][tailcall][mmap] before ~ stack path length:%s, ret:%lld", path_len, ret);
-  bpf_printk("[kprobe][tailcall][mmap] before ~ stack path+4:%s", &stack->file_data.path[4]);
+  BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path length:%s, ret:%lld", path_len, ret);
+  BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path+4:%s", &stack->file_data.path[4]);
 
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
@@ -1293,7 +1276,7 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
   {
     return 0;
   }
-  bpf_printk("[kprobe][security_mmap_file] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][security_mmap_file] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   
   stack->func = SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_MMAP_FILE;
   stack->file_data.func = TRACEPOINT_FUNC_SECURITY_MMAP_FILE;
@@ -1308,7 +1291,7 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
 SEC("kprobe/security_path_truncate")
 int kprobe_security_path_truncate(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][security_path_truncate] enter security_path_truncate.");
+  BPF_DEBUG("[kprobe][security_path_truncate] enter security_path_truncate.");
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
@@ -1316,7 +1299,7 @@ int kprobe_security_path_truncate(struct pt_regs *ctx)
   {
     return 0;
   }
-  bpf_printk("[kprobe][security_path_truncate] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][security_path_truncate] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   __u32 zero = 0;  
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);

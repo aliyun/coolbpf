@@ -2643,7 +2643,7 @@ int parse_btf_map_def(const char *map_name, struct btf *btf,
 				return -EINVAL;
 			}
 
-			snprintf(inner_map_name, sizeof(inner_map_name), "%s.inner", map_name);
+			snprintf(inner_map_name, sizeof(inner_map_name), "%s_inner", map_name);
 			err = parse_btf_map_def(inner_map_name, btf, t, strict, inner_def, NULL);
 			if (err)
 				return err;
@@ -2871,10 +2871,10 @@ static int bpf_object__init_user_btf_map(struct bpf_object *obj,
 		if (map->inner_map->fd < 0)
 			return map->inner_map->fd;
 		map->inner_map->sec_idx = sec_idx;
-		map->inner_map->name = malloc(strlen(map_name) + sizeof(".inner") + 1);
+		map->inner_map->name = malloc(strlen(map_name) + sizeof("_inner") + 1);
 		if (!map->inner_map->name)
 			return -ENOMEM;
-		sprintf(map->inner_map->name, "%s.inner", map_name);
+		sprintf(map->inner_map->name, "%s_inner", map_name);
 
 		fill_map_from_def(map->inner_map, &inner_def);
 	}

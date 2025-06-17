@@ -12,6 +12,7 @@
 #include "string_maps.h"
 #include "bpf_exit.h"
 #include "tailcall_stack.h"
+#include "../ebpf_log.h"
 
 struct
 {
@@ -83,7 +84,7 @@ a:
 SEC("kprobe/security_file_permission")
 int kprobe_security_file_permission(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][kprobe_security_file_permission] enter security_file_permission.");
+  BPF_DEBUG("[kprobe][kprobe_security_file_permission] enter security_file_permission.");
   __u32 zero = 0;
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -100,19 +101,19 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   const u32 mode_prefix = 8 + path_len;
   short mode = -1;
   if (mode_prefix < 2000 && mode_prefix >= 0) bpf_probe_read(&mode, 2, stack->file_data.path + mode_prefix);
-  bpf_printk("[kprobe][tailcall][permission] before ~ stack path length:%d, ret:%lld, flag:%d", path_len, ret, flag);
-  bpf_printk("[kprobe][tailcall][permission] before ~ stack path+4:%s, mode:%d", &stack->file_data.path[4], mode);
+  BPF_DEBUG("[kprobe][tailcall][permission] before ~ stack path length:%d, ret:%lld, flag:%d", path_len, ret, flag);
+  BPF_DEBUG("[kprobe][tailcall][permission] before ~ stack path+4:%s, mode:%d", &stack->file_data.path[4], mode);
 
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
   if (!enter || enter->key.ktime == 0)
   {
-    bpf_printk("[kprobe][tailcall][permission] no init!!! return! stack path:%s, pid:%u", stack->file_data.path, pid);
-    bpf_printk("[kprobe][tailcall][permission] no init!!! return! stack path+4:%s, pid:%u", &stack->file_data.path[4], pid);
+    BPF_DEBUG("[kprobe][tailcall][permission] no init!!! return! stack path:%s, pid:%u", stack->file_data.path, pid);
+    BPF_DEBUG("[kprobe][tailcall][permission] no init!!! return! stack path+4:%s, pid:%u", &stack->file_data.path[4], pid);
     return 0;
   }
-  bpf_printk("[kprobe][kprobe_security_file_permission] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][kprobe_security_file_permission] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   stack->func = SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION;
   stack->file_data.func = TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION;
   stack->file_data.key = enter->key;
@@ -125,7 +126,7 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
 SEC("kprobe/security_mmap_file")
 int kprobe_security_mmap_file(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][security_mmap_file] enter security_mmap_file.");
+  BPF_DEBUG("[kprobe][security_mmap_file] enter security_mmap_file.");
   __u32 zero = 0;
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);
@@ -136,8 +137,8 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
   path_arg = _(&file->f_path);
   long ret = copy_path(stack->file_data.path, path_arg);
   int path_len = *(int *)stack->file_data.path;
-  bpf_printk("[kprobe][tailcall][mmap] before ~ stack path length:%s, ret:%lld", path_len, ret);
-  bpf_printk("[kprobe][tailcall][mmap] before ~ stack path+4:%s", &stack->file_data.path[4]);
+  BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path length:%s, ret:%lld", path_len, ret);
+  BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path+4:%s", &stack->file_data.path[4]);
 
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
@@ -146,7 +147,7 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
   {
     return 0;
   }
-  bpf_printk("[kprobe][security_mmap_file] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][security_mmap_file] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   
   stack->func = SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_MMAP_FILE;
   stack->file_data.func = TRACEPOINT_FUNC_SECURITY_MMAP_FILE;
@@ -161,7 +162,7 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
 SEC("kprobe/security_path_truncate")
 int kprobe_security_path_truncate(struct pt_regs *ctx)
 {
-  bpf_printk("[kprobe][security_path_truncate] enter security_path_truncate.");
+  BPF_DEBUG("[kprobe][security_path_truncate] enter security_path_truncate.");
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
   struct execve_map_value *enter;
   enter = execve_map_get_noinit(pid);
@@ -169,7 +170,7 @@ int kprobe_security_path_truncate(struct pt_regs *ctx)
   {
     return 0;
   }
-  bpf_printk("[kprobe][security_path_truncate] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
+  BPF_DEBUG("[kprobe][security_path_truncate] pid:%u ktime:%llu already enter.", pid, enter->key.ktime);
   __u32 zero = 0;  
   struct secure_tailcall_stack* stack = NULL;
   stack = bpf_map_lookup_elem(&tailcall_stack, &zero);

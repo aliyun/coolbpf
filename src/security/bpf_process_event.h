@@ -335,7 +335,7 @@ __d_path_local(const struct path *path, char *buf, int *buflen, int *error)
   task = (struct task_struct *)bpf_get_current_task();
   bpf_probe_read(&fs, sizeof(fs), _(&task->fs));
   *error = path_with_deleted(path, _(&fs->root), buf, &res, buflen);
-  // bpf_printk();
+  // log_debug);
   return res;
 }
 
