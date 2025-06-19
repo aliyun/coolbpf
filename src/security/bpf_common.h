@@ -65,13 +65,6 @@ struct msg_test {
 #define BIT(nr)	    (1 << (nr))
 #define BIT_ULL(nr) (1ULL << (nr))
 
-#ifdef TETRAGON_BPF_DEBUG
-#include <bpf/bpf_tracing.h>
-#define DEBUG(__fmt, ...) bpf_printk(__fmt, ##__VA_ARGS__)
-#else
-#define DEBUG(__fmt, ...)
-#endif
-
 #ifndef PATH_MAP_SIZE
 #define PATH_MAP_SIZE 4096
 #endif

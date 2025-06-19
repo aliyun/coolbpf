@@ -122,6 +122,7 @@
 #define EVENT_ERROR_PATH_COMPONENTS   0x400000
 #define EVENT_DATA_FILENAME	      0x800000
 #define EVENT_DATA_ARGS		      0x1000000
+#define EVENT_IN_INIT_TREE	    0x2000000
 
 #define EVENT_COMMON_FLAG_CLONE 0x01
 
@@ -247,8 +248,6 @@ struct msg_ns {
 }; // All fields aligned so no 'packed' attribute.
 
 struct msg_k8s {
-  __u32 net_ns;
-  __u32 cid;
   __u64 cgrpid;
   char docker_id[DOCKER_ID_LENGTH];
 }; // All fields aligned so no 'packed' attribute.
@@ -256,27 +255,19 @@ struct msg_k8s {
 #define BINARY_PATH_MAX_LEN 256
 
 struct heap_exe {
-  // because of verifier limitations, this has to be 2 * 256 bytes while 256
-  // should be theoretically sufficient, and actually is, in unit tests.
-  char buf[BINARY_PATH_MAX_LEN * 2];
-  // offset points to the start of the path in the above buffer. Use offset to
-  // read the path in the buffer since it's written from the end.
-  char *off;
+  char buf[BINARY_PATH_MAX_LEN];
   __u32 len;
   __u32 error;
 }; // All fields aligned so no 'packed' attribute.
 
-#define EXECVE_EVENT_COMMON_MEMBERS \
-    struct msg_common common; \
-    struct msg_k8s kube; \
-    struct msg_execve_key parent; \
-    __u64 parent_flags; \
-    struct msg_cred creds; \
-    struct msg_ns ns; \
-    struct msg_execve_key cleanup_key;
-
 struct msg_execve_event {
-  EXECVE_EVENT_COMMON_MEMBERS
+  struct msg_common common;
+  struct msg_k8s kube;
+  struct msg_execve_key parent;
+  __u64 parent_flags;
+  struct msg_cred creds;
+  struct msg_ns ns;
+  struct msg_execve_key cleanup_key;
   /* if add anything above please also update the args of
    * validate_msg_execve_size() in bpf_execve_event.c */
   union {

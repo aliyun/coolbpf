@@ -5,26 +5,27 @@
 #ifndef SYSAK_BPF_PROCESS_EVENT_H
 #define SYSAK_BPF_PROCESS_EVENT_H
 
-#include "../coolbpf.h"
 #include <bpf/bpf_helpers.h>
 #include <vmlinux.h>
 
-#include "bpf_common.h"
+#include "../coolbpf.h"
 #include "api.h"
 #include "bpf_cgroup.h"
+#include "bpf_common.h"
 #include "bpf_cred.h"
 #include "compiler.h"
+#include "ebpf_log.h"
 
 #define ENAMETOOLONG 36 /* File name too long */
 
-#define MAX_BUF_LEN 256
+#define MAX_BUF_LEN 4096
 
 struct buffer_heap_map_value {
   // Buffer is twice the needed size because of the verifier. In prepend_name
   // unit tests, the verifier figures out that 255 is enough and that the
   // buffer_offset will not overflow, but in the real use-case it looks like
   // it's forgetting about that.
-  unsigned char buf[MAX_BUF_LEN * 2];
+  unsigned char buf[MAX_BUF_LEN + 256];
 };
 
 struct {
@@ -124,8 +125,6 @@ prepend_name(char *buf, char **bufptr, int *buflen, const char *name, u32 namele
 
   *buflen -= (namelen + write_slash);
 
-  // This will not happen as buffer_offset cannot be above 256 and namelen is
-  // bound to 255. Needed to make the verifier happy in older kernels.
   if (namelen + write_slash > buffer_offset)
     return -ENAMETOOLONG;
 
@@ -335,7 +334,6 @@ __d_path_local(const struct path *path, char *buf, int *buflen, int *error)
   task = (struct task_struct *)bpf_get_current_task();
   bpf_probe_read(&fs, sizeof(fs), _(&task->fs));
   *error = path_with_deleted(path, _(&fs->root), buf, &res, buflen);
-  // log_debug);
   return res;
 }
 
@@ -390,6 +388,8 @@ getcwd(struct msg_process *curr, __u32 offset, __u32 proc_pid)
 
   asm volatile("%[offset] &= 0x3ff;\n" ::[offset] "+r"(offset)
   :);
+  if (size > 255)
+    size = 255;
   asm volatile("%[size] &= 0xff;\n" ::[size] "+r"(size)
   :);
   bpf_probe_read((char *)curr + offset, size, buffer);
@@ -544,16 +544,6 @@ __event_get_current_cgroup_name(struct cgroup *cgrp, struct msg_k8s *kube)
 {
   const char *name;
 
-  /* TODO: check if we have Tetragon cgroup configuration and that the
-   *     tracking cgroup ID is set. If so then query the bpf map for
-   *     the corresponding tracking cgroup name.
-   */
-
-  /* TODO: we gather current cgroup context, switch to tracker see above,
-   *    and if that fails for any reason or if we don't have the cgroup name
-   *    of tracker, then we can continue with current context.
-   */
-
   name = get_cgroup_name(cgrp);
   if (name)
     bpf_probe_read_str(kube->docker_id, KN_NAME_LENGTH, name);
@@ -603,4 +593,4 @@ __event_get_cgroup_info(struct task_struct *task, struct msg_k8s *kube)
   return flags;
 }
 
-#endif //SYSAK_BPF_PROCESS_EVENT_H
+#endif // SYSAK_BPF_PROCESS_EVENT_H

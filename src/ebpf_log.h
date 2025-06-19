@@ -4,13 +4,10 @@
 
 /* Macro to output debug logs to /sys/kernel/debug/tracing/trace_pipe
  */
-#ifdef BPF_DEBUG
-#define BPF_DEBUG(fmt, ...)                                        \
-    ({                                                             \
-        char ____fmt[] = fmt;                                      \
-        bpf_trace_printk(____fmt, sizeof(____fmt), ##__VA_ARGS__); \
-    })
+#ifdef COOLBPF_DEBUG
+#include <bpf/bpf_tracing.h>
+#define BPF_DEBUG(__fmt, ...) bpf_printk(__fmt, ##__VA_ARGS__)
 #else
 // No op
-#define BPF_DEBUG(fmt, ...)
+#define BPF_DEBUG(__fmt, ...)
 #endif
