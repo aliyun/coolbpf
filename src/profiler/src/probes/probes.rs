@@ -267,7 +267,11 @@ impl<'a> Probes<'a> {
         let hotspot_skel = load_skel!(maps, hotspot::HotspotSkelBuilder);
         let python_skel = load_skel!(maps, python::PythonSkelBuilder);
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let ms = profile_period() as usize;
+        let sample_per_sec = 1000 / ms;
+        let ten_sec_samples = sample_per_sec * 10 * num_cpus::get();
+        log::info!("cache max stack samples: {}", ten_sec_samples);
+        let (tx, rx) = crossbeam_channel::bounded(ten_sec_samples);
 
         let trace_thread_handle = {
             let mut cloned_tx = tx.clone();
