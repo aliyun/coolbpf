@@ -99,7 +99,6 @@ read_args(void *ctx, struct msg_execve_event *event)
   off = bpf_probe_read_str(&heap->maxpath, 4096, (char *)start_stack);
   if (off < 0)
     return 0;
-  BPF_DEBUG("[read_args] pid:%llu, args:%s", p->pid, heap->maxpath);
 
   start_stack += off;
 
@@ -144,7 +143,6 @@ read_path(void *ctx, struct msg_execve_event *event, void *filename)
   earg = (void *)p + offsetof(struct msg_process, args);
 
   size = bpf_probe_read_str(earg, MAXARGLENGTH - 1, filename);
-  BPF_DEBUG("[read_path] pid:%llu, path:%s", p->pid, earg);
   if (size < 0) {
     flags |= EVENT_ERROR_FILENAME;
     size = 0;
@@ -205,11 +203,22 @@ read_exe(struct task_struct *task, struct heap_exe *exe)
 	struct file *file = BPF_CORE_READ(task, mm, exe_file);
 	struct path *path = __builtin_preserve_access_index(&file->f_path);
 
-	exe->len = BINARY_PATH_MAX_LEN;
-	exe->off = (char *)&exe->buf;
-	exe->off = __d_path_local(path, exe->off, (int *)&exe->len, (int *)&exe->error);
-	if (exe->len > 0)
-		exe->len = BINARY_PATH_MAX_LEN - exe->len;
+	// we need to walk the complete 4096 len dentry in order to have an accurate
+	// matching on the prefix operators, even if we only keep a subset of that
+	char *buffer;
+
+	buffer = d_path_local(path, (int *)&exe->len, (int *)&exe->error);
+	if (!buffer)
+		return 0;
+
+	// buffer used by d_path_local can contain up to MAX_BUF_LEN i.e. 4096 we
+	// only keep the first 255 chars for our needs (we sacrifice one char to the
+	// verifier for the > 0 check)
+	if (exe->len > 255)
+		exe->len = 255;
+	asm volatile("%[len] &= 0xff;\n"
+		     : [len] "+r"(exe->len));
+	probe_read(exe->buf, exe->len, buffer);
 
 	return exe->len;
 }
@@ -219,11 +228,8 @@ read_exe(struct task_struct *task, struct heap_exe *exe)
 SEC("kprobe/wake_up_new_task")
 int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
 {
-  __u32 cpid = bpf_get_current_pid_tgid() >> 32;
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u enter~", cpid);
   struct execve_map_value *curr, *parent;
   struct msg_clone_event msg;
-  struct msg_capabilities caps;
   u64 msg_size = sizeof(struct msg_clone_event);
   struct msg_k8s kube;
   u32 tgid = 0;
@@ -232,7 +238,6 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
     return 0;
 
   tgid = BPF_CORE_READ(task, tgid);
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u read tgid:%u ~", cpid, tgid);
 
   /* Do not try to create any msg or calling execve_map_get
    * (that will add a new process in the execve_map) if we
@@ -241,22 +246,20 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
   parent = __event_find_parent(task);
   if (!parent)
     return 0;
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u has parent.", cpid, tgid);
+
   curr = execve_map_get(tgid);
   if (!curr)
     return 0;
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u new event in execve_map.", cpid, tgid);
+
   /* Generate an EVENT_COMMON_FLAG_CLONE event once per process,
    * that is, thread group.
    */
   if (curr->key.ktime != 0)
     return 0;
 
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin init event.", cpid, tgid);
   /* Setup the execve_map entry. */
   curr->flags = EVENT_COMMON_FLAG_CLONE;
   curr->key.pid = tgid;
-  // curr->key.ktime = get_start_time();
   curr->key.ktime = bpf_ktime_get_ns();
   curr->nspid = get_task_pid_vnr();
   memcpy(&curr->bin, &parent->bin, sizeof(curr->bin));
@@ -266,10 +269,17 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
    * before the execve hook point if they changed or not.
    * This needs to be converted later to credentials.
    */
-  get_current_subj_caps(&caps, task);
-  curr->caps.permitted = caps.permitted;
-  curr->caps.effective = caps.effective;
-  curr->caps.inheritable = caps.inheritable;
+  get_current_subj_caps(&curr->caps, task);
+
+  /* Store the thread leader namespaces so we can check later
+   * before the execve hook point if they changed or not.
+   */
+  get_namespaces(&curr->ns, task);
+
+  /* Set EVENT_IN_INIT_TREE flag on the process if its parent is in a
+   * container's init tree or if it has nspid=1.
+   */
+  set_in_init_tree(curr, parent);
 
   /* Setup the msg_clone_event and sent to the user. */
   msg.common.op = MSG_OP_CLONE;
@@ -289,18 +299,13 @@ int BPF_KPROBE(event_wake_up_new_task, struct task_struct *task)
 
   __event_get_cgroup_info(task, &kube);
 
-  BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u init event done.", cpid, tgid);
-
   if (cgroup_rate(ctx, &kube, msg.ktime)) {
-    BPF_DEBUG("[kprobe][event_wake_up_new_task] pid:%u tgid:%u begin submit clone event.", cpid, tgid);
-    perf_event_output_metric(ctx, MSG_OP_CLONE, &tcpmon_map,
-                             BPF_F_CURRENT_CPU, &msg, msg_size);
+    perf_event_output_metric(ctx, MSG_OP_CLONE, &tcpmon_map, BPF_F_CURRENT_CPU, &msg, msg_size);
   }
 
   return 0;
 }
 
-////__attribute__((section("tracepoint/sys_execve"), used)) int
 SEC("tracepoint/sched/sched_process_exec")
 int event_execve(struct trace_event_raw_sched_process_exec *ctx)
 {
@@ -338,21 +343,24 @@ int event_execve(struct trace_event_raw_sched_process_exec *ctx)
   p->ktime = bpf_ktime_get_ns();
   p->size = offsetof(struct msg_process, args);
   p->auid = get_auid();
-  p->uid = bpf_get_current_uid_gid();
   read_execve_shared_info(ctx, p, pid);
 
   p->size += read_path(ctx, event, filename);
   p->size += read_args(ctx, event);
   p->size += read_cwd(ctx, p);
-  BPF_DEBUG("[event_execve] enter pid:%llu, filename:%s", p->pid, filename);
 
   event->common.op = MSG_OP_EXECVE;
   event->common.ktime = p->ktime;
   event->common.size = offsetof(struct msg_execve_event, process) + p->size;
 
-  BPF_CORE_READ_INTO(&event->kube.net_ns, task, nsproxy, net_ns, ns.inum);
-
   get_current_subj_creds(&event->creds, task);
+  /**
+   * Instead of showing the task owner, we want to display the effective
+   * uid that is used to calculate the privileges of current task when
+   * acting upon other objects. This allows to be compatible with the 'ps'
+   * tool that reports snapshot of current processes.
+   */
+  p->uid = event->creds.euid;
   get_namespaces(&event->ns, task);
   p->flags |= __event_get_cgroup_info(task, &event->kube);
 
@@ -388,7 +396,6 @@ int execve_rate(void *ctx)
 SEC("tracepoint/1")
 int execve_send(void *ctx)
 {
-  BPF_DEBUG("[execve_send] enter ~");
   struct msg_execve_event *event;
   struct execve_map_value *curr;
   struct msg_process *p;
@@ -432,7 +439,13 @@ int execve_send(void *ctx)
     if (curr->flags & EVENT_COMMON_FLAG_CLONE) {
       event_set_clone(p);
     }
-    curr->flags = 0;
+    curr->flags &= ~EVENT_COMMON_FLAG_CLONE;
+    /* Set EVENT_IN_INIT_TREE flag on the process if nspid=1.
+     */
+    set_in_init_tree(curr, NULL);
+    if (curr->flags & EVENT_IN_INIT_TREE) {
+        event->process.flags |= EVENT_IN_INIT_TREE;
+    }
 #ifdef __NS_CHANGES_FILTER
     if (init_curr)
 			memcpy(&(curr->ns), &(event->ns),
@@ -451,7 +464,7 @@ int execve_send(void *ctx)
 #ifdef __LARGE_BPF_PROG
     // read from proc exe stored at execve time
 		if (event->exe.len <= BINARY_PATH_MAX_LEN) {
-			curr->bin.path_length = bpf_probe_read(curr->bin.path, event->exe.len, event->exe.off);
+			curr->bin.path_length = bpf_probe_read(curr->bin.path, event->exe.len, event->exe.buf);
 			if (curr->bin.path_length == 0)
 				curr->bin.path_length = event->exe.len;
 		}
@@ -473,9 +486,7 @@ int execve_send(void *ctx)
     sizeof(struct msg_execve_key) + sizeof(__u64) +
     sizeof(struct msg_cred) + sizeof(struct msg_ns) +
     sizeof(struct msg_execve_key) + p->size);
-//  BPF_DEBUG("[execve_send] before perf output ~");
   perf_event_output_metric(ctx, MSG_OP_EXECVE, &tcpmon_map, BPF_F_CURRENT_CPU, event, size);
-//  BPF_DEBUG("[execve_send] after perf output ~");
   return 0;
 }
 
@@ -490,9 +501,7 @@ int event_exit_acct_process(struct pt_regs *ctx)
 {
   __u64 pid_tgid = bpf_get_current_pid_tgid();
   __u32 pid = pid_tgid >> 32;
-  BPF_DEBUG("[kprobe][event_exit_acct_process] pid:%u enter~", pid);
-  event_exit_send(ctx, pid_tgid >> 32);
-  BPF_DEBUG("[kprobe][event_exit_acct_process] pid:%u send done ~", pid);
+  event_exit_send(ctx, pid);
   return 0;
 }
 
@@ -511,8 +520,6 @@ int event_exit_disassociate_ctty(struct pt_regs *ctx)
 {
   int on_exit = (int)PT_REGS_PARM1_CORE(ctx);
   __u32 pid = bpf_get_current_pid_tgid() >> 32;
-  BPF_DEBUG("[kprobe][event_exit_disassociate_ctty] pid:%u enter~", pid);
-
   if (on_exit)
     event_exit_send(ctx, pid);
   return 0;
@@ -939,6 +946,7 @@ static inline __attribute__((always_inline)) long copy_path(char *args, const st
   if (!buffer)
     return 0;
  // tips: path size between 0~255
+  if (size > 255) size = 255;
   asm volatile("%[size] &= 0xff;\n" ::[size] "+r"(size)
                :);
   bpf_probe_read(curr, size, buffer);

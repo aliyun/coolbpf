@@ -26,17 +26,17 @@ if(NOT DEFINED INSTALL_INCLUDE_DIR)
   set(INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include)
 endif()
 
-add_subdirectory(bpf)
-add_subdirectory(security)
-if (ENABLE_PROFILE)
-  add_subdirectory(profiler)
-endif()
-
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
                ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc @ONLY)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/bpf
                     ${CMAKE_CURRENT_BINARY_DIR}/bpf)
+
+add_subdirectory(bpf)
+add_subdirectory(security)
+if (ENABLE_PROFILE)
+  add_subdirectory(profiler)
+endif()
 
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
      ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
