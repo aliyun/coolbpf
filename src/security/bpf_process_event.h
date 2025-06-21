@@ -593,4 +593,18 @@ __event_get_cgroup_info(struct task_struct *task, struct msg_k8s *kube)
   return flags;
 }
 
+FUNC_INLINE void
+set_in_init_tree(struct execve_map_value *curr, struct execve_map_value *parent)
+{
+	if (parent && parent->flags & EVENT_IN_INIT_TREE) {
+		curr->flags |= EVENT_IN_INIT_TREE;
+		BPF_DEBUG("%s: parent in init tree", __func__);
+		return;
+	}
+
+	if (curr->nspid == 1) {
+		curr->flags |= EVENT_IN_INIT_TREE;
+		BPF_DEBUG("%s: nspid=1", __func__);
+	}
+}
 #endif // SYSAK_BPF_PROCESS_EVENT_H
