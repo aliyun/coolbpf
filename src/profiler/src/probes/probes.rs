@@ -269,7 +269,7 @@ impl<'a> Probes<'a> {
 
         let ms = profile_period() as usize;
         let sample_per_sec = 1000 / ms;
-        let ten_sec_samples = sample_per_sec * 10 * num_cpus::get();
+        let ten_sec_samples = sample_per_sec * 10 * num_possible_cpus().unwrap_or(1);
         log::info!("cache max stack samples: {}", ten_sec_samples);
         let (tx, rx) = crossbeam_channel::bounded(ten_sec_samples);
 
