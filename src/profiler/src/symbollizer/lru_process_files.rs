@@ -87,11 +87,17 @@ impl ProcessFiles {
         }
         syms
     }
+
+    pub fn cache(&self, lru_files: &mut LruFileSymbols) {
+        for file in &self.files {
+            let _ = lru_files.symbolize_with_path(file.file_id, 0, &file.path);
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct LruProcessFiles {
-    lru: LruCache<u32, ProcessFiles>,
+    pub(crate) lru: LruCache<u32, ProcessFiles>,
 }
 
 impl LruProcessFiles {
@@ -121,6 +127,18 @@ impl LruProcessFiles {
                     syms.push(ElfSymbol::not_found(addr));
                 }
                 syms
+            }
+        }
+    }
+
+    pub fn cache(&mut self, pid: u32, lru_files: &mut LruFileSymbols) {
+        match self
+            .lru
+            .try_get_or_insert(pid, || -> Result<ProcessFiles> { ProcessFiles::new(pid) })
+        {
+            Ok(pf) => pf.cache(lru_files),
+            Err(e) => {
+                log::warn!("failed to add process files for pid {pid}: {e}");
             }
         }
     }

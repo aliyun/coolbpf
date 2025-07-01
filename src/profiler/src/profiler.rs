@@ -15,21 +15,20 @@ use crate::stack::SymbolizedStack;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
+use crate::utils::process::get_comm_by_pid;
 use crate::utils::time::init_tstamp;
 use crate::utils::time::time_delta;
-use crate::utils::process::get_comm_by_pid;
 use crate::MIN_PROCESS_SAMPLES;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
-
 
 pub struct Profiler<'a> {
     pids: HashMap<u32, Process>,
     probes: Probes<'a>,
     caches: FileCache,
     executables: ExecutableCache,
-    symbolizer: Symbolizer,
+    pub symbolizer: Symbolizer,
     interpreters: HashMap<u32, Interpreter>,
 
     all_system_profiling: bool,
@@ -263,7 +262,11 @@ impl<'a> Profiler<'a> {
                 Ok(Some(a)) => a,
                 Ok(None) => continue,
                 Err(e) => {
-                    log::error!("failed to get executable for comm {}: {:?}, err: {e}", get_comm_by_pid(pid), map);
+                    log::error!(
+                        "failed to get executable for comm {}: {:?}, err: {e}",
+                        get_comm_by_pid(pid),
+                        map
+                    );
                     continue;
                 }
             };

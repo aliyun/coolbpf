@@ -37,7 +37,10 @@ mod tests {
         // 获取当前进程的 comm
         let comm = get_comm_by_pid(current_pid);
         // 验证 comm 不为空且不为 "Unknown"
-        assert!(!comm.is_empty(), "Expected non-empty comm for current process");
+        assert!(
+            !comm.is_empty(),
+            "Expected non-empty comm for current process"
+        );
         assert_ne!(comm, "Unknown", "Expected valid comm for current process");
         log::info!("Current process (PID {}): {}", current_pid, comm);
     }

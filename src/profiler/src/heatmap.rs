@@ -57,7 +57,7 @@ impl ProcessHeatMap {
                 // find it in previous heatmap
                 if base < heat.base {
                     for single in self.done.iter_mut() {
-                        if single.base == base {
+                        if pid == single.pid && single.base == base {
                             single.inc(slot);
                             return;
                         }

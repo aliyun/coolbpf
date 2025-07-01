@@ -7,7 +7,7 @@ use std::ffi::CString;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "rtrace", about = "Diagnosing tools of kernel network")]
+#[structopt(name = "heatmap", about = "show cpu heatmap")]
 pub struct Command {
     #[structopt(long, help = "Specify the Pid of the tracking process")]
     pid: u32,

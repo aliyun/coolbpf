@@ -183,6 +183,11 @@ impl Symbolizer {
         }
         syms
     }
+
+    pub fn cache_process(&mut self, pid: u32) {
+        let _ = self.proc_comm(pid);
+        self.proc_files.cache(pid, &mut self.file_symbols);
+    }
 }
 
 #[cfg(test)]
