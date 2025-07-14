@@ -1011,8 +1011,13 @@ int filter_prog(struct pt_regs *ctx) {
   // get data
   int i = 0;
   int pass = 1;
+  int filter_num = filters->filter_count;
   #pragma unroll
   for (; i < MAX_FILTER_FOR_PER_CALLNAME; i ++) {
+    // Early break if we've processed all actual filters
+    if (i >= filter_num) {
+      break;
+    }
     int idx = i;
     struct selector_filter filter = filters->filters[idx];
     // if (filter.filter_type != FILTER_TYPE_UNKNOWN) {
