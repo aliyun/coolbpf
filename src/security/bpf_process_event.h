@@ -179,7 +179,7 @@ struct cwd_read_data {
   bool resolved;
 };
 
-FUNC_INLINE long cwd_read(struct cwd_read_data *data, char **buffer)
+FUNC_INLINE long cwd_read(struct cwd_read_data *data)
 {
   struct qstr d_name;
   struct dentry *parent;
@@ -212,11 +212,6 @@ FUNC_INLINE long cwd_read(struct cwd_read_data *data, char **buffer)
       return 0;
     }
     // resolved all path components successfully
-    if (data->bptr == *buffer) {
-      bpf_probe_read(&d_name, sizeof(d_name), _(&dentry->d_name));
-      error = prepend_name(data->bf, &data->bptr, &data->blen,
-                        (const char *)d_name.name, d_name.len);
-    }
     data->resolved = true;
     return 1;
   }
@@ -261,7 +256,7 @@ prepend_path(const struct path *path, const struct path *root, char *bf,
 #ifndef __V61_BPF_PROG
 #pragma unroll
   for (int i = 0; i < PROBE_CWD_READ_ITERATIONS; ++i) {
-    if (cwd_read(&data, buffer))
+    if (cwd_read(&data))
       break;
   }
 #else
