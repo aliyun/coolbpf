@@ -1261,7 +1261,7 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   // const struct path *path_arg = 0;
   // path_arg = _(&file->f_path);
   // copy_path(stack->file_data.path, path_arg);
-  // 获得操作类型掩码信息
+  // obtain operation type mask information
   int mask = (int) PT_REGS_PARM2(ctx);
   switch (mask) {
     case MAY_READ:
