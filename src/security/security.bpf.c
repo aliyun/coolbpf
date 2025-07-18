@@ -1011,8 +1011,13 @@ int filter_prog(struct pt_regs *ctx) {
   // get data
   int i = 0;
   int pass = 1;
+  int filter_num = filters->filter_count;
   #pragma unroll
   for (; i < MAX_FILTER_FOR_PER_CALLNAME; i ++) {
+    // Early break if we've processed all actual filters
+    if (i >= filter_num) {
+      break;
+    }
     int idx = i;
     struct selector_filter filter = filters->filters[idx];
     // if (filter.filter_type != FILTER_TYPE_UNKNOWN) {
@@ -1132,35 +1137,35 @@ int filter_prog(struct pt_regs *ctx) {
       }
       break;
     }
-    // case FILTER_TYPE_FILE_PREFIX: {
-    //   struct string_prefix_lpm_trie *prefix = NULL;
-    //   int zero = 0;
-    //   prefix = bpf_map_lookup_elem(&string_prefix_maps_heap, &zero);
-    //   if (prefix == NULL) {
-    //     BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot lookup string_prefix_maps_heap", call_name_idx);
-    //     break;
-    //   }
-    //   __u32 path_size = 0;
-    //   bpf_probe_read(&path_size, 4, stack->file_data.path);
-    //   prefix->prefixlen = path_size * 8;
-    //   bpf_probe_read(prefix->data, path_size & (STRING_PREFIX_MAX_LENGTH - 1), stack->file_data.path + 4);
-    //   int path_len = *(int *)stack->file_data.path;
-    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path length:%d", call_name_idx, path_len);
-    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path+4:%s", call_name_idx, &stack->file_data.path[4]);
-    //   BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. prefix path:%s, path size:%u", call_name_idx, prefix->data, path_size);
+    case FILTER_TYPE_FILE_PREFIX: {
+      struct string_prefix_lpm_trie *prefix = NULL;
+      int zero = 0;
+      prefix = bpf_map_lookup_elem(&string_prefix_maps_heap, &zero);
+      if (prefix == NULL) {
+        BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot lookup string_prefix_maps_heap", call_name_idx);
+        break;
+      }
+      __u32 path_size = 0;
+      bpf_probe_read(&path_size, 4, stack->file_data.path);
+      prefix->prefixlen = path_size * 8;
+      bpf_probe_read(prefix->data, path_size & (STRING_PREFIX_MAX_LENGTH - 1), stack->file_data.path + 4);
+      int path_len = *(int *)stack->file_data.path;
+      BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path length:%d", call_name_idx, path_len);
+      BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. stack path+4:%s", call_name_idx, &stack->file_data.path[4]);
+      BPF_DEBUG("[kprobe][tailcall] callname idx:%u begin to query inner map. prefix path:%s, path size:%u", call_name_idx, prefix->data, path_size);
       
-    //   struct bpf_map* inner_map = bpf_map_lookup_elem(&string_prefix_maps, &filter.map_idx[0]);
-    //   __u8* ppass = NULL;
-    //   if (inner_map != NULL) {
-    //     ppass = bpf_map_lookup_elem(inner_map, prefix);
-    //     if (ppass == NULL || *ppass == 0) pass &= 0;
-    //     else pass &= 1;
-    //   } else {
-    //     // no filters were set ...
-    //     BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot find inner map, no filter set, pass", call_name_idx);
-    //   }
-    //   break;
-    // }
+      struct bpf_map* inner_map = bpf_map_lookup_elem(&string_prefix_maps, &filter.map_idx[0]);
+      __u8* ppass = NULL;
+      if (inner_map != NULL) {
+        ppass = bpf_map_lookup_elem(inner_map, prefix);
+        if (ppass == NULL || *ppass == 0) pass &= 0;
+        else pass &= 1;
+      } else {
+        // no filters were set ...
+        BPF_DEBUG("[kprobe][tailcall] callname idx:%u cannot find inner map, no filter set, pass", call_name_idx);
+      }
+      break;
+    }
     default:
       break;
     }
@@ -1256,6 +1261,23 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   // const struct path *path_arg = 0;
   // path_arg = _(&file->f_path);
   // copy_path(stack->file_data.path, path_arg);
+  // obtain operation type mask information
+  int mask = (int) PT_REGS_PARM2(ctx);
+  switch (mask) {
+    case MAY_READ:
+      stack->func = SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION;
+      stack->file_data.func = TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION_READ;
+      break;
+    case MAY_WRITE:
+      stack->func = SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION;
+      stack->file_data.func = TRACEPOINT_FUNC_SECURITY_FILE_PERMISSION_WRITE;
+      break;
+    default:
+      BPF_DEBUG("[kprobe][kprobe_security_file_permission] unknown operation");
+      break;
+  }
+
+  BPF_DEBUG("[kprobe][security_file_permission] after association: pid:%u ktime:%llu path:%s already enter.", pid, enter->key.ktime, &stack->file_data.path[4]);
   bpf_tail_call(ctx, &secure_tailcall_map, TAILCALL_FILTER_PROG);
   return 0;
 }
