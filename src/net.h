@@ -208,6 +208,7 @@ struct conn_stats_event_t
 struct conn_data_event_t
 {
   struct connect_id_t conn_id;
+  uint64_t cid_key;
   uint64_t start_ts;
   uint64_t end_ts;
   enum support_proto_e protocol;
@@ -252,6 +253,7 @@ struct connect_info_t
   uint64_t rd_max_ts;
   uint64_t wr_min_ts;
   uint64_t wr_max_ts;
+  uint64_t cid_key;
   uint64_t start_ts;
   uint64_t end_ts;
   enum support_proto_e protocol;
@@ -441,8 +443,8 @@ void ebpf_update_conn_addr(struct connect_id_t *conn_id, union sockaddr_t *dest_
 // 更新process 观察范围，动态增加pid，drop 为true 是进行删除操作。
 void ebpf_disable_process(uint32_t pid, bool drop);
 
-// 更新containerid 观察范围，动态增加pid，drop 为true 是进行删除操作。
-bool ebpf_set_cid_filter(const char* container_id, size_t length, bool update);
+// 更新containerid 观察范围，动态增加 container id，drop 为true 是进行删除操作。
+bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_key, bool update);
 
 // 更新conn对应的角色，某些协议内核态无法判断角色
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type);

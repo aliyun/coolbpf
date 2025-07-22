@@ -680,7 +680,7 @@ void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e rol
 {
 }
 
-bool ebpf_set_cid_filter(const char* container_id, size_t length, bool update)
+bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_key, bool update)
 {
 	struct net_bpf *obj = env.obj;
 	int map_fd = bpf_map__fd(obj->maps.enable_container_ids);
@@ -691,11 +691,10 @@ bool ebpf_set_cid_filter(const char* container_id, size_t length, bool update)
     };
     memset(key.data, 0, CONTAINER_ID_MAX_LENGTH);
     memcpy(key.data, container_id, length);
-	__u8 value = 1;
 	bool ret;
 
     if (update) {
-        ret = bpf_map_update_elem(map_fd, &key, &value, BPF_ANY);
+        ret = bpf_map_update_elem(map_fd, &key, &cid_key, BPF_ANY);
         if (ret) {
             net_log(LOG_TYPE_WARN, "Failed to update element: %s\n", strerror(errno));
             return false;

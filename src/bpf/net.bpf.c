@@ -182,7 +182,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_LPM_TRIE);
   __uint(max_entries, 1024);
   __type(key, __u8[sizeof(struct container_id_key)]); // Need to specify as byte array as wouldn't take struct as key type
-  __type(value, __u8);
+  __type(value, __u64);
   __uint(map_flags, BPF_F_NO_PREALLOC);
 } enable_container_ids SEC(".maps");
 
@@ -269,10 +269,11 @@ static __always_inline bool match_container_id(struct connect_info_t* conn_info)
   BPF_DEBUG("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, real_length);
   bpf_probe_read(prefix->data, real_length, conn_info->docker_id + trim_len);
   prefix->prefixlen = real_length << 3;
-  __u8* ppass = bpf_map_lookup_elem(&enable_container_ids, prefix);
-  if (ppass) {
+  __u64* cid_key = bpf_map_lookup_elem(&enable_container_ids, prefix);
+  if (cid_key) {
     BPF_DEBUG("bingo! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
     // in whitelist
+    conn_info->cid_key = *cid_key;
     return true;
   }
   BPF_DEBUG("blacklist! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
@@ -445,6 +446,7 @@ static __always_inline void init_conn_info(uint32_t tgid,
   conn_info->addr.sa.sa_family = AF_UNKNOWN;
   conn_info->is_sample = true;
   conn_info->protocol = ProtoUnknown;
+  conn_info->cid_key = 0;
   struct task_struct *task = (struct task_struct *)bpf_get_current_task();
   struct cgroup *cgrp = get_task_cgroup(task);
   if (!cgrp)
@@ -1395,7 +1397,7 @@ static __always_inline void output_conn_stats(struct trace_event_raw_sys_exit_co
   uint32_t total_pkts = conn_info->wr_pkts + conn_info->rd_pkts;
 
   bool real_threshold = (total_bytes >= conn_info->last_output_rd_bytes + conn_info->last_output_wr_bytes + ConnStatsBytesThreshold) || (total_pkts >= conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts + ConnStatsPacketsThreshold);
-  if (real_threshold || force || !conn_info->ever_sent)
+  if (match_container_id(conn_info) && (real_threshold || force || !conn_info->ever_sent))
   {
     struct conn_stats_event_t *event = add_conn_stats(conn_info);
     if (event != NULL)
@@ -1494,7 +1496,7 @@ static __always_inline void add_close_event(struct trace_event_raw_sys_exit_comp
   ctrl_event.conn_id = conn_info->conn_id;
   ctrl_event.close.rd_bytes = conn_info->rd_bytes;
   ctrl_event.close.wr_bytes = conn_info->wr_bytes;
-  if (conn_info->is_sample)
+  // if (conn_info->is_sample)
   {
     bpf_perf_event_output(ctx, &connect_ctrl_events_map, BPF_F_CURRENT_CPU,
                           &ctrl_event, sizeof(struct conn_ctrl_event_t));
@@ -2063,11 +2065,10 @@ int BPF_KPROBE(tcp_close, struct sock *sk)
    * only family is AF_UNIX and no data will no report, but the bytes will be
    * recorded in first data event and report to user
    */
-  if (need_trace_family(conn_info->addr.sa.sa_family) ||
+  if (match_container_id(conn_info) && (need_trace_family(conn_info->addr.sa.sa_family) ||
       conn_info->wr_bytes != 0 ||
-      conn_info->rd_bytes != 0)
+      conn_info->rd_bytes != 0))
   {
-
     add_close_event(ctx, conn_info);
     if (conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts != conn_info->rd_pkts + conn_info->wr_pkts)
     {
