@@ -668,10 +668,20 @@ static inline ErrorCode copy_state_regs(UnwindState *state,
   // Check if the process is running in 32-bit mode on the x86_64 system.
   // This check follows the Linux kernel implementation of user_64bit_mode() in
   // arch/x86/include/asm/ptrace.h.
-  if (regs->cs == __USER32_CS)
-  {
-    return ERR_NATIVE_X64_32BIT_COMPAT_MODE;
+  if (bpf_core_field_size(regs->cs) == 2) {
+    u16 cs;
+    bpf_probe_read_kernel(&cs, sizeof(cs), &regs->cs);
+    if (cs == __USER32_CS)
+    {
+      return ERR_NATIVE_X64_32BIT_COMPAT_MODE;
+    }
+  } else {
+    if (regs->cs == __USER32_CS)
+    {
+      return ERR_NATIVE_X64_32BIT_COMPAT_MODE;
+    }
   }
+
   state->pc = regs->ip;
   state->sp = regs->sp;
   state->fp = regs->bp;
@@ -731,9 +741,18 @@ static inline bool ptregs_is_usermode(struct pt_regs *regs)
 {
 #if defined(__x86_64__)
   // On x86_64 the user mode SS should always be __USER_DS.
-  if (regs->ss != __USER_DS)
-  {
-    return false;
+  if (bpf_core_field_size(regs->ss) == 2) {
+    u16 ss;
+    bpf_probe_read_kernel(&ss, sizeof(ss), &regs->ss);
+    if (ss != __USER_DS)
+    {
+      return false;
+    }
+  } else {
+    if (regs->ss != __USER_DS)
+    {
+      return false;
+    }
   }
   return true;
 #elif defined(__aarch64__)
