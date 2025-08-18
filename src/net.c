@@ -338,6 +338,38 @@ static void get_btf_path(void)
 	pclose(fp);
 }
 
+int32_t ebpf_init_self_runtime_info(char *so, long offset, struct self_runtime_info* info) {
+	// attach 
+	struct net_bpf *obj = env.obj;
+	int ret;
+
+	obj->links.ebpf_get_self_runtime_info = bpf_program__attach_uprobe(obj->progs.ebpf_get_self_runtime_info, false,
+								       0, so, offset); // 0 for self
+	ret = libbpf_get_error(obj->links.ebpf_get_self_runtime_info);
+	if (ret != 0)
+	{
+		net_log(LOG_TYPE_WARN, "uprobe get_self_runtime_info failed\n");
+		return ret;
+	}
+
+	net_log(LOG_TYPE_INFO, "successfully attach uprobe get_self_runtime_info\n");
+	
+	// trigger
+	get_self_runtime_info();
+
+	// read from bpf maps ...
+	int map_fd = bpf_map__fd(obj->maps.self_runtime_info_map);
+
+	int key = 0;
+	ret = bpf_map_lookup_elem(map_fd, &key, info);
+	if (ret && errno != ENOENT) {
+		net_log(LOG_TYPE_WARN, "failed to lookup element in self_runtime_info_map: %s\n", strerror(errno));
+		return ret;
+	}
+
+	return 0;
+}
+
 int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long uprobe_offset,
 		  long upca_offset, long upps_offset, long upcr_offset)
 {
@@ -369,6 +401,7 @@ int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long u
 	bpf_program__set_autoattach(obj->progs.disable_process_probe, false);
 	bpf_program__set_autoattach(obj->progs.update_conn_role_probe, false);
 	bpf_program__set_autoattach(obj->progs.update_conn_addr_probe, false);
+	bpf_program__set_autoattach(obj->progs.ebpf_get_self_runtime_info, false);
 	err = net_bpf__attach(obj);
 	if (err)
 	{
@@ -679,6 +712,8 @@ void ebpf_disable_process(uint32_t pid, bool drop)
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type)
 {
 }
+
+void get_self_runtime_info() {}
 
 bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_key, bool update)
 {

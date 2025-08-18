@@ -222,6 +222,12 @@ struct conn_data_event_t
 #endif
 };
 
+struct self_runtime_info {
+  uint32_t pid;
+  char docker_id[KN_NAME_LENGTH];
+  int32_t docker_id_length;
+};
+
 #ifdef __VMLINUX_H__
 
 struct connect_info_t
@@ -448,6 +454,10 @@ bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_k
 
 // 更新conn对应的角色，某些协议内核态无法判断角色
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type);
+
+void get_self_runtime_info();
+
+int32_t ebpf_init_self_runtime_info(char *so, long offset, struct self_runtime_info* info);
 
 #endif
 #endif

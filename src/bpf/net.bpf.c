@@ -186,6 +186,22 @@ struct {
   __uint(map_flags, BPF_F_NO_PREALLOC);
 } enable_container_ids SEC(".maps");
 
+struct
+{
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __type(key, int);
+  __type(value, struct self_runtime_info);
+  __uint(max_entries, 1);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+} self_runtime_info_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);           
+    __type(key, int);                 
+    __type(value, struct self_runtime_info);         
+} self_runtime_info_heap SEC(".maps");
+
 struct trace_event_raw_sys_enter_comp
 {
   struct trace_entry ent;
@@ -253,22 +269,15 @@ static __always_inline bool match_container_id(struct connect_info_t* conn_info)
     BPF_DEBUG("dockerid length is zero! pid:%u docker_id_length:%u\n", conn_info->conn_id.tgid, conn_info->docker_id_length);
     return false;
   }
-  int length = conn_info->docker_id_length >= KN_NAME_LENGTH? KN_NAME_LENGTH : conn_info->docker_id_length;
-  int real_length = length - trim_len;
-  if (real_length <=0 ) {
-    BPF_DEBUG("reallen invalid! pid:%u real_length:%u\n", conn_info->conn_id.tgid, real_length);
-    return false;
-  }
-  if (real_length >= CONTAINER_ID_MAX_LENGTH) real_length = CONTAINER_ID_MAX_LENGTH;
 
   // check config
   u32 zero = 0;
   struct container_id_key* prefix = bpf_map_lookup_elem(&container_id_heap, &zero);
   if (!prefix) return false;
   __builtin_memset(prefix, 0, sizeof(struct container_id_key));
-  BPF_DEBUG("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, real_length);
-  bpf_probe_read(prefix->data, real_length, conn_info->docker_id + trim_len);
-  prefix->prefixlen = real_length << 3;
+  BPF_DEBUG("after memset! pid:%u, cgroup:%s, real_length:%u \n", conn_info->conn_id.tgid, prefix->data, conn_info->docker_id_length);
+  bpf_probe_read(prefix->data, CONTAINER_ID_MAX_LENGTH, conn_info->docker_id + trim_len);
+  prefix->prefixlen = CONTAINER_ID_MAX_LENGTH << 3;
   __u64* cid_key = bpf_map_lookup_elem(&enable_container_ids, prefix);
   if (cid_key) {
     BPF_DEBUG("bingo! pid:%u, cgroup:%s, prefix:%u \n", conn_info->conn_id.tgid, prefix->data, prefix->prefixlen);
@@ -2065,9 +2074,7 @@ int BPF_KPROBE(tcp_close, struct sock *sk)
    * only family is AF_UNIX and no data will no report, but the bytes will be
    * recorded in first data event and report to user
    */
-  if (match_container_id(conn_info) && (need_trace_family(conn_info->addr.sa.sa_family) ||
-      conn_info->wr_bytes != 0 ||
-      conn_info->rd_bytes != 0))
+  if (match_container_id(conn_info) && need_trace_family(conn_info->addr.sa.sa_family))
   {
     add_close_event(ctx, conn_info);
     if (conn_info->last_output_rd_pkts + conn_info->last_output_wr_pkts != conn_info->rd_pkts + conn_info->wr_pkts)
@@ -2611,6 +2618,38 @@ int tp_sys_enter_recvmsg(struct trace_event_raw_sys_enter_comp *ctx)
 #ifdef NET_TEST
   test_bpf_syscall(ctx, id, ctx->args[0], NULL, 0, 23);
 #endif
+  return 0;
+}
+
+SEC("uprobe/ebpf_get_self_runtime_info")
+int ebpf_get_self_runtime_info(struct pt_regs *ctx)
+{
+  struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+  struct cgroup *cgrp = get_task_cgroup(task);
+  if (!cgrp)
+    return 1;
+  
+  const char *name;
+
+  name = get_cgroup_name(cgrp);
+  if (!name) return EVENT_ERROR_CGROUP_NAME;
+
+  int key = 0;
+  struct self_runtime_info *runtime_info;
+  runtime_info = bpf_map_lookup_elem(&self_runtime_info_heap, &key);
+  if (runtime_info == NULL) {
+    return 1;
+  }
+
+  int ret = bpf_probe_read_str(runtime_info->docker_id, KN_NAME_LENGTH, name);
+  runtime_info->docker_id_length = ret;
+  BPF_DEBUG("[uprobe][ebpf_get_self_runtime_info] docker_id:%s ret:%u \n", cgroup_name, ret);
+  runtime_info->pid = bpf_get_current_pid_tgid() >> 32;
+
+
+  bpf_map_update_elem(&self_runtime_info_map, &key, runtime_info, BPF_ANY);
+
+  // not found
   return 0;
 }
 
