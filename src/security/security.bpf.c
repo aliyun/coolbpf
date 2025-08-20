@@ -1176,6 +1176,10 @@ int filter_prog(struct pt_regs *ctx) {
   return 0;
 }
 
+static __always_inline size_t file_data_common_size(void) {
+    return offsetof(struct file_data_t, path);
+}
+
 SEC("kprobe/secure_data_send")
 int secure_data_send(struct pt_regs *ctx)
 {
@@ -1193,7 +1197,11 @@ int secure_data_send(struct pt_regs *ctx)
   case SECURE_FUNC_TRACEPOINT_FUNC_SECURITY_PATH_TRUNCATE:
   case SECURE_FUNC_TRACEPOINT_FUNC_SYS_WRITE:
   case SECURE_FUNC_TRACEPOINT_FUNC_SYS_READ:{
-    bpf_perf_event_output(ctx, &file_secure_output, BPF_F_CURRENT_CPU, &data->file_data, sizeof(struct file_data_t));
+    __u32 total = file_data_common_size() + data->file_data.size;
+    if (total > sizeof(struct file_data_t)) {
+        total = sizeof(struct file_data_t);
+    }
+    bpf_perf_event_output(ctx, &file_secure_output, BPF_F_CURRENT_CPU, &data->file_data, total);
     BPF_DEBUG("[kprobe][secure_data_send][file] pid:%u, ktime:%u, func:%d send to perfbuffer.\n", data->file_data.key.pid, data->file_data.key.ktime, data->func);
     break;
   }
@@ -1223,6 +1231,7 @@ int kprobe_security_file_permission(struct pt_regs *ctx)
   const struct path *path_arg = 0;
   path_arg = _(&file->f_path);
   long ret = copy_path(stack->file_data.path, path_arg);
+  stack->file_data.size = ret;
   int path_len = *(int *)stack->file_data.path;
   const u32 flag_prefix = 4 + path_len;
   int flag = -1;
@@ -1291,6 +1300,7 @@ int kprobe_security_mmap_file(struct pt_regs *ctx)
   const struct path *path_arg = 0;
   path_arg = _(&file->f_path);
   long ret = copy_path(stack->file_data.path, path_arg);
+  stack->file_data.size = ret;
   int path_len = *(int *)stack->file_data.path;
   BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path length:%s, ret:%lld", path_len, ret);
   BPF_DEBUG("[kprobe][tailcall][mmap] before ~ stack path+4:%s", &stack->file_data.path[4]);
@@ -1339,7 +1349,8 @@ int kprobe_security_path_truncate(struct pt_regs *ctx)
   struct path *path = (struct path *)PT_REGS_PARM1(ctx);
   const struct path *path_arg = 0;
   path_arg = _(path);
-  copy_path(stack->file_data.path, path_arg);
+  long ret = copy_path(stack->file_data.path, path_arg);
+  stack->file_data.size = ret;
   bpf_tail_call(ctx, &secure_tailcall_map, TAILCALL_FILTER_PROG);
   return 0;
 }
