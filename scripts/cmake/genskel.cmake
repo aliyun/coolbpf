@@ -26,7 +26,7 @@ macro(genskel name)
     endif ()
     SET(BPF_C_FILE ${CMAKE_CURRENT_SOURCE_DIR}/${name}.bpf.c)
     SET(BPF_O_FILE ${CMAKE_CURRENT_BINARY_DIR}/${name}.bpf.o)
-    SET(BPF_S_FILE ${CMAKE_CURRENT_SOURCE_DIR}/${name}.skel.h)
+    SET(BPF_S_FILE ${CMAKE_CURRENT_BINARY_DIR}/${name}.skel.h)
 
     add_custom_command(
         OUTPUT ${BPF_O_FILE}
