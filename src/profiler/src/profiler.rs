@@ -22,6 +22,27 @@ use crate::MIN_PROCESS_SAMPLES;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::time::Instant;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+static GLOBAL_PIDS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+
+
+pub fn global_set_heatmap_pids(pids: Vec<u32>) {
+    if let Ok(mut global_pids) = GLOBAL_PIDS.lock() {
+        global_pids.extend(pids);
+    }
+}
+
+pub fn global_get_heatmap_pids() -> Vec<u32> {
+    if let Ok(mut global_pids) = GLOBAL_PIDS.lock() {
+        let mut res = vec![];
+        std::mem::swap(&mut res, &mut global_pids);
+        return res;
+    }
+    vec![]
+}
 
 pub struct Profiler<'a> {
     pids: HashMap<u32, Process>,
@@ -79,6 +100,21 @@ impl<'a> Profiler<'a> {
     pub fn read(&mut self) -> Vec<SymbolizedStack> {
         let mut stack_agg = StackAggregator::default();
         let mut exited_pids = vec![];
+
+        let pids = global_get_heatmap_pids();
+        if !pids.is_empty() {
+            match self.populate_pids(pids.clone()) {
+                Ok(_) => {
+                    log::info!("populate pids: {:?} for heatmap success", pids);
+                }
+                Err(_) => {
+                    log::error!("failed to populate pids: {:?} for heatmap", pids);
+                }
+            };
+
+            self.add_heatmap_pids(pids);
+        }
+
         loop {
             match self.probes.rx.try_recv() {
                 Ok(event) => match event {

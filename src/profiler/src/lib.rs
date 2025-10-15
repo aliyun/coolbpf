@@ -1,3 +1,4 @@
+use profiler::global_set_heatmap_pids;
 use profiler::Profiler;
 use stack::SymbolizedStack;
 use std::ffi::CStr;
@@ -135,7 +136,12 @@ pub extern "C" fn livetrace_profiler_ctrl(
 
     let profiler = match unsafe { profiler.as_mut() } {
         Some(profiler) => profiler,
-        None => return -1,
+        None => {
+            if op == 2 {
+                global_set_heatmap_pids(pids);
+            }
+            return -1;
+        }
     };
 
     if op == 1 {
