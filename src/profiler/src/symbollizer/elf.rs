@@ -616,7 +616,7 @@ fn get_unwind_info<R: Reader>(
                 }
             }
             _ => {
-                log::warn!(
+                log::debug!(
                     "unsupported other cfa rule with other register: {:?}",
                     register
                 )
