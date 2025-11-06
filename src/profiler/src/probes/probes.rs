@@ -1,5 +1,6 @@
 use crate::is_system_profiling;
 use crate::process::maps::ProcessMaps;
+use crate::HOST_ROOT_PATH;
 
 use super::event::ProbeEvent;
 use super::event::RawStack;
@@ -46,10 +47,12 @@ use perf_event_open_sys::bindings::PERF_TYPE_SOFTWARE;
 use perf_event_open_sys::perf_event_open;
 use std::collections::HashMap;
 use std::env::current_exe;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
@@ -96,9 +99,12 @@ pub static SYSAK_BTF_PATH: Lazy<Option<CString>> = Lazy::new(|| {
             if info.release.starts_with("5.10") {
                 return None;
             }
-            return Some(
-                CString::new(format!("{}/tools/vmlinux-{}", sysak, info.release)).unwrap(),
-            );
+            let path = format!("{}/tools/vmlinux-{}", sysak, info.release);
+            if !Path::new(&path).exists() {
+                log::warn!("failed to find custom btf on path: {}", path);
+                return None;
+            }
+            return Some(CString::new(path).unwrap());
         }
     }
     None
@@ -149,12 +155,16 @@ fn set_thread_need_exit() {
 
 fn get_self_path() -> PathBuf {
     let pid = unsafe { libc::getpid() };
-    let pm = ProcessMaps::new(pid as u32).unwrap();
+    let pm = ProcessMaps::new_local(pid as u32).unwrap();
     if let Some(p) = pm.find_so("libmullprof.so") {
         return PathBuf::from(p);
     }
 
     if let Some(p) = pm.find_so("libnofp.so") {
+        return PathBuf::from(p);
+    }
+
+    if let Some(p) = pm.find_so("libprofiler.so") {
         return PathBuf::from(p);
     }
 
@@ -172,7 +182,7 @@ pub struct Probes<'a> {
     sched_skel: sched::SchedMonitorSkel<'a>,
     pub hotspot_skel: hotspot::HotspotSkel<'a>,
     pub python_skel: python::PythonSkel<'a>,
-    interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
+    pub interpreter_dispatcher_skel: dispatcher::InterpreterDispatcherSkel<'a>,
     links: Vec<Link>,
     pub rx: Receiver<ProbeEvent>,
     pub pid_maps_info_map: PidMapsInfoMap,
@@ -267,7 +277,11 @@ impl<'a> Probes<'a> {
         let hotspot_skel = load_skel!(maps, hotspot::HotspotSkelBuilder);
         let python_skel = load_skel!(maps, python::PythonSkelBuilder);
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let ms = profile_period() as usize;
+        let sample_per_sec = 1000 / ms;
+        let ten_sec_samples = sample_per_sec * 10 * num_possible_cpus().unwrap_or(1);
+        log::info!("cache max stack samples: {}", ten_sec_samples);
+        let (tx, rx) = crossbeam_channel::bounded(ten_sec_samples);
 
         let trace_thread_handle = {
             let mut cloned_tx = tx.clone();
@@ -445,7 +459,7 @@ impl<'a> Probes<'a> {
         let ret_value = SystemAnalysis::from(value);
         assert!(ret_value.raw.pid == 0);
         sc.set_stack_ptregs_offset((ret_value.raw.address - ret_value.code_u64()) as u32);
-        sc.set_has_pid_namespace(self.pid != self.nspid);
+        sc.set_has_pid_namespace(self.pid != self.nspid && HOST_ROOT_PATH.get().is_none());
 
         system_config_skel
             .maps_mut()
@@ -562,9 +576,9 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, cpu: i32
         let user_stackid = (*raw).user_stack_id;
 
         let user_stack = if user_stackid == i32::MAX {
-            RawUserStack::Native((*raw).__bindgen_anon_1.user_stack[..stack_len].to_vec())
+            RawUserStack::Native((&(*raw).__bindgen_anon_1.user_stack)[..stack_len].to_vec())
         } else {
-            RawUserStack::Dynamic((*raw).__bindgen_anon_1.frames[..stack_len].to_vec())
+            RawUserStack::Dynamic((&(*raw).__bindgen_anon_1.frames)[..stack_len].to_vec())
         };
 
         let kernel_stack = if kernel_stackid >= 0 {
@@ -573,12 +587,20 @@ fn thread_poll_trace_event(map: &StackMap, tx: &mut Sender<ProbeEvent>, cpu: i32
             vec![]
         };
 
+        let trace_id = if (*raw).trace_id[0] != 0 {
+            let data = std::slice::from_raw_parts((*raw).trace_id.as_ptr() as *const u8, 32);
+            Some(unsafe { std::str::from_utf8_unchecked(data) }.to_owned())
+        } else {
+            None
+        };
+
         RawStack {
             cpu: cpu as u32,
             pid,
             time: (*raw).ktime,
             kernel: kernel_stack,
             user: user_stack,
+            trace_id,
         }
     };
     let comm = unsafe {

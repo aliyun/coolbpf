@@ -501,6 +501,8 @@ typedef struct V8ProcInfo {
 // COMM_LEN defines the maximum length we will receive for the comm of a task.
 #define COMM_LEN 16
 
+#define TRACE_ID_LEN 32
+
 #ifdef HAS_APM
 // 128-bit APM trace ID.
 typedef union ApmTraceID {
@@ -550,6 +552,8 @@ typedef struct Trace {
   ApmSpanID apm_transaction_id;
   // APM trace ID or all-zero if not present.
   ApmTraceID apm_trace_id;
+  // General trace id
+  unsigned char trace_id[TRACE_ID_LEN];
 #endif
   // The kernel stack ID.
   s32 kernel_stack_id;
@@ -883,8 +887,15 @@ typedef struct SystemConfig {
 #define PSR_MODE_MASK  0x0000000f
 #define PSR_MODE_EL0t  0x00000000
 
+typedef enum TracingType {
+    TRACE_NONE,
+    TRACE_GO_AGENT,
+} TracingType;
+
 typedef struct ApmIntProcInfo {
   u64 tls_offset;
+  TracingType tracing_type;
+  u64 tracing_field_offset;
 } ApmIntProcInfo;
 
 #endif

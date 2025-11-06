@@ -1,3 +1,4 @@
+use crate::get_host_root_path;
 use std::collections::HashMap;
 use std::collections::LinkedList;
 use std::fs::read_to_string;
@@ -34,7 +35,7 @@ pub struct ProcessHeatMap {
 impl ProcessHeatMap {
     pub fn add_process(&mut self, pid: u32) {
         self.heat_maps.entry(pid).or_insert_with(|| {
-            let comm = match read_to_string(format!("/proc/{pid}/comm")) {
+            let comm = match read_to_string(format!("{}/proc/{pid}/comm", get_host_root_path())) {
                 Ok(mut comm) => {
                     comm.pop();
                     comm
@@ -57,7 +58,7 @@ impl ProcessHeatMap {
                 // find it in previous heatmap
                 if base < heat.base {
                     for single in self.done.iter_mut() {
-                        if single.base == base {
+                        if pid == single.pid && single.base == base {
                             single.inc(slot);
                             return;
                         }

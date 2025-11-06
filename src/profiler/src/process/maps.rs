@@ -1,4 +1,5 @@
 use crate::symbollizer::file_id::FileId64;
+use crate::get_host_root_path;
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use std::io::BufReader;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct DiskFileKey {
@@ -114,7 +116,7 @@ impl ProcessMapsEntry {
         if self.is_anonymous() || self.is_vdso() {
             "".to_owned()
         } else {
-            format!("/proc/{}/root/{}", pid, self.path.as_ref().unwrap())
+            format!("{}/proc/{}/root/{}", get_host_root_path(), pid, self.path.as_ref().unwrap())
         }
     }
 }
@@ -142,8 +144,7 @@ impl DerefMut for ProcessMaps {
 }
 
 impl ProcessMaps {
-    pub fn new(pid: u32) -> Result<Self> {
-        let maps_path = Path::new("/proc").join(pid.to_string()).join("maps");
+    fn new_inner(maps_path: PathBuf) -> Result<Self> {
         let file = File::open(maps_path)?;
         let reader = BufReader::new(file);
 
@@ -186,6 +187,16 @@ impl ProcessMaps {
             entries.insert(entry.start, entry);
         }
         Ok(Self { entries })
+    }
+
+    pub fn new(pid: u32) -> Result<Self> {
+        let maps_path = Path::new(get_host_root_path()).join("proc").join(pid.to_string()).join("maps");
+        Self::new_inner(maps_path)
+    }
+
+    pub fn new_local(pid: u32) -> Result<Self> {
+        let maps_path = Path::new("/proc").join(pid.to_string()).join("maps");
+        Self::new_inner(maps_path)
     }
 
     /// Compares two `ProcessMaps` instances and returns the added and removed entries.

@@ -17,7 +17,7 @@ use super::libc_decode::extract_tsd_info_native;
 
 /// Determines if the DSO filename potentially contains pthread code
 pub fn is_potential_tsd_dso(filename: &str) -> bool {
-    let libc_regex: Regex = Regex::new(r".*/(ld-musl|libpthread)([-.].*)?\.so").unwrap();
+    let libc_regex: Regex = Regex::new(r".*/(ld-musl|libc|libpthread)([-.].*)?\.so").unwrap();
     libc_regex.is_match(filename)
 }
 

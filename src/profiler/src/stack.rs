@@ -1,4 +1,5 @@
 use crate::interpreter::Interpreter;
+use crate::is_enable_tracing;
 use crate::pb::LivetraceCell;
 use crate::pb::LivetraceList;
 use crate::pb::Ustack;
@@ -60,6 +61,7 @@ pub enum Frame {
 pub struct Stack {
     pub count: u32,
     pub frames: Vec<Symbol>,
+    pub trace_id: Option<String>,
 }
 
 impl Stack {
@@ -105,6 +107,7 @@ impl Stack {
         }
 
         stack.count = cnt;
+        stack.trace_id = raw.trace_id.clone();
         Ok(stack)
     }
 
@@ -138,7 +141,11 @@ impl ToString for Stack {
             .collect::<Vec<String>>()
             .join(";");
 
-        format!("{} {}", s, self.count)
+        if is_enable_tracing() {
+            return format!("{} {} {}", s, self.count, self.trace_id.as_deref().unwrap_or("null"));
+        } else {
+            return format!("{} {}", s, self.count);
+        }
     }
 }
 

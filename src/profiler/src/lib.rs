@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 pub mod error;
 pub mod executable;
 pub mod interpreter;
@@ -29,6 +30,12 @@ pub static ENABLE_SYMBOLIZER: AtomicBool = AtomicBool::new(true);
 pub static SYMBOL_FILE_MAX_SIZE: AtomicU64 = AtomicU64::new(u64::MAX);
 pub static LIVETRACE_ENABLE_CPU_INFO: AtomicBool = AtomicBool::new(false);
 pub static LIVETRACE_ENABLE_FUNCTION_OFFSET: AtomicBool = AtomicBool::new(false);
+pub static HOST_ROOT_PATH: OnceLock<String> = OnceLock::new();
+pub static ENABLE_TRACING: AtomicBool = AtomicBool::new(false);
+
+pub fn get_host_root_path() -> &'static str {
+    HOST_ROOT_PATH.get().map(|s| s.as_str()).unwrap_or("/")
+}
 
 pub fn is_enable_cpuno() -> bool {
     LIVETRACE_ENABLE_CPU_INFO.load(Ordering::SeqCst)
@@ -48,6 +55,10 @@ pub fn is_enable_symbolizer() -> bool {
 
 pub fn symbol_file_max_size() -> u64 {
     SYMBOL_FILE_MAX_SIZE.load(Ordering::SeqCst)
+}
+
+pub fn is_enable_tracing() -> bool {
+    ENABLE_TRACING.load(Ordering::SeqCst)
 }
 
 pub fn symbol_file_max_symbols() -> u64 {
@@ -103,6 +114,25 @@ pub extern "C" fn livetrace_disable_symbolizer() {
 }
 
 #[no_mangle]
+pub extern "C" fn livetrace_set_host_root_path(path: *const libc::c_char) -> i32 {
+    let path = unsafe { CStr::from_ptr(path) };
+    let path = match path.to_str() {
+        Ok(path) => path,
+        Err(_e) => {
+            return -1;
+        }
+    };
+    let path = path.to_string();
+    HOST_ROOT_PATH.set(path);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn livetrace_enable_tracing() {
+    ENABLE_TRACING.store(true, Ordering::SeqCst);
+}
+
+#[no_mangle]
 pub extern "C" fn livetrace_profiler_create() -> *mut Profiler<'static> {
     Box::into_raw(Box::new(Profiler::new()))
 }
@@ -110,7 +140,7 @@ pub extern "C" fn livetrace_profiler_create() -> *mut Profiler<'static> {
 #[no_mangle]
 pub extern "C" fn livetrace_profiler_destroy(profiler: *mut Profiler) {
     if !profiler.is_null() {
-        unsafe { std::ptr::drop_in_place(profiler) }
+        unsafe { Box::from_raw(profiler); }
     }
 }
 

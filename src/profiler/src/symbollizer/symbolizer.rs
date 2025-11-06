@@ -2,6 +2,7 @@ use crate::is_enable_cpuno;
 use crate::is_enable_function_offset;
 use crate::process::maps::ProcessMaps;
 use crate::MAX_NUM_OF_PROCESSES;
+use crate::get_host_root_path;
 use anyhow::bail;
 use anyhow::Result;
 use lru::LruCache;
@@ -125,7 +126,7 @@ impl Symbolizer {
 
     pub fn proc_comm(&mut self, pid: u32) -> Result<&String> {
         let get_comm = || {
-            let mut comm = read_to_string(format!("/proc/{pid}/comm"))?;
+            let mut comm = read_to_string(format!("{}/proc/{pid}/comm", get_host_root_path()))?;
             comm.pop();
             Ok(comm)
         };
@@ -133,7 +134,7 @@ impl Symbolizer {
         self.procs
             .try_get_or_insert(pid, || -> Result<String> {
                 let comm = if let Some(reg) = &self.adb_regex {
-                    let cmdline = read_to_string(format!("/proc/{pid}/cmdline"))?;
+                    let cmdline = read_to_string(format!("{}/proc/{pid}/cmdline", get_host_root_path()))?;
                     reg.find(&cmdline)
                         .map_or_else(|| get_comm(), |x| Ok(x.as_str().to_owned()))
                 } else {
@@ -182,6 +183,11 @@ impl Symbolizer {
             syms.push(Symbol::new(format!("{}+0x{:x}", sym.name, offset)));
         }
         syms
+    }
+
+    pub fn cache_process(&mut self, pid: u32) {
+        let _ = self.proc_comm(pid);
+        self.proc_files.cache(pid, &mut self.file_symbols);
     }
 }
 

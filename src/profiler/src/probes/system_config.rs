@@ -1,5 +1,6 @@
 use crate::SYSTEM_PROFILING;
 
+use std::path::Path;
 use super::types::SystemConfig;
 use libbpf_rs::btf::types::Composite;
 use libbpf_rs::btf::types::MemberAttr;
@@ -12,10 +13,15 @@ pub fn get_system_config() -> SystemConfig {
     let btf_path: Option<String> = {
         if let Ok(sysak) = std::env::var("SYSAK_WORK_PATH") {
             if let Ok(info) = uname::uname() {
-                if !info.release.starts_with("5.10") {
-                    Some(format!("{}/tools/vmlinux-{}", sysak, info.release))
-                } else {
+                if info.release.starts_with("5.10") {
                     None
+                } else {
+                    let path = format!("{}/tools/vmlinux-{}", sysak, info.release);
+                    if !Path::new(&path).exists() {
+                        None
+                    } else {
+                        Some(path)
+                    }
                 }
             } else {
                 None
