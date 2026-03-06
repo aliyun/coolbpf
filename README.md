@@ -43,6 +43,19 @@ In the tools/examples/syscall directory, we provide examples of using libcoolbpf
 
 The location of the final generated syscall executable program is: `build/tools/examples/syscall/syscall`.
 
+## Using AgentSight
+
+In the src/agentsight directory, we provide AgentSight — a zero-instrumentation LLM agent observability tool built with eBPF. AgentSight monitors AI agent behavior through SSL/TLS traffic interception and process monitoring at the kernel level, requiring no code changes, no new dependencies, and no SDKs.
+
+Key features:
+* **Zero Instrumentation**: Works with any AI framework or application out of the box.
+* **SSL/TLS Traffic Capture**: Intercepts real unencrypted requests/responses at the system boundary.
+* **Process Monitoring**: Tracks all process behaviors, subprocess executions, and file operations.
+* **Real-time Visualization**: Provides timeline, process tree, and event log views via a web interface.
+* **Low Overhead**: Less than 3% CPU overhead due to optimized eBPF kernel-space data collection.
+
+For more details, refer to [src/agentsight/README.md](src/agentsight/README.md).
+
 ## Using BPF kernel modules
 
 In the bpf_kernel_modules directory, we provide additional kernel module implementations as libraries to supply extra [kernel functions](https://docs.kernel.org/bpf/kfuncs.html) for specific types of BPF programs. To use these libraries, first compile the kernel module, then load it, and finally use the kernel functions exposed by the module in your eBPF program. For example, with eNetSTL library designed for XDP programs:

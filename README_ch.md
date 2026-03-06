@@ -35,6 +35,19 @@ coolbpf项目，以CO-RE（Compile Once-Run Everywhere）为基础实现，
 
 最终生成的syscall可执行程序位置在：`build/tools/examples/syscall/syscall`。
 
+## 使用 AgentSight
+
+在 src/agentsight 目录下，我们提供了 AgentSight —— 一款基于 eBPF 的零侵入 LLM Agent 可观测性工具。AgentSight 通过在内核层拦截 SSL/TLS 流量和监控进程行为，实现对 AI Agent 的全面观测，无需修改代码、无需引入新依赖、无需集成 SDK。
+
+核心特性：
+* **零侵入**：开箱即用，兼容任意 AI 框架和应用。
+* **SSL/TLS 流量捕获**：在系统边界拦截真实的未加密请求和响应。
+* **进程监控**：追踪所有进程行为、子进程执行和文件操作。
+* **实时可视化**：通过 Web 界面提供时间线、进程树和事件日志视图。
+* **低开销**：基于优化的 eBPF 内核态数据采集，CPU 开销低于 3%。
+
+详细信息请参考 [src/agentsight/README.md](src/agentsight/README.md)。
+
 ## 使用 BPF kernel modules 
 
 在 bpf_kernel_modules 目录，我们提供了额外的内核模块实现的library, 为特定类型的BPF程序提供额外的 [kernel functions](https://docs.kernel.org/bpf/kfuncs.html)。使用这些library, 首先编译内核模块然后加载内核模块，最后在eBPF程序中使用模块暴露的kernel function即可。以为XDP程序设计的eNetSTL
