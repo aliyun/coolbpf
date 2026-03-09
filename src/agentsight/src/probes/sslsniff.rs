@@ -4,7 +4,7 @@
 // SSL/TLS sniffer built on libbpf-rs.
 // Exposes a `SslSniff` struct with a builder-style API.
 
-use crate::config;
+use crate::{config, http_event::HTTPEvent, http_parser::HTTPParser};
 use anyhow::{Context, Result, bail};
 use libbpf_rs::{
     Link, RingBufferBuilder, UprobeOpts,
@@ -17,7 +17,10 @@ use std::{
     io::Write,
     mem::MaybeUninit,
     path::Path,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -34,6 +37,12 @@ const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 const POLL_TIMEOUT_MS: u64 = 100;
 
 pub type SslEvent = bpf::probe_SSL_data_t;
+
+impl SslEvent {
+    pub fn payload(&self) -> Option<&str> {
+        std::str::from_utf8(&self.buf[..self.buf_size as usize]).ok()
+    }
+}
 
 // ─── Main struct ──────────────────────────────────────────────────────────────
 pub struct SslSniff {
@@ -147,9 +156,8 @@ impl SslSniff {
                 // SAFETY: eBPF side guarantees the layout and alignment.
                 // Allocate on heap to avoid stack overflow (RawEvent is ~512KB due to buf field)
                 let raw = unsafe { &*(data.as_ptr() as *const RawEvent) };
-                let event: Box<SslEvent> = Box::new(unsafe {
-                    std::ptr::read(raw as *const _ as *const SslEvent)
-                });
+                let event: Box<SslEvent> =
+                    Box::new(unsafe { std::ptr::read(raw as *const _ as *const SslEvent) });
                 let _ = tx.send(event);
                 0
             })
