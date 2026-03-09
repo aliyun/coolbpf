@@ -10,18 +10,30 @@
 #define RING_BUFFER_SIZE (2 * 1024 * 1024)  // 2MB ring buffer
 #define TASK_COMM_LEN 16
 
+typedef signed char         s8;
+typedef unsigned char       u8;
+typedef signed short        s16;
+typedef unsigned short      u16;
+typedef signed int          s32;
+typedef unsigned int        u32;
+typedef signed long long    s64;
+typedef unsigned long long  u64;
+typedef _Bool bool;
+typedef u32 __be32;
+typedef u64 __be64;
+
 struct probe_SSL_data_t {
-    __u64 timestamp_ns;
-    __u64 delta_ns;
-    __u32 pid;
-    __u32 tid;
-    __u32 uid;
-    __u32 len;
-    __u32 buf_size;         // Actual bytes copied to buf
+    u64 timestamp_ns;
+    u64 delta_ns;
+    u32 pid;
+    u32 tid;
+    u32 uid;
+    u32 len;
+    u32 buf_size;         // Actual bytes copied to buf
     int buf_filled;
     int rw;
     char comm[TASK_COMM_LEN];
-    __u8 buf[MAX_BUF_SIZE];
+    u8 buf[MAX_BUF_SIZE];
     int is_handshake;
 };
 

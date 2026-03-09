@@ -3,7 +3,7 @@
 //
 // Based on sslsniff from BCC by Adrian Lopez & Mark Drayton.
 // 15-Aug-2023   Yusheng Zheng   Created this.
-#include <vmlinux.h>
+#include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
@@ -18,7 +18,7 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10240);
-    __type(key, __u32);
+    __type(key, u32);
     __type(value, size_t*);
 } readbytes_ptrs SEC(".maps");
 
@@ -37,15 +37,15 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_ENTRIES);
-    __type(key, __u32);
-    __type(value, __u64);
+    __type(key, u32);
+    __type(value, u64);
 } start_ns SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_ENTRIES);
-    __type(key, __u32);
-    __type(value, __u64);
+    __type(key, u32);
+    __type(value, u64);
 } bufs SEC(".maps");
 
 const volatile pid_t targ_pid = 0;
