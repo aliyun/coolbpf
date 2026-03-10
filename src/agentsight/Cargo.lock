@@ -47,6 +47,7 @@ dependencies = [
  "read-process-memory",
  "regex",
  "serde",
+ "serde_json",
  "sha2",
  "structopt",
  "symbolic-common",
