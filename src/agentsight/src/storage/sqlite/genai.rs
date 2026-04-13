@@ -2,6 +2,12 @@
 //!
 //! Stores GenAI events (LLM calls, tool uses, etc.) to SQLite when SLS is not configured.
 //! Implements the GenAIExporter trait for pluggable integration.
+//!
+//! # Size Limit
+//!
+//! The database size can be configured via `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB` environment
+//! variable (default: 200 MB). When approaching 90% of the limit, old records are pruned
+//! automatically. The size check includes the main database file plus WAL and SHM files.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -10,6 +16,31 @@ use rusqlite::{params, Connection};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::exporter::GenAIExporter;
 use super::connection::{create_connection, default_base_path};
+
+// ─── Size limit configuration ──────────────────────────────────────────────────
+
+/// Environment variable name for max database size in MB
+const ENV_MAX_DB_SIZE_MB: &str = "AGENTSIGHT_GENAI_DB_MAX_SIZE_MB";
+/// Default max database size: 200 MB
+const DEFAULT_MAX_DB_SIZE_MB: u64 = 200;
+/// Percentage of records to prune per attempt
+const PRUNE_PERCENT: f64 = 0.05;
+/// Maximum prune retry attempts to avoid infinite loop
+const MAX_PRUNE_RETRIES: u32 = 3;
+
+/// Get max database size from environment variable or use default
+fn get_max_db_size() -> u64 {
+    std::env::var(ENV_MAX_DB_SIZE_MB)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_DB_SIZE_MB)
+        * 1024 * 1024
+}
+
+/// Get prune threshold (90% of max)
+fn get_prune_threshold() -> u64 {
+    (get_max_db_size() as f64 * 0.9) as u64
+}
 
 // ─── Query result types ────────────────────────────────────────────────────────
 
@@ -104,6 +135,7 @@ pub struct TraceEventDetail {
 /// SQLite-backed GenAI event storage
 pub struct GenAISqliteStore {
     conn: Mutex<Connection>,
+    db_path: PathBuf,
 }
 
 impl GenAISqliteStore {
@@ -118,8 +150,21 @@ impl GenAISqliteStore {
         let conn = create_connection(path)?;
         let store = GenAISqliteStore {
             conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
         };
         store.init_tables()?;
+        
+        // Log current database size on startup
+        let current_size = store.get_total_db_size();
+        let max_size = get_max_db_size();
+        let threshold = get_prune_threshold();
+        log::info!(
+            "GenAISqliteStore initialized: db_size={}MB, threshold={}MB, max={}MB",
+            current_size / 1024 / 1024,
+            threshold / 1024 / 1024,
+            max_size / 1024 / 1024
+        );
+        
         Ok(store)
     }
 
@@ -569,8 +614,43 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Store a single GenAI event
+    /// Store a single GenAI event with size limit enforcement
     fn store_event(&self, event: &GenAISemanticEvent) -> Result<(), Box<dyn std::error::Error>> {
+        // Check size before write and prune if needed
+        self.check_and_prune_if_needed()?;
+
+        // Attempt insert with retry on SQLITE_FULL
+        let mut retries = 0;
+        loop {
+            match self.try_insert_event(event) {
+                Ok(()) => {
+                    // Success: execute checkpoint to flush WAL to main DB
+                    self.checkpoint()?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Check if it's SQLITE_FULL (extended code 13)
+                    if let Some(rusqlite::Error::SqliteFailure(err, _)) = 
+                        e.downcast_ref::<rusqlite::Error>() {
+                        if err.extended_code == 13 && retries < MAX_PRUNE_RETRIES {
+                            retries += 1;
+                            log::warn!(
+                                "Database full (SQLITE_FULL), pruning old records (attempt {}/{})",
+                                retries, MAX_PRUNE_RETRIES
+                            );
+                            self.prune_old_records()?;
+                            self.checkpoint()?;
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Try to insert an event without size check
+    fn try_insert_event(&self, event: &GenAISemanticEvent) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let event_json = serde_json::to_string(event)?;
 
@@ -733,6 +813,135 @@ impl GenAISqliteStore {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    // ─── Size limit methods ───────────────────────────────────────────────────
+
+    /// Get total database size (main db + wal + shm)
+    fn get_total_db_size(&self) -> u64 {
+        let mut total = 0u64;
+        
+        // Main database file
+        if let Ok(meta) = std::fs::metadata(&self.db_path) {
+            total += meta.len();
+        }
+        
+        // WAL file
+        let wal_path = format!("{}-wal", self.db_path.display());
+        if let Ok(meta) = std::fs::metadata(&wal_path) {
+            total += meta.len();
+        }
+        
+        // SHM file
+        let shm_path = format!("{}-shm", self.db_path.display());
+        if let Ok(meta) = std::fs::metadata(&shm_path) {
+            total += meta.len();
+        }
+        
+        total
+    }
+
+    /// Check database size and prune if approaching limit
+    /// 
+    /// Keeps pruning until size drops below threshold to avoid repeated triggers.
+    fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut current_size = self.get_total_db_size();
+        let threshold = get_prune_threshold();
+        
+        if current_size < threshold {
+            return Ok(());
+        }
+        
+        log::info!(
+            "Database size {}MB exceeding threshold {}MB, pruning old records",
+            current_size / 1024 / 1024,
+            threshold / 1024 / 1024
+        );
+        
+        // Keep pruning until below threshold (max 5 iterations to prevent infinite loop)
+        let mut iterations = 0;
+        while current_size >= threshold && iterations < 5 {
+            iterations += 1;
+            self.prune_old_records()?;
+            self.checkpoint()?;
+            current_size = self.get_total_db_size();
+            
+            if current_size >= threshold {
+                log::info!(
+                    "Database still {}MB (threshold {}MB), continue pruning (iteration {})",
+                    current_size / 1024 / 1024,
+                    threshold / 1024 / 1024,
+                    iterations
+                );
+            }
+        }
+        
+        log::info!(
+            "Pruning complete, database size now {}MB",
+            current_size / 1024 / 1024
+        );
+        
+        Ok(())
+    }
+
+    /// Prune old records to free up space
+    /// 
+    /// Deletes a percentage of oldest records based on id.
+    fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        
+        // Get total count
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM genai_events",
+            [],
+            |row| row.get(0)
+        )?;
+        
+        if count == 0 {
+            return Ok(());
+        }
+        
+        // Calculate how many to delete (5% of total)
+        let delete_count = ((count as f64) * PRUNE_PERCENT).max(1.0) as i64;
+        
+        log::info!(
+            "Pruning {} of {} records ({:.1}%)",
+            delete_count, count, PRUNE_PERCENT * 100.0
+        );
+        
+        // Delete oldest records by id
+        let deleted = conn.execute(
+            "DELETE FROM genai_events WHERE id IN (
+                SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1
+            )",
+            params![delete_count]
+        )?;
+        
+        log::info!("Deleted {} records", deleted);
+        
+        Ok(())
+    }
+
+    /// Execute WAL checkpoint and VACUUM to reclaim disk space
+    /// 
+    /// 1. VACUUM: rebuild database to compact data
+    /// 2. Checkpoint: flush and truncate WAL file
+    /// 
+    /// Note: VACUUM in WAL mode creates a new db file, so we need to
+    /// re-enable WAL and checkpoint after VACUUM.
+    fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        
+        // VACUUM rebuilds the database (works better before checkpoint in WAL mode)
+        conn.execute_batch("VACUUM;")?;
+        
+        // Re-enable WAL mode (VACUUM may reset it)
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        
+        // Checkpoint with TRUNCATE to shrink WAL file
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        
         Ok(())
     }
 }
