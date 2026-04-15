@@ -1,40 +1,32 @@
-build: build-frontend build-bpf build-rust
+# =============================================================================
+# BUILD
+# =============================================================================
 
-build-frontend:
-	cd frontend && npm install && npm run build
+.PHONY: build
+build: ## Build agentsight binary
+	cargo build --release
 
-build-bpf:
-	make -C bpf
+.PHONY: build-frontend
+build-frontend: ## Build and embed frontend into frontend-dist/
+	cd dashboard && npm install && npm run build:embed
 
-build-rust:
-	cd collector && cargo build --release
+.PHONY: build-all
+build-all: build-frontend build ## Build frontend then Rust binary (with embedded UI)
 
-clean:
-	make -C bpf clean
-	cd collector && cargo clean
-	cd frontend && rm -rf .next node_modules dist
+# =============================================================================
+# INSTALL
+# =============================================================================
 
-install:
-	sudo apt update
-	sudo apt-get install -y --no-install-recommends \
-        libelf1 libelf-dev zlib1g-dev \
-        make clang llvm
-	# Install Node.js if not present
-	@command -v node >/dev/null 2>&1 || { \
-		echo "Installing Node.js..."; \
-		curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; \
-		sudo apt-get install -y nodejs; \
-	}
-	# Install Rust if not present
-	@command -v cargo >/dev/null 2>&1 || { \
-		echo "Installing Rust..."; \
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
-		source ~/.cargo/env; \
-	}
+PREFIX ?= /usr/local
 
-test:
-	make -C bpf test
-	cd collector && cargo test
-	cd frontend && npm run build
+.PHONY: install
+install: ## Install agentsight binary and set BPF capabilities
+	install -d -m 0755 $(DESTDIR)$(PREFIX)/bin
+	install -p -m 0755 target/release/agentsight $(DESTDIR)$(PREFIX)/bin/
+	setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(PREFIX)/bin/agentsight
 
-.PHONY: build build-frontend build-bpf build-rust clean install test
+.PHONY: help
+help: ## Show this help message
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+.DEFAULT_GOAL := help
