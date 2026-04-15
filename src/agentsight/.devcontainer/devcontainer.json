@@ -1,6 +1,0 @@
-{
-	"build": {
-		"context": "..",
-		"dockerfile": "../dev.dockerfile"
-	}
-}

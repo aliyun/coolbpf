@@ -9,20 +9,23 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "sslsniff.h"
-
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, RING_BUFFER_SIZE);
-} rb SEC(".maps");
+#include "common.h"  
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
+    __uint(max_entries, 1024);
     __type(key, u32);
     __type(value, size_t*);
 } readbytes_ptrs SEC(".maps");
 
-#define MAX_ENTRIES 10240
+#define MAX_ENTRIES 1024
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_ENTRIES);
+    __type(key, u32);
+    __type(value, u64);
+} ssl_ptrs SEC(".maps");
 
 #define min(x, y)                      \
     ({                                 \
@@ -48,20 +51,15 @@ struct {
     __type(value, u64);
 } bufs SEC(".maps");
 
-const volatile pid_t targ_pid = 0;
-const volatile uid_t targ_uid = -1;
 
 static __always_inline bool trace_allowed(u32 uid, u32 pid)
 {
-    /* filters */
-    if (targ_pid && targ_pid != pid)
-        return false;
-    if (targ_uid != -1) {
-        if (targ_uid != uid) {
-            return false;
-        }
+    /* Check traced_processes map first - if map has entries, only trace those PIDs */
+    u32 *traced = bpf_map_lookup_elem(&traced_processes, &pid);
+    if (traced) {
+        return true;
     }
-    return true;
+    return false;
 }
 
 SEC("uprobe/do_handshake")
@@ -77,6 +75,8 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
     }
 
     /* store arg info for later lookup */
+    u64 ssl_ptr_val = (u64)ssl;
+    bpf_map_update_elem(&ssl_ptrs, &tid, &ssl_ptr_val, BPF_ANY);
     bpf_map_update_elem(&bufs, &tid, &buf, BPF_ANY);
     bpf_map_update_elem(&start_ns, &tid, &ts, BPF_ANY);
     return 0;
@@ -104,6 +104,10 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
         return 0;
     u64 delta_ns = ts - *tsp;
 
+    /* lookup ssl pointer for connection tracking */
+    u64 *ssl_ptrp = bpf_map_lookup_elem(&ssl_ptrs, &tid);
+    u64 ssl_ptr = ssl_ptrp ? *ssl_ptrp : 0;
+
     int len = PT_REGS_RC(ctx);
     if (len <= 0)  // no data
         return 0;
@@ -113,6 +117,7 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
     if (!data)
         return 0;
 
+    data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = delta_ns;
     data->pid = pid;
@@ -123,6 +128,7 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
     data->buf_size = 0;
     data->rw = rw;
     data->is_handshake = false;
+    data->ssl_ptr = ssl_ptr;
     u32 buf_copy_size = min((size_t)MAX_BUF_SIZE, (size_t)len);
 
     bpf_get_current_comm(&data->comm, sizeof(data->comm));
@@ -132,6 +138,7 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
 
     bpf_map_delete_elem(&bufs, &tid);
     bpf_map_delete_elem(&start_ns, &tid);
+    bpf_map_delete_elem(&ssl_ptrs, &tid);
 
     if (!ret) {
         data->buf_filled = 1;
@@ -168,6 +175,8 @@ int BPF_UPROBE(probe_SSL_write_ex_enter, void *ssl, void *buf, size_t num, size_
         return 0;
     }
 
+    u64 ssl_ptr_val = (u64)ssl;
+    bpf_map_update_elem(&ssl_ptrs, &tid, &ssl_ptr_val, BPF_ANY);
     bpf_map_update_elem(&bufs, &tid, &buf, BPF_ANY);
     bpf_map_update_elem(&start_ns, &tid, &ts, BPF_ANY); 
     
@@ -188,6 +197,8 @@ int BPF_UPROBE(probe_SSL_read_ex_enter, void *ssl, void *buf, size_t num, size_t
         return 0;
     }
 
+    u64 ssl_ptr_val = (u64)ssl;
+    bpf_map_update_elem(&ssl_ptrs, &tid, &ssl_ptr_val, BPF_ANY);
     bpf_map_update_elem(&bufs, &tid, &buf, BPF_ANY);
     bpf_map_update_elem(&start_ns, &tid, &ts, BPF_ANY); 
 
@@ -218,6 +229,10 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
         return 0;
     u64 delta_ns = ts - *tsp;
 
+    /* lookup ssl pointer for connection tracking */
+    u64 *ssl_ptrp = bpf_map_lookup_elem(&ssl_ptrs, &tid);
+    u64 ssl_ptr = ssl_ptrp ? *ssl_ptrp : 0;
+
     if (len <= 0)  // no data
         return 0;
 
@@ -226,6 +241,7 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
     if (!data)
         return 0;
 
+    data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = delta_ns;
     data->pid = pid;
@@ -236,6 +252,7 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
     data->buf_size = 0;
     data->rw = rw;
     data->is_handshake = false;
+    data->ssl_ptr = ssl_ptr;
     
     /* Explicit bounds clamping to satisfy eBPF verifier
      * Use bitmask first to ensure value range, then clamp to actual max */
@@ -250,6 +267,7 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
 
     bpf_map_delete_elem(&bufs, &tid);
     bpf_map_delete_elem(&start_ns, &tid);
+    bpf_map_delete_elem(&ssl_ptrs, &tid);
 
     if (!ret) {
         data->buf_filled = 1;
@@ -314,6 +332,8 @@ int BPF_UPROBE(probe_SSL_do_handshake_enter, void *ssl) {
     }
 
     /* store arg info for later lookup */
+    u64 ssl_ptr_val = (u64)ssl;
+    bpf_map_update_elem(&ssl_ptrs, &tid, &ssl_ptr_val, BPF_ANY);
     bpf_map_update_elem(&start_ns, &tid, &ts, BPF_ANY);
     return 0;
 }
@@ -348,6 +368,7 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     if (!data)
         return 0;
 
+    data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = ts;
     data->delta_ns = ts - *tsp;
     data->pid = pid;

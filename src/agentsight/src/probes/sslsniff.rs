@@ -4,12 +4,13 @@
 // SSL/TLS sniffer built on libbpf-rs.
 // Exposes a `SslSniff` struct with a builder-style API.
 
-use crate::{config, http_event::HTTPEvent, http_parser::HTTPParser};
+use crate::config;
 use anyhow::{Context, Result, bail};
 use libbpf_rs::{
-    Link, RingBufferBuilder, UprobeOpts,
+    Link, MapHandle, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
 };
+use std::os::fd::AsFd;
 use procfs::process::Process;
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +27,7 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
-mod bpf {
+pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/sslsniff.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/sslsniff.rs"));
 }
@@ -36,11 +37,136 @@ use bpf::*;
 const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 const POLL_TIMEOUT_MS: u64 = 100;
 
-pub type SslEvent = bpf::probe_SSL_data_t;
+/// User-space SslEvent - lightweight version of BPF probe_SSL_data_t
+/// 
+/// Unlike the BPF version which has a 512KB fixed-size buffer, this struct
+/// only stores the actual data received, significantly reducing memory usage.
+#[derive(Debug, Clone)]
+pub struct SslEvent {
+    pub source: u32,
+    pub timestamp_ns: u64,
+    pub delta_ns: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub uid: u32,
+    pub len: u32,
+    pub rw: i32,
+    pub comm: String,
+    /// Actual data buffer (only contains received data, not full 512KB)
+    pub buf: Vec<u8>,
+    pub is_handshake: bool,
+    pub ssl_ptr: u64,
+}
 
 impl SslEvent {
+    /// Create SslEvent from BPF raw event, copying only the actual data
+    ///
+    /// Note: BPF timestamp_ns is from bpf_ktime_get_ns() which returns
+    /// nanoseconds since system boot. We convert it to Unix timestamp.
+    pub fn from_bpf(raw: &bpf::probe_SSL_data_t) -> Self {
+        let buf_size = raw.buf_size as usize;
+        let buf = raw.buf[..buf_size.min(MAX_BUF_SIZE)].to_vec();
+
+        // Convert ktime (nanoseconds since boot) to Unix timestamp
+        let ktime_ns = raw.timestamp_ns as u64;
+        let unix_ts_ns = config::ktime_to_unix_ns(ktime_ns);
+
+        Self {
+            source: raw.source as u32,
+            timestamp_ns: unix_ts_ns,
+            delta_ns: raw.delta_ns as u64,
+            pid: raw.pid as u32,
+            tid: raw.tid as u32,
+            uid: raw.uid as u32,
+            len: raw.len as u32,
+            rw: raw.rw,
+            comm: Self::parse_comm(&raw.comm),
+            buf,
+            is_handshake: raw.is_handshake != 0,
+            ssl_ptr: raw.ssl_ptr as u64,
+        }
+    }
+
+    /// Parse comm from raw C char array
+    fn parse_comm(comm: &[i8; 16]) -> String {
+        let bytes: Vec<u8> = comm
+            .iter()
+            .map(|&c| c as u8)
+            .take_while(|&b| b != 0)
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Get payload as string (if valid UTF-8)
     pub fn payload(&self) -> Option<&str> {
-        std::str::from_utf8(&self.buf[..self.buf_size as usize]).ok()
+        std::str::from_utf8(&self.buf).ok()
+    }
+
+    /// Check if payload starts with "HTTP" (case-insensitive) without converting to string
+    /// This is useful for detecting HTTP responses without UTF-8 validation overhead
+    pub fn is_http(&self) -> bool {
+        self.is_http_request() || self.is_http_response()
+    }
+
+    pub fn is_http_request(&self) -> bool {
+        const METHODS: &[&[u8]] = &[b"GET ", b"POST", b"PUT ", b"DELE", b"HEAD", b"OPTI", b"PATC"];
+        METHODS.iter().any(|m| self.buf.starts_with(m))
+    }
+
+    pub fn is_http_response(&self) -> bool {
+        self.buf.starts_with(b"HTTP")
+    }
+
+    /// Check if payload is an HTTP/2 connection preface
+    pub fn is_http2_preface(&self) -> bool {
+        self.buf.starts_with(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+    }
+
+    /// Heuristic check for HTTP/2 binary frame data
+    pub fn is_http2_frame(&self) -> bool {
+        if self.buf.len() < 9 {
+            return false;
+        }
+        // Parse 3-byte frame length
+        let length = ((self.buf[0] as usize) << 16)
+            | ((self.buf[1] as usize) << 8)
+            | (self.buf[2] as usize);
+        // Frame type must be a known type (0..=9)
+        let frame_type = self.buf[3];
+        if frame_type > 9 {
+            return false;
+        }
+        // Reserved bit of stream ID must be 0
+        if self.buf[5] & 0x80 != 0 {
+            return false;
+        }
+        // Frame payload must fit in the buffer
+        9 + length <= self.buf.len()
+    }
+
+    /// Check if payload is HTTP/2 (preface or binary frames)
+    pub fn is_http2(&self) -> bool {
+        self.is_http2_preface() || self.is_http2_frame()
+    }
+
+    /// Get comm as a String
+    pub fn comm_str(&self) -> String {
+        self.comm.clone()
+    }
+
+    /// Get the SSL connection pointer for connection tracking
+    pub fn ssl_ptr(&self) -> u64 {
+        self.ssl_ptr
+    }
+
+    /// Get the connection ID (pid, ssl_ptr) for unique connection identification
+    pub fn connection_id(&self) -> (u32, u64) {
+        (self.pid, self.ssl_ptr)
+    }
+
+    /// Get buf_size (convenience method for compatibility)
+    pub fn buf_size(&self) -> u32 {
+        self.buf.len() as u32
     }
 }
 
@@ -53,19 +179,48 @@ pub struct SslSniff {
     skel: Box<SslsniffSkel<'static>>,
     _links: Vec<Link>,
     traced_files: HashSet<u64>,
-    // Use Box<SslEvent> in channel to avoid large stack copies (SslEvent is ~512KB)
-    tx: crossbeam_channel::Sender<Box<SslEvent>>,
-    rx: crossbeam_channel::Receiver<Box<SslEvent>>,
+    // Channel for user-space SslEvent (lightweight, no need for Box)
+    tx: crossbeam_channel::Sender<SslEvent>,
+    rx: crossbeam_channel::Receiver<SslEvent>,
 }
 
 impl SslSniff {
+    /// Create a new SslSniff with its own traced_processes map
     pub fn new() -> Result<Self> {
+        Self::new_with_traced_processes(None, None)
+    }
+
+    /// Create a new SslSniff with an optional external traced_processes map and shared ring buffer
+    /// 
+    /// # Arguments
+    /// * `traced_processes` - Optional external MapHandle for traced_processes (for map reuse)
+    /// * `rb` - Optional external MapHandle for shared ring buffer (for map reuse)
+    pub fn new_with_traced_processes(traced_processes: Option<&MapHandle>, rb: Option<&MapHandle>) -> Result<Self> {
         // ── Open + load skeleton ───────────────────────────────────────
         let mut builder = SslsniffSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
         // Keep MaybeUninit on the heap so its address is stable.
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
-        let open_skel = builder.open().context("failed to open BPF object")?;
+        let mut open_skel = builder.open().context("failed to open BPF object")?;
+
+        // If external traced_processes map is provided, reuse its fd
+        if let Some(map) = traced_processes {
+            open_skel
+                .maps_mut()
+                .traced_processes()
+                .reuse_fd(map.as_fd())
+                .context("failed to reuse external traced_processes map")?;
+        }
+
+        // If external rb map is provided, reuse its fd
+        if let Some(map) = rb {
+            open_skel
+                .maps_mut()
+                .rb()
+                .reuse_fd(map.as_fd())
+                .context("failed to reuse external rb map")?;
+        }
+
         let skel = open_skel.load().context("failed to load BPF object")?;
 
         // SAFETY: skel borrows open_object which lives in a Box<MaybeUninit>
@@ -97,8 +252,15 @@ impl SslSniff {
             return Ok(());
         }
 
+        // Debug: print all libs found
+        log::debug!("[attach_process] pid={pid}: found {} libs: {:?}", 
+            libs.len(), 
+            libs.iter().map(|(p, i, k)| (p.as_str(), *i, format!("{:?}", k))).collect::<Vec<_>>()
+        );
+
         for (path, inode, kind) in libs {
             // Skip libraries whose inode we already traced.
+            // Now using pid=-1 for global attach, so each library only needs to be attached once.
             if !self.traced_files.insert(inode) {
                 log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
                 continue;
@@ -107,18 +269,19 @@ impl SslSniff {
             log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
 
             let result = match kind {
-                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, pid),
-                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, pid),
-                SslLibKind::Nss => attach_nss(&mut self.skel, &path, pid),
+                // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
+                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
+                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
+                SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
                 SslLibKind::Boring => {
                     // BoringSSL doesn't export named symbols; detect by byte pattern.
                     match find_boringssl_offsets(&path) {
                         Some(off) => {
-                            attach_boringssl_by_offset(&mut self.skel, &path, &off, false, pid)
+                            attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
                         }
                         None => {
                             // Fall back to symbol-based attach (works for some builds).
-                            attach_openssl(&mut self.skel, &path, pid)
+                            attach_openssl(&mut self.skel, &path, -1)
                         }
                     }
                 }
@@ -154,10 +317,9 @@ impl SslSniff {
                     return 0;
                 }
                 // SAFETY: eBPF side guarantees the layout and alignment.
-                // Allocate on heap to avoid stack overflow (RawEvent is ~512KB due to buf field)
+                // Read raw BPF event and convert to user-space SslEvent (copies only actual data)
                 let raw = unsafe { &*(data.as_ptr() as *const RawEvent) };
-                let event: Box<SslEvent> =
-                    Box::new(unsafe { std::ptr::read(raw as *const _ as *const SslEvent) });
+                let event = SslEvent::from_bpf(raw);
                 let _ = tx.send(event);
                 0
             })
@@ -194,12 +356,12 @@ impl SslSniff {
     ///
     /// Blocks until an event arrives or the sender is disconnected.
     pub fn recv(&self) -> Option<SslEvent> {
-        self.rx.recv().ok().map(|boxed| *boxed)
+        self.rx.recv().ok()
     }
 
     /// Non-blocking variant of [`recv`](Self::recv).
     pub fn try_recv(&self) -> Option<SslEvent> {
-        self.rx.try_recv().ok().map(|boxed| *boxed)
+        self.rx.try_recv().ok()
     }
 }
 
@@ -393,6 +555,7 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
         }
         if let Some(kind) = classify_ssl_lib(&path_str) {
             seen_inodes.insert(inode);
+            let path_str = format!("/proc/{pid}/root{}", path_str);
             results.push((path_str, inode, kind));
         }
     }
