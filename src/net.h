@@ -6,13 +6,14 @@
 #ifndef COOLBPF_NET_H
 #define COOLBPF_NET_H
 
+#if defined(__linux__)
 #ifndef __VMLINUX_H__
 #include <argp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <stdbool.h>
 #endif
-
+#endif
 // request or reponse
 #define PACKET_MAX_SIZE 8192
 
@@ -43,6 +44,7 @@ enum support_role_e
 enum tgid_config_e
 {
   TgidIndex = 0,
+  ContainerIdIndex = 1,
   TgidNum,
 };
 
@@ -151,6 +153,7 @@ union sockaddr_t
   struct sockaddr_in6 in6;
 };
 
+#define KN_NAME_LENGTH 128
 struct connect_id_t
 {
   int32_t fd;
@@ -188,7 +191,9 @@ struct conn_stats_event_t
   struct connect_id_t conn_id;
   union sockaddr_t addr;
   struct socket_info si;
+  enum support_proto_e protocol;
   enum support_role_e role;
+  char docker_id[KN_NAME_LENGTH];
   int64_t wr_bytes;
   int64_t rd_bytes;
   int32_t wr_pkts;
@@ -203,9 +208,11 @@ struct conn_stats_event_t
 struct conn_data_event_t
 {
   struct connect_id_t conn_id;
+  uint64_t cid_key;
   uint64_t start_ts;
   uint64_t end_ts;
   enum support_proto_e protocol;
+  enum support_role_e role;
   uint16_t request_len;
   uint16_t response_len;
 #ifdef __VMLINUX_H__
@@ -215,6 +222,12 @@ struct conn_data_event_t
 #endif
 };
 
+struct self_runtime_info {
+  uint32_t pid;
+  char docker_id[KN_NAME_LENGTH];
+  int32_t docker_id_length;
+};
+
 #ifdef __VMLINUX_H__
 
 struct connect_info_t
@@ -222,8 +235,9 @@ struct connect_info_t
   struct connect_id_t conn_id;
   union sockaddr_t addr;
   struct socket_info si;
-  enum support_role_e role;
   enum support_type_e type;
+  int32_t docker_id_length;
+  char docker_id[KN_NAME_LENGTH];
   int64_t wr_bytes;
   int64_t rd_bytes;
   int32_t wr_pkts;
@@ -237,6 +251,7 @@ struct connect_info_t
   size_t prev_count;
   char prev_buf[4];
   bool try_to_prepend;
+  bool ever_sent;
   bool is_sample;
 
   uint64_t rt;
@@ -244,9 +259,11 @@ struct connect_info_t
   uint64_t rd_max_ts;
   uint64_t wr_min_ts;
   uint64_t wr_max_ts;
+  uint64_t cid_key;
   uint64_t start_ts;
   uint64_t end_ts;
   enum support_proto_e protocol;
+  enum support_role_e role;
   uint16_t request_len;
   uint16_t response_len;
   char msg[PACKET_MAX_SIZE * 3];
@@ -302,13 +319,19 @@ struct config_info_t
   int32_t data_sample;
 };
 
+#define CONTAINER_ID_MAX_LENGTH 64
+struct container_id_key {
+	uint32_t prefixlen;
+	uint8_t data[CONTAINER_ID_MAX_LENGTH];
+};
+
 #ifndef __VMLINUX_H__
 
 enum callback_type_e
 {
-  CTRL_HAND = 0,
+  STAT_HAND = 0,
   INFO_HANDLE,
-  STAT_HAND,
+  CTRL_HAND,
 #ifdef NET_TEST
   TEST_HAND,
 #endif
@@ -344,6 +367,7 @@ enum ebpf_config_primary_e
                        // 采样的策略：tcp的包，连接建立的ns时间 % 100， 小于采样率即为需要上传，大于的话对该连接进行标记，不上传Data、Ctrl（统计数据还是要上传）
                        //           udp的包，接收到数据包的ns时间 % 100， 小于采样率即为需要上传，大于的话不上传Data（统计数据还是要上传 @note 要注意统计数据Map的清理策略）
   PERF_BUFFER_PAGE,    // ring buffer page count, 默认128个页，也就是512KB, opt2 的类型是 callback_type_e
+  CONTAINER_ID_FILTER, // container id filter, 不配置则全部采集，如果需要开启，则 value 需要设置为 cgroup name 的前缀长度
 };
 // opt1 列表：
 //      AddProtocolFilter、RemoveProtocolFilter
@@ -380,7 +404,7 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count, void **params
  * @param stop_flag 是否需要立即退出
  * @return int32_t 正数，返回处理的事件数； -100，stop_flag触发；其他，错误码
  */
-int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag);
+int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag, int timeout_ms);
 
 // 启动时，会调用init，然后调用start
 /*
@@ -425,8 +449,15 @@ void ebpf_update_conn_addr(struct connect_id_t *conn_id, union sockaddr_t *dest_
 // 更新process 观察范围，动态增加pid，drop 为true 是进行删除操作。
 void ebpf_disable_process(uint32_t pid, bool drop);
 
+// 更新containerid 观察范围，动态增加 container id，drop 为true 是进行删除操作。
+bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_key, bool update);
+
 // 更新conn对应的角色，某些协议内核态无法判断角色
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type);
+
+void get_self_runtime_info();
+
+int32_t ebpf_init_self_runtime_info(char *so, long offset, struct self_runtime_info* info);
 
 #endif
 #endif

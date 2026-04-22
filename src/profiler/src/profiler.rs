@@ -1,17 +1,22 @@
 use crate::executable::ExecutableCache;
+use crate::get_host_root_path;
 use crate::heatmap::ProcessHeatMap;
 use crate::heatmap::TenSecHeatMap;
 use crate::interpreter::Interpreter;
 use crate::is_enable_symbolizer;
+use crate::is_enable_tracing;
 use crate::is_system_profiling;
 use crate::probes::event::ProbeEvent;
 use crate::probes::probes::Probes;
+use crate::probes::types::ApmIntProcInfo;
+use crate::probes::types::TracingType;
 use crate::process::maps::ExeMapsEntry;
 use crate::process::maps::ProcessMaps;
 use crate::process::process::Process;
 use crate::stack::Stack;
 use crate::stack::StackAggregator;
 use crate::stack::SymbolizedStack;
+use crate::symbollizer::elf::ElfFile;
 use crate::symbollizer::file_cache::FileCache;
 use crate::symbollizer::symbolizer::Symbolizer;
 use crate::utils::lpm::Prefix;
@@ -20,6 +25,7 @@ use crate::utils::time::init_tstamp;
 use crate::utils::time::time_delta;
 use crate::MIN_PROCESS_SAMPLES;
 use anyhow::Result;
+use libbpf_rs::MapFlags;
 use std::collections::HashMap;
 use std::time::Instant;
 use std::sync::Mutex;
@@ -63,7 +69,8 @@ pub struct Profiler<'a> {
 impl<'a> Profiler<'a> {
     pub fn new() -> Self {
         let mut symer = Symbolizer::new();
-        symer.add_kernel("/proc/kallsyms");
+        let kallsyms_path = format!("{}/proc/kallsyms", get_host_root_path());
+        symer.add_kernel(kallsyms_path.as_str());
         init_tstamp();
         Profiler {
             pids: HashMap::new(),
@@ -206,6 +213,12 @@ impl<'a> Profiler<'a> {
             proc.exit(&mut self.probes, &mut self.executables)?;
         }
 
+        self.probes
+            .interpreter_dispatcher_skel
+            .maps_mut()
+            .apm_int_procs()
+            .delete(&pid.to_ne_bytes())?;
+
         if let Some(mut int) = self.interpreters.remove(&pid) {
             int.exit(&mut self.probes)?;
         }
@@ -277,6 +290,52 @@ impl<'a> Profiler<'a> {
                     continue;
                 }
             };
+
+            if is_enable_tracing() {
+                let mut trace_type = TracingType::TraceNone;
+                let mut field_offset = 0;
+                if let Ok(true) = ElfFile::check_section_exist(&info.file, ".go.buildinfo") {
+                    log::debug!(
+                        "found .go.buildinfo section in pid: {pid}, exe: {}",
+                        map.file_path(pid)
+                    );
+                    if let Ok(Some(offset)) =
+                        ElfFile::extract_field_offset(&info.file, "runtime.g", "traceId")
+                    {
+                        log::info!(
+                            "found go traceId field offset: {offset} in pid: {pid}, exe: {}",
+                            map.file_path(pid)
+                        );
+                        trace_type = TracingType::TraceGoAgent;
+                        field_offset = offset;
+                    }
+                }
+
+                if trace_type != TracingType::TraceNone {
+                    let mut pinfo = ApmIntProcInfo::default();
+                    pinfo.raw.tracing_type = trace_type as u32;
+                    pinfo.raw.tracing_field_offset = field_offset as u64;
+                    match self
+                        .probes
+                        .interpreter_dispatcher_skel
+                        .maps_mut()
+                        .apm_int_procs()
+                        .update(&pid.to_ne_bytes(), pinfo.slice(), MapFlags::ANY)
+                    {
+                        Ok(_) => {
+                            log::info!(
+                                "update apm_int_procs map for pid: {pid} with type: {:?}",
+                                pinfo.raw.tracing_type as u32
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "failed to update apm_int_procs map for pid: {pid}, error: {e}"
+                            );
+                        }
+                    }
+                }
+            }
 
             let va = match info.file_offset_to_virtual_address(map.offset) {
                 Some(x) => x,

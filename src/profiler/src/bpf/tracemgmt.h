@@ -248,6 +248,7 @@ static inline PerCPURecord *get_pristine_per_cpu_record()
   trace->apm_trace_id.as_int.hi = 0;
   trace->apm_trace_id.as_int.lo = 0;
   trace->apm_transaction_id.as_int = 0;
+  __builtin_memset(trace->trace_id, 0, TRACE_ID_LEN);
 #endif
   return record;
 }

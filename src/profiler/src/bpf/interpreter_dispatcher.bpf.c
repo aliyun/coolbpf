@@ -34,6 +34,27 @@ void maybe_add_apm_info(Trace *trace) {
 
   DEBUG_PRINT("Trace is within a process with APM integration enabled");
 
+  if (proc->tracing_type == TRACE_GO_AGENT) {
+    const struct task_struct* task_ptr = (struct task_struct*)bpf_get_current_task();
+    const void* fs_base;
+    bpf_probe_read(&fs_base, sizeof(void *), &task_ptr->thread.fsbase);
+
+    size_t g_addr; // address of struct runtime.g
+    bpf_probe_read_user(&g_addr, sizeof(void*), (void*)(fs_base + (-8)));
+
+    size_t go_string_addr; // address of field traceId in runtime.g
+    bpf_probe_read_user(&go_string_addr, sizeof(void*), (void*)(g_addr + proc->tracing_field_offset + 8));
+    
+    size_t trace_id_addr;
+    bpf_probe_read_user(&trace_id_addr, sizeof(void*), (void*)(go_string_addr + 0));
+    
+    const char trace_id[32];
+    bpf_probe_read_user(trace_id, sizeof(trace_id), (void*)(trace_id_addr));
+
+    __builtin_memcpy(trace->trace_id, trace_id, sizeof(trace->trace_id));
+    return;
+  }
+
   u64 tsd_base;
   if (tsd_get_base((void **)&tsd_base) != 0) {
     increment_metric(metricID_UnwindApmIntErrReadTsdBase);

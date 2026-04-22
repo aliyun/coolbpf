@@ -156,3 +156,17 @@ pub struct HotspotProcInfo {
 }
 
 impl_default!(HotspotProcInfo);
+
+
+#[repr(u32)]
+#[derive(PartialEq)]
+pub enum TracingType {
+    TraceNone = bpf::TracingType_TRACE_NONE,
+    TraceGoAgent = bpf::TracingType_TRACE_GO_AGENT,
+}
+
+pub struct ApmIntProcInfo {
+    pub raw: bpf::ApmIntProcInfo,
+}
+
+impl_default!(ApmIntProcInfo);

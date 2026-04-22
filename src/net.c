@@ -87,6 +87,7 @@ static struct net_env_t
 	struct perf_buffer *pbs[MAX_HAND];
 	struct callback_t callback[MAX_HAND];
 	int32_t page_count[MAX_HAND];
+	int32_t cid_prefix_len;
 	struct lost_callback_t lost_callback;
 	net_print_fn_t libbpf_print;
 	char version[64];
@@ -252,6 +253,19 @@ static void handle_lost_stat_event(void *ctx, int cpu, __u64 lost_cnt)
 	}
 }
 
+static int user_config_cid(int config_fd)
+{
+	int ret;
+	uint32_t index = ContainerIdIndex;
+	ret = bpf_map_update_elem(config_fd, &index, &env.cid_prefix_len, BPF_ANY);
+	if (ret)
+		net_log(LOG_TYPE_WARN, "Could not update map for cid prefix len %d: %s\n", env.cid_prefix_len, strerror(-ret));
+	else
+		net_log(LOG_TYPE_INFO, "success to update map for cid prefix len: %d\n", env.cid_prefix_len);
+
+	return ret;
+}
+
 static int user_config_tgid(int config_fd)
 {
 	int ret;
@@ -324,6 +338,38 @@ static void get_btf_path(void)
 	pclose(fp);
 }
 
+int32_t ebpf_init_self_runtime_info(char *so, long offset, struct self_runtime_info* info) {
+	// attach 
+	struct net_bpf *obj = env.obj;
+	int ret;
+
+	obj->links.ebpf_get_self_runtime_info = bpf_program__attach_uprobe(obj->progs.ebpf_get_self_runtime_info, false,
+								       0, so, offset); // 0 for self
+	ret = libbpf_get_error(obj->links.ebpf_get_self_runtime_info);
+	if (ret != 0)
+	{
+		net_log(LOG_TYPE_WARN, "uprobe get_self_runtime_info failed\n");
+		return ret;
+	}
+
+	net_log(LOG_TYPE_INFO, "successfully attach uprobe get_self_runtime_info\n");
+	
+	// trigger
+	get_self_runtime_info();
+
+	// read from bpf maps ...
+	int map_fd = bpf_map__fd(obj->maps.self_runtime_info_map);
+
+	int key = 0;
+	ret = bpf_map_lookup_elem(map_fd, &key, info);
+	if (ret && errno != ENOENT) {
+		net_log(LOG_TYPE_WARN, "failed to lookup element in self_runtime_info_map: %s\n", strerror(errno));
+		return ret;
+	}
+
+	return 0;
+}
+
 int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long uprobe_offset,
 		  long upca_offset, long upps_offset, long upcr_offset)
 {
@@ -355,6 +401,7 @@ int32_t ebpf_init(char *btf, int32_t btf_size, char *so, int32_t so_size, long u
 	bpf_program__set_autoattach(obj->progs.disable_process_probe, false);
 	bpf_program__set_autoattach(obj->progs.update_conn_role_probe, false);
 	bpf_program__set_autoattach(obj->progs.update_conn_addr_probe, false);
+	bpf_program__set_autoattach(obj->progs.ebpf_get_self_runtime_info, false);
 	err = net_bpf__attach(obj);
 	if (err)
 	{
@@ -505,6 +552,11 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count,
 		value = (int32_t *)(params[0]);
 		env.page_count[opt2] = *value;
 		break;
+	case CONTAINER_ID_FILTER:
+		value = (int32_t *)(params[0]);
+		env.cid_prefix_len = *value;
+		user_config_cid(bpf_map__fd(obj->maps.config_tgid_map));
+		break;
 	defaults:
 		user_config_proto(bpf_map__fd(obj->maps.config_protocol_map));
 		user_config_tgid(bpf_map__fd(obj->maps.config_tgid_map));
@@ -513,7 +565,7 @@ void ebpf_config(int32_t opt1, int32_t opt2, int32_t params_count,
 	}
 }
 
-int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag)
+int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag, int timeout_ms)
 {
 	int j;
 	/* 100 times one by one ?*/
@@ -522,7 +574,7 @@ int32_t ebpf_poll_events(int32_t max_events, int32_t *stop_flag)
 	{
 		if (g_poll_callback_count < max_events && !*stop_flag)
 		{
-			int rst = perf_buffer__poll(env.pbs[j], 0);
+			int rst = perf_buffer__poll(env.pbs[j], timeout_ms);
 			if (rst < 0 && errno != EINTR)
 			{
 				net_log(LOG_TYPE_WARN, "Error polling perf buffer: %d, hand_type:%d\n",
@@ -659,4 +711,36 @@ void ebpf_disable_process(uint32_t pid, bool drop)
 
 void ebpf_update_conn_role(struct connect_id_t *conn_id, enum support_role_e role_type)
 {
+}
+
+void get_self_runtime_info() {}
+
+bool ebpf_set_cid_filter(const char* container_id, size_t length, uint64_t cid_key, bool update)
+{
+	struct net_bpf *obj = env.obj;
+	int map_fd = bpf_map__fd(obj->maps.enable_container_ids);
+
+	// Prepare the key for update/delete
+    struct container_id_key key = {
+        .prefixlen = CONTAINER_ID_MAX_LENGTH * 8  // Full length as prefix length in bits
+    };
+    memset(key.data, 0, CONTAINER_ID_MAX_LENGTH);
+    memcpy(key.data, container_id, length);
+	bool ret;
+
+    if (update) {
+        ret = bpf_map_update_elem(map_fd, &key, &cid_key, BPF_ANY);
+        if (ret) {
+            net_log(LOG_TYPE_WARN, "Failed to update element: %s\n", strerror(errno));
+            return false;
+        }
+    } else {
+        ret = bpf_map_delete_elem(map_fd, &key);
+        if (ret) {
+            net_log(LOG_TYPE_WARN, "Failed to delete element: %s\n", strerror(errno));
+            return false;
+        }
+    }
+	
+	return true;
 }

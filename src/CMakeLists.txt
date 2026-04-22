@@ -18,15 +18,6 @@ else(ELF_LIBRARY)
   message("Not found libelf library: ${ELF_LIBRARY}")
 endif(ELF_LIBRARY)
 
-add_subdirectory(bpf)
-add_subdirectory(profiler)
-
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
-               ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc @ONLY)
-
-include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}/bpf)
-
 if(NOT DEFINED INSTALL_LIB_DIR)
   set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/lib)
 endif()
@@ -35,11 +26,24 @@ if(NOT DEFINED INSTALL_INCLUDE_DIR)
   set(INSTALL_INCLUDE_DIR ${CMAKE_INSTALL_PREFIX}/include)
 endif()
 
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/coolbpf.pc.in
+               ${CMAKE_CURRENT_BINARY_DIR}/coolbpf.pc @ONLY)
+
+include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/bpf
+                    ${CMAKE_CURRENT_BINARY_DIR}/bpf)
+
+add_subdirectory(bpf)
+add_subdirectory(security)
+if (ENABLE_PROFILE)
+  add_subdirectory(profiler)
+endif()
+
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
      ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
 # share library
 add_library(coolbpf SHARED ${sources})
 add_dependencies(coolbpf net_skel)
+add_dependencies(coolbpf security_skel)
 target_link_libraries(coolbpf PRIVATE ${ELF_LIBRARY} ${Z_LIBRARY} pthread)
 set_target_properties(coolbpf PROPERTIES VERSION ${VERSION} SOVERSION
                                                             ${VERSION})
@@ -52,6 +56,15 @@ set_target_properties(coolbpf_static PROPERTIES OUTPUT_NAME "coolbpf")
 
 install(TARGETS coolbpf LIBRARY DESTINATION ${INSTALL_LIB_DIR})
 install(TARGETS coolbpf_static ARCHIVE DESTINATION ${INSTALL_LIB_DIR})
+
+# file(GLOB skel_headers ${CMAKE_CURRENT_BINARY_DIR}/bpf/*.skel.h ${CMAKE_CURRENT_BINARY_DIR}/security/*.skel.h)
+# install(FILES ${skel_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
+
+message(STATUS "in coolbpf/src INSTALL_INCLUDE_DIR: ${INSTALL_INCLUDE_DIR}")
+
+# install security headers
+file(GLOB security_headers security/*.h)
+install(FILES ${security_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/security)
 
 # install coolbpf headers
 file(GLOB headers "*.h")
@@ -73,6 +86,8 @@ install(FILES ${uapi_headers} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf/linux)
 install(FILES ${PROJECT_SOURCE_DIR}/arch/${CMAKE_SYSTEM_PROCESSOR}/vmlinux.h
         DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 
+if (ENABLE_PROFILE)
 # install libprofiler
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/profiler/release/libprofiler.so 
         DESTINATION ${INSTALL_LIB_DIR})
+endif()

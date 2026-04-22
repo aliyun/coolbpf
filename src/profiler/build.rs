@@ -8,6 +8,7 @@ fn generate_skeleton(out: &mut PathBuf, name: &str) {
     out.push(&rs_name);
     SkeletonBuilder::new()
         .source(&c_path)
+        .clang_args(["-DHAS_APM"])
         .build_and_generate(&out)
         .unwrap();
 
@@ -22,6 +23,7 @@ fn generate_header(out: &mut PathBuf, name: &str) {
     out.push(&rs_name);
     let bindings = bindgen::Builder::default()
         .header(&header_path)
+        .clang_args(["-DHAS_APM"])
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .unwrap();

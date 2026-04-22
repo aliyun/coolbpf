@@ -381,6 +381,99 @@ impl ElfFile {
             .ok_or(anyhow!("symbol {} not found", name))
     }
 
+    pub fn extract_field_offset(
+        file: &File,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Result<Option<usize>> {
+        let mmap_ref = unsafe { memmap2::Mmap::map(file)? };
+        let elf = object::File::parse(&*mmap_ref)?;
+        let endian = if elf.is_little_endian() {
+            gimli::RunTimeEndian::Little
+        } else {
+            gimli::RunTimeEndian::Big
+        };
+        let arena_data = Arena::new();
+        let arena_relocations = Arena::new();
+        let mut load_section = |id: gimli::SectionId| -> Result<_> {
+            load_file_section(id, &elf, endian, false, &arena_data, &arena_relocations)
+        };
+
+        let mut dwarf = gimli::Dwarf::load(load_section).unwrap();
+
+        // iterate over all compilation units
+        let mut iter = dwarf.units();
+        while let Some(header) = iter.next()? {
+            let unit = dwarf.unit(header)?;
+
+            let mut entries = unit.entries();
+            while let Some((depth, entry)) = entries.next_dfs()? {
+                if entry.tag() == gimli::DW_TAG_structure_type {
+                    if let Some(attr) = entry.attr(gimli::DW_AT_name)? {
+                        let string = dwarf.attr_string(&unit, attr.value())?;
+                        let actual_string = string.to_string_lossy()?.into_owned();
+                        if actual_string == struct_name {
+                            // now iterate over the children to find field
+                            let mut children = entries.clone();
+                            while let Some((child_depth, child)) = children.next_dfs()? {
+                                if child.tag() == gimli::DW_TAG_member {
+                                    if let Some(attr) = child.attr(gimli::DW_AT_name)? {
+                                        let string = dwarf.attr_string(&unit, attr.value())?;
+                                        let actual_string = string.to_string_lossy()?.into_owned();
+                                        if actual_string == field_name {
+                                            // find the field
+                                            // extract the offset from DW_AT_data_member_location
+                                            if let Some(attr) =
+                                                child.attr(gimli::DW_AT_data_member_location)?
+                                            {
+                                                match attr.value() {
+                                                    gimli::AttributeValue::Udata(offset) => {
+                                                        return Ok(Some(offset as usize));
+                                                    }
+                                                    gimli::AttributeValue::Data1(data) => {
+                                                        return Ok(Some(data as usize));
+                                                    }
+                                                    gimli::AttributeValue::Data2(data) => {
+                                                        return Ok(Some(data as usize));
+                                                    }
+                                                    gimli::AttributeValue::Data4(data) => {
+                                                        return Ok(Some(data as usize));
+                                                    }
+                                                    gimli::AttributeValue::Data8(data) => {
+                                                        return Ok(Some(data as usize));
+                                                    }
+                                                    _ => {
+                                                        return Ok(None);
+                                                    }
+                                                }
+                                            } else {
+                                                return Ok(None);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        return Ok(None);
+    }
+
+    pub fn check_section_exist(file: &File, section_name: &str) -> Result<bool> {
+        let mmap_ref = unsafe { memmap2::Mmap::map(file)? };
+        let elf = object::File::parse(&*mmap_ref)?;
+        if elf.section_by_name(section_name).is_some() {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     // parse eh_frame and return stack_deltas
     pub fn parse_eh_frame(file: &File) -> Result<Vec<UserStackDelta>> {
         let mmap_ref = unsafe { memmap2::Mmap::map(file)? };

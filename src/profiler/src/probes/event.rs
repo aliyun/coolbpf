@@ -68,6 +68,7 @@ pub struct RawStack {
     pub time: u64,
     pub kernel: Vec<u64>,
     pub user: RawUserStack,
+    pub trace_id: Option<String>,
 }
 
 impl RawStack {}

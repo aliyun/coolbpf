@@ -4,3 +4,7 @@ lwcb/pylwcb/.env
 lwcb/.vscode
 lwcb/target
 lwcb/pylwcb/target
+
+src/bpf/*.skel.h
+src/profiler/*.skel.h
+src/security/*.skel.h

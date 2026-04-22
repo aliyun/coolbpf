@@ -19,6 +19,11 @@ endforeach()
 message(STATUS "Include Directories: ${include_dirs}")
 
 macro(genskel name)
+    message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+    if (CMAKE_BUILD_TYPE MATCHES Debug)
+        add_definitions(-DCOOLBPF_DEBUG)
+        message(STATUS "add definition: -DCOOLBPF_DEBUG")
+    endif ()
     SET(BPF_C_FILE ${CMAKE_CURRENT_SOURCE_DIR}/${name}.bpf.c)
     SET(BPF_O_FILE ${CMAKE_CURRENT_BINARY_DIR}/${name}.bpf.o)
     SET(BPF_S_FILE ${CMAKE_CURRENT_BINARY_DIR}/${name}.skel.h)
@@ -30,6 +35,7 @@ macro(genskel name)
         COMMENT "Generating BPF object: ${BPF_O_FILE}"
     )
 
+    message(STATUS "gen skel CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
     add_custom_command(
         OUTPUT ${BPF_S_FILE}
         COMMAND ${BPFTOOL} gen skeleton ${BPF_O_FILE} > ${BPF_S_FILE}
@@ -41,5 +47,7 @@ macro(genskel name)
         ${name}_skel
         DEPENDS ${BPF_S_FILE}
     )
+        # install skeleton headers
+    message(STATUS "gen skel INSTALL_INCLUDE_DIR: ${INSTALL_INCLUDE_DIR}")
+    install(FILES ${BPF_S_FILE} DESTINATION ${INSTALL_INCLUDE_DIR}/coolbpf)
 endmacro()
-
