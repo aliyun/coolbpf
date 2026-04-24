@@ -75,7 +75,7 @@ pub struct AgentTokenSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
-    pub trace_count: i64,
+    pub conversation_count: i64,
     pub first_seen_ns: i64,
     pub last_seen_ns: i64,
     pub total_input_tokens: i64,
@@ -84,17 +84,27 @@ pub struct SessionSummary {
     pub agent_name: Option<String>,
 }
 
-/// Summary of a single trace_id within a session
+/// Session summary for the Token Savings page
+#[derive(Debug, serde::Serialize)]
+pub struct SavingsSessionSummary {
+    pub session_id: String,
+    pub agent_name: Option<String>,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+}
+
+/// Summary of a single conversation (user query) within a session
 #[derive(Debug, serde::Serialize)]
 pub struct TraceSummary {
     pub trace_id: String,
+    pub conversation_id: String,
     pub call_count: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub start_ns: i64,
     pub end_ns: Option<i64>,
     pub model: Option<String>,
-    /// The first user_query string recorded in this trace (best-effort)
+    /// The first user_query string recorded in this conversation (best-effort)
     pub user_query: Option<String>,
 }
 
@@ -123,13 +133,70 @@ pub struct TraceEventDetail {
     /// Raw full event JSON stored at write time — used as fallback when
     /// output_messages is NULL (e.g. SSE streams that weren't fully parsed)
     pub event_json: Option<String>,
-    /// Trace ID (conversation_id) — needed for session-level ATIF export
-    /// to group events by trace.
+    /// Trace ID (LLM API response_id) — needed for session-level ATIF export
+    /// to identify individual LLM calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Conversation ID (user query fingerprint) — groups multiple LLM calls
+    /// triggered by the same user query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     /// Cache read tokens — maps to ATIF cached_tokens
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<i64>,
+    /// Call lifecycle status: 'pending' | 'complete' | 'interrupted'
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Interruption type if abnormal: 'llm_error' | 'sse_truncated' | 'timeout' | etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interruption_type: Option<String>,
+}
+
+/// Lightweight info needed to write a PENDING record when a request is first seen
+pub struct PendingCallInfo {
+    /// Unique call ID (same one that will be used in the complete record)
+    pub call_id: String,
+    /// Trace ID (LLM API response_id, e.g. chatcmpl-xxx)
+    pub trace_id: Option<String>,
+    /// Conversation ID (user query fingerprint)
+    pub conversation_id: Option<String>,
+    /// Session ID
+    pub session_id: Option<String>,
+    /// Request start timestamp (nanoseconds)
+    pub start_timestamp_ns: u64,
+    /// Process ID
+    pub pid: i32,
+    /// Process name / comm
+    pub process_name: String,
+    /// Resolved agent name
+    pub agent_name: Option<String>,
+    /// HTTP method
+    pub http_method: Option<String>,
+    /// HTTP path
+    pub http_path: Option<String>,
+    /// Serialised input messages (JSON)
+    pub input_messages: Option<String>,
+    /// Serialised system instructions (JSON)
+    pub system_instructions: Option<String>,
+    /// User query extracted from request
+    pub user_query: Option<String>,
+    /// Whether this is an SSE streaming request
+    pub is_sse: bool,
+    /// Model name (extracted from request body)
+    pub model: Option<String>,
+    /// Provider name (extracted from request path)
+    pub provider: Option<String>,
+}
+
+/// Data extracted from captured SSE events for enriching a pending record.
+pub struct SseEnrichment {
+    pub model: Option<String>,
+    pub trace_id: Option<String>,
+    pub provider: Option<String>,
+    pub output_messages: Option<String>,
+    pub sse_event_count: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
 }
 
 /// SQLite-backed GenAI event storage
@@ -180,8 +247,14 @@ impl GenAISqliteStore {
             "CREATE TABLE IF NOT EXISTS genai_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
+                -- call lifecycle status: 'pending' | 'complete' | 'interrupted'
+                -- 'pending'     : request captured, waiting for response
+                -- 'complete'    : full request+response recorded
+                -- 'interrupted' : response never arrived (crash / truncation)
+                status TEXT NOT NULL DEFAULT 'complete',
                 call_id TEXT,
                 trace_id TEXT,
+                conversation_id TEXT,
                 session_id TEXT,
                 instance TEXT,
                 start_timestamp_ns INTEGER NOT NULL,
@@ -220,6 +293,8 @@ impl GenAISqliteStore {
                 status_code INTEGER,
                 is_sse INTEGER,
                 sse_event_count INTEGER,
+                -- Interruption type detected for this call (nullable)
+                interruption_type TEXT,
                 -- Full event as JSON (fallback)
                 event_json TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -227,6 +302,7 @@ impl GenAISqliteStore {
 
             CREATE INDEX IF NOT EXISTS idx_genai_session_id ON genai_events(session_id);
             CREATE INDEX IF NOT EXISTS idx_genai_trace_id ON genai_events(trace_id);
+            CREATE INDEX IF NOT EXISTS idx_genai_conversation_id ON genai_events(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_genai_instance ON genai_events(instance);
             CREATE INDEX IF NOT EXISTS idx_genai_start_timestamp ON genai_events(start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid ON genai_events(pid);
@@ -236,8 +312,457 @@ impl GenAISqliteStore {
             -- Composite indexes for common query patterns
             CREATE INDEX IF NOT EXISTS idx_genai_session_timestamp ON genai_events(session_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_trace_timestamp ON genai_events(trace_id, start_timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_genai_conversation_timestamp ON genai_events(conversation_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid_timestamp ON genai_events(pid, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns);",
+            // NOTE: idx_genai_status and idx_genai_interruption_type are NOT created here
+            // because they depend on columns added via migration. They are created in the
+            // migration blocks below, which guarantees the columns exist first.
+        )?;
+
+        // ── Forward-compatible migrations ──────────────────────────────────────
+        // Each block checks for a column's existence before ALTER TABLE, making
+        // all migrations idempotent and safe to run on both old and new databases.
+        // Columns are listed in the order they were added historically.
+
+        // Query existing columns once to avoid repeated PRAGMA calls
+        let existing_cols: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM pragma_table_info('genai_events')"
+            )?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        // Helper macro: ALTER TABLE only if column absent, then always ensure index
+        macro_rules! ensure_col {
+            // Column with no index
+            ($col:literal, $def:literal) => {
+                if !existing_cols.contains($col) {
+                    conn.execute_batch(
+                        &format!("ALTER TABLE genai_events ADD COLUMN {} {};", $col, $def)
+                    )?;
+                    log::info!("Migrated genai_events: added '{}' column", $col);
+                }
+            };
+            // Column + index
+            ($col:literal, $def:literal, $idx:literal) => {
+                if !existing_cols.contains($col) {
+                    conn.execute_batch(
+                        &format!("ALTER TABLE genai_events ADD COLUMN {} {};", $col, $def)
+                    )?;
+                    log::info!("Migrated genai_events: added '{}' column", $col);
+                }
+                // Always run CREATE INDEX IF NOT EXISTS — safe even if index already exists
+                conn.execute_batch(
+                    &format!("CREATE INDEX IF NOT EXISTS {} ON genai_events({});", $idx, $col)
+                )?;
+            };
+        }
+
+        // v2: Anthropic prompt-cache token counters
+        ensure_col!("cache_creation_tokens", "INTEGER");
+        ensure_col!("cache_read_tokens",     "INTEGER");
+
+        // v3: two-phase write lifecycle status
+        ensure_col!("status", "TEXT NOT NULL DEFAULT 'complete'",
+                    "idx_genai_status");
+
+        // v4: per-call interruption type
+        ensure_col!("interruption_type", "TEXT",
+                    "idx_genai_interruption_type");
+
+
+        // Migration: add conversation_id column for existing databases
+        let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+
+        Ok(())
+    }
+
+    // ─── Pending-call lifecycle methods ────────────────────────────────────────
+
+    /// Insert a PENDING record as soon as a request is captured.
+    ///
+    /// The record is later promoted to 'complete' via [`complete_pending`] once
+    /// the full response arrives, or marked 'interrupted' by the stale-scan thread
+    /// if the agent crashes before the response is received.
+    pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let instance = crate::genai::sls::SlsUploader::get_instance_id();
+        conn.execute(
+            "INSERT INTO genai_events (
+                event_type, status, call_id, trace_id, conversation_id, session_id, instance,
+                start_timestamp_ns, pid, process_name, agent_name,
+                http_method, http_path, is_sse,
+                input_messages, system_instructions, user_query,
+                model, provider,
+                event_json
+            ) VALUES (
+                'llm_call', 'pending', ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12,
+                ?13, ?14, ?15,
+                ?16, ?17,
+                '{}'
+            )",
+            params![
+                info.call_id,
+                info.trace_id,
+                info.conversation_id,
+                info.session_id,
+                instance,
+                info.start_timestamp_ns as i64,
+                info.pid,
+                info.process_name,
+                info.agent_name,
+                info.http_method,
+                info.http_path,
+                if info.is_sse { 1i64 } else { 0 },
+                info.input_messages,
+                info.system_instructions,
+                info.user_query,
+                info.model,
+                info.provider,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Promote an existing PENDING record to 'complete' by updating all response fields.
+    ///
+    /// If no matching PENDING row exists (e.g. because the DB was restarted), the
+    /// call falls back to a plain INSERT so data is never silently dropped.
+    pub fn complete_pending(
+        &self,
+        event: &GenAISemanticEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let GenAISemanticEvent::LLMCall(call) = event {
+            {
+                let conn = self.conn.lock().unwrap();
+                let event_json = serde_json::to_string(event)?;
+
+                let (input_tokens, output_tokens, total_tokens) = call.token_usage.as_ref()
+                    .map(|u| (u.input_tokens as i64, u.output_tokens as i64, u.total_tokens as i64))
+                    .unwrap_or((0, 0, 0));
+                let cache_creation = call.token_usage.as_ref()
+                    .and_then(|u| u.cache_creation_input_tokens.map(|v| v as i64));
+                let cache_read = call.token_usage.as_ref()
+                    .and_then(|u| u.cache_read_input_tokens.map(|v| v as i64));
+
+                let system_instructions: Option<String> = {
+                    let sys: Vec<_> = call.request.messages.iter()
+                        .filter(|m| m.role == "system").collect();
+                    if sys.is_empty() { None } else { serde_json::to_string(&sys).ok() }
+                };
+                let input_messages: Option<String> = {
+                    let non_sys: Vec<_> = call.request.messages.iter()
+                        .filter(|m| m.role != "system").collect();
+                    let latest = if let Some(idx) = non_sys.iter().rposition(|m| m.role == "user") {
+                        &non_sys[idx..]
+                    } else { &non_sys[..] };
+                    if latest.is_empty() { None } else { serde_json::to_string(&latest).ok() }
+                };
+                let output_messages: Option<String> = if call.response.messages.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&call.response.messages).ok()
+                };
+                let finish_reasons: Option<String> = {
+                    let reasons: Vec<_> = call.response.messages.iter()
+                        .filter_map(|m| m.finish_reason.as_deref()).collect();
+                    if reasons.is_empty() { None } else { serde_json::to_string(&reasons).ok() }
+                };
+
+                let updated = conn.execute(
+                    "UPDATE genai_events SET
+                        status = 'complete',
+                        trace_id            = ?1,
+                        conversation_id     = ?2,
+                        end_timestamp_ns    = ?3,
+                        duration_ns         = ?4,
+                        provider            = ?5,
+                        model               = ?6,
+                        request_model       = ?7,
+                        response_model      = ?8,
+                        temperature         = ?9,
+                        max_tokens          = ?10,
+                        top_p               = ?11,
+                        frequency_penalty   = ?12,
+                        presence_penalty    = ?13,
+                        finish_reasons      = ?14,
+                        server_address      = ?15,
+                        input_tokens        = ?16,
+                        output_tokens       = ?17,
+                        total_tokens        = ?18,
+                        cache_creation_tokens = ?19,
+                        cache_read_tokens   = ?20,
+                        system_instructions = ?21,
+                        input_messages      = ?22,
+                        output_messages     = ?23,
+                        status_code         = ?24,
+                        sse_event_count     = ?25,
+                        event_json          = ?26
+                    WHERE call_id = ?27 AND status = 'pending'",
+                    params![
+                        call.metadata.get("response_id"),
+                        call.metadata.get("conversation_id"),
+                        call.end_timestamp_ns as i64,
+                        call.duration_ns as i64,
+                        call.provider,
+                        call.model,
+                        call.model,
+                        call.model,
+                        call.request.temperature,
+                        call.request.max_tokens.map(|v| v as i64),
+                        call.request.top_p,
+                        call.request.frequency_penalty,
+                        call.request.presence_penalty,
+                        finish_reasons,
+                        call.metadata.get("server.address"),
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        cache_creation,
+                        cache_read,
+                        system_instructions,
+                        input_messages,
+                        output_messages,
+                        call.metadata.get("status_code").and_then(|s| s.parse::<i64>().ok()),
+                        call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
+                        event_json,
+                        call.call_id,
+                    ],
+                )?;
+
+                if updated > 0 {
+                    log::debug!("[GenAI] Promoted pending→complete for call_id={}", call.call_id);
+                    return Ok(());
+                }
+                // No pending row found — fall through to plain insert below
+                log::debug!("[GenAI] No pending row for call_id={}, inserting directly", call.call_id);
+            }
+            // Fallback: store_event handles the full INSERT path
+            self.store_event(event)
+        } else {
+            // Non-LLMCall events have no pending lifecycle, store directly
+            self.store_event(event)
+        }
+    }
+
+    /// Mark stale PENDING records as 'interrupted'.
+    ///
+    /// Called by the background scanner.  Any `llm_call` row that has been in
+    /// 'pending' state for longer than `timeout_secs` is assumed to have been
+    /// lost (agent crash / network cut) and is updated to 'interrupted'.
+    ///
+    /// Returns the number of rows updated.
+    pub fn mark_interrupted_stale(
+        &self,
+        timeout_secs: u64,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff_ns = {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            now_ns - (timeout_secs as i64 * 1_000_000_000)
+        };
+        let updated = conn.execute(
+            "UPDATE genai_events
+             SET status = 'interrupted'
+             WHERE event_type = 'llm_call'
+               AND status = 'pending'
+               AND start_timestamp_ns < ?1",
+            params![cutoff_ns],
+        )?;
+        if updated > 0 {
+            log::info!("[GenAI] Marked {} stale pending call(s) as interrupted", updated);
+        }
+        Ok(updated)
+    }
+
+    /// Set the interruption_type for a specific call_id.
+    ///
+    /// Called by the online InterruptionDetector after detecting an anomaly.
+    pub fn update_interruption_type(
+        &self,
+        call_id: &str,
+        itype: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET interruption_type = ?1 WHERE call_id = ?2",
+            params![itype, call_id],
+        )?;
+        Ok(())
+    }
+
+    /// List all pending calls for a specific PID.
+    ///
+    /// Returns (call_id, session_id, trace_id, conversation_id) tuples for all
+    /// PENDING records matching the given PID. Used by HealthChecker to link
+    /// agent_crash events to their associated LLM calls.
+    pub fn list_pending_for_pid(
+        &self,
+        pid: i32,
+    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT call_id, session_id, trace_id, conversation_id
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND status = 'pending'
+               AND pid = ?1",
+        )?;
+        let rows = stmt.query_map(params![pid], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Mark all pending calls for a PID as interrupted.
+    ///
+    /// Called by HealthChecker when it detects an agent process has gone offline.
+    /// Sets status='interrupted' and interruption_type to the provided value.
+    pub fn mark_pending_interrupted_for_pid(
+        &self,
+        pid: i32,
+        itype: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE genai_events
+             SET status = 'interrupted', interruption_type = ?1
+             WHERE event_type = 'llm_call'
+               AND status = 'pending'
+               AND pid = ?2",
+            params![itype, pid],
+        )?;
+        if updated > 0 {
+            log::info!("Marked {} pending call(s) as interrupted for pid={}", updated, pid);
+        }
+        Ok(updated)
+    }
+
+    /// Find sessions whose agentic loop was cut short by a process crash.
+    ///
+    /// Looks for the most recent `complete` LLM call for each
+    /// (session, conversation) pair associated with the given PID where the
+    /// finish reason is `tool_calls` — meaning the model issued another tool
+    /// call and was still mid-loop when the process died.
+    ///
+    /// Returns `(call_id, session_id, trace_id, conversation_id)` tuples,
+    /// deduplicated by (session_id, conversation_id) so one interruption event
+    /// is emitted per conversation.
+    pub fn list_incomplete_agentic_sessions_for_pid(
+        &self,
+        pid: i32,
+        since_ns: i64,
+    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT call_id, session_id, trace_id, conversation_id
+             FROM genai_events g1
+             WHERE g1.event_type = 'llm_call'
+               AND g1.status    = 'complete'
+               AND g1.pid       = ?1
+               AND g1.start_timestamp_ns >= ?2
+               AND g1.finish_reasons LIKE '%tool_calls%'
+               AND g1.start_timestamp_ns = (
+                   SELECT MAX(g2.start_timestamp_ns)
+                   FROM genai_events g2
+                   WHERE g2.event_type = 'llm_call'
+                     AND g2.status     = 'complete'
+                     AND g2.pid        = ?1
+                     AND g2.start_timestamp_ns >= ?2
+                     AND COALESCE(g2.session_id,      '') = COALESCE(g1.session_id,      '')
+                     AND COALESCE(g2.conversation_id,  '') = COALESCE(g1.conversation_id,  '')
+               )",
+        )?;
+        let rows = stmt.query_map(params![pid, since_ns], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows)
+    }
+
+    /// Look up the real session_id from completed records for the same PID.
+    /// Used in drain path to reconcile SHA256-hash fallback session_id with the
+    /// real agent UUID from ResponseSessionMapper.
+    pub fn lookup_session_for_pid(
+        &self,
+        pid: i32,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT session_id FROM genai_events
+             WHERE pid = ?1 AND status = 'complete' AND session_id IS NOT NULL
+             ORDER BY start_timestamp_ns DESC LIMIT 1",
+            params![pid],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(sid) => Ok(Some(sid)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    /// Update the session_id of a pending record after reconciliation.
+    pub fn update_session_id(
+        &self,
+        call_id: &str,
+        session_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET session_id = ?2 WHERE call_id = ?1",
+            params![call_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Enrich a pending record with data extracted from captured SSE events.
+    /// Updates model, trace_id, provider, output_messages, sse_event_count, and token counts.
+    pub fn enrich_pending_from_sse(
+        &self,
+        call_id: &str,
+        enrichment: &SseEnrichment,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET
+                model            = COALESCE(?2, model),
+                trace_id         = COALESCE(?3, trace_id),
+                provider         = COALESCE(?4, provider),
+                output_messages  = COALESCE(?5, output_messages),
+                sse_event_count  = COALESCE(?6, sse_event_count),
+                input_tokens     = COALESCE(?7, input_tokens),
+                output_tokens    = COALESCE(?8, output_tokens),
+                total_tokens     = COALESCE(?7, input_tokens, 0)
+                                 + COALESCE(?8, output_tokens, 0)
+             WHERE call_id = ?1",
+            params![
+                call_id,
+                enrichment.model,
+                enrichment.trace_id,
+                enrichment.provider,
+                enrichment.output_messages,
+                enrichment.sse_event_count,
+                enrichment.input_tokens,
+                enrichment.output_tokens,
+            ],
         )?;
         Ok(())
     }
@@ -253,7 +778,7 @@ impl GenAISqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT session_id,
-                    COUNT(DISTINCT trace_id) AS trace_count,
+                    COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
                     MAX(start_timestamp_ns)  AS last_seen_ns,
                     COALESCE(SUM(input_tokens), 0)  AS total_input,
@@ -270,7 +795,7 @@ impl GenAISqliteStore {
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {
             Ok(SessionSummary {
                 session_id: row.get(0)?,
-                trace_count: row.get(1)?,
+                conversation_count: row.get(1)?,
                 first_seen_ns: row.get(2)?,
                 last_seen_ns: row.get(3)?,
                 total_input_tokens: row.get(4)?,
@@ -286,14 +811,75 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// List all trace IDs under a given session, with aggregated token stats.
+    /// List sessions for the Token Savings page.
+    ///
+    /// Independent from `list_sessions()` to avoid affecting existing functionality.
+    /// Supports optional agent_name filtering directly in SQL.
+    pub fn list_sessions_for_savings(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+        agent_name: Option<&str>,
+    ) -> Result<Vec<SavingsSessionSummary>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+
+        let sql = if agent_name.is_some() {
+            "SELECT session_id,
+                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(output_tokens), 0)  AS total_output
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND session_id IS NOT NULL
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND agent_name = ?3
+             GROUP BY session_id
+             ORDER BY MAX(start_timestamp_ns) DESC"
+        } else {
+            "SELECT session_id,
+                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(output_tokens), 0)  AS total_output
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND session_id IS NOT NULL
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+             GROUP BY session_id
+             ORDER BY MAX(start_timestamp_ns) DESC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<SavingsSessionSummary> {
+            Ok(SavingsSessionSummary {
+                session_id: row.get(0)?,
+                agent_name: row.get(1)?,
+                total_input_tokens: row.get(2)?,
+                total_output_tokens: row.get(3)?,
+            })
+        };
+
+        let rows = if let Some(name) = agent_name {
+            stmt.query_map(params![start_ns, end_ns, name], map_row)?
+        } else {
+            stmt.query_map(params![start_ns, end_ns], map_row)?
+        };
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// List all conversations under a given session, with aggregated token stats.
     pub fn list_traces_by_session(
         &self,
         session_id: &str,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT trace_id,
+            "SELECT conversation_id,
                     COUNT(*)                        AS call_count,
                     COALESCE(SUM(input_tokens), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -304,13 +890,15 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id = ?1
-               AND trace_id IS NOT NULL
-             GROUP BY trace_id
+               AND conversation_id IS NOT NULL
+             GROUP BY conversation_id
              ORDER BY start_ns ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
+            let cid: String = row.get(0)?;
             Ok(TraceSummary {
-                trace_id: row.get(0)?,
+                trace_id: cid.clone(),
+                conversation_id: cid,
                 call_count: row.get(1)?,
                 total_input_tokens: row.get(2)?,
                 total_output_tokens: row.get(3)?,
@@ -516,7 +1104,7 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Fetch all LLM call events for a given trace ID.
+    /// Fetch all LLM call events for a given trace ID (response_id).
     pub fn get_trace_events(
         &self,
         trace_id: &str,
@@ -530,7 +1118,7 @@ impl GenAISqliteStore {
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
                     agent_name, process_name, pid, user_query, event_json,
-                    trace_id, cache_read_tokens
+                    trace_id, cache_read_tokens, conversation_id, status, interruption_type
              FROM genai_events
              WHERE trace_id = ?1
                AND event_type = 'llm_call'
@@ -556,6 +1144,61 @@ impl GenAISqliteStore {
                 event_json: row.get(15)?,
                 trace_id: row.get(16)?,
                 cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
+                status: row.get(19)?,
+                interruption_type: row.get(20)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Fetch all LLM call events for a given conversation ID (user query fingerprint).
+    pub fn get_events_by_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<TraceEventDetail>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
+                    model,
+                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    COALESCE(output_tokens, 0) AS output_tokens,
+                    COALESCE(total_tokens, 0)  AS total_tokens,
+                    input_messages, output_messages, system_instructions,
+                    agent_name, process_name, pid, user_query, event_json,
+                    trace_id, cache_read_tokens, conversation_id, status, interruption_type
+             FROM genai_events
+             WHERE conversation_id = ?1
+               AND event_type = 'llm_call'
+             ORDER BY start_timestamp_ns ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            Ok(TraceEventDetail {
+                id: row.get(0)?,
+                call_id: row.get(1)?,
+                start_timestamp_ns: row.get(2)?,
+                end_timestamp_ns: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                total_tokens: row.get(7)?,
+                input_messages: row.get(8)?,
+                output_messages: row.get(9)?,
+                system_instructions: row.get(10)?,
+                agent_name: row.get(11)?,
+                process_name: row.get(12)?,
+                pid: row.get(13)?,
+                user_query: row.get(14)?,
+                event_json: row.get(15)?,
+                trace_id: row.get(16)?,
+                cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
+                status: row.get(19)?,
+                interruption_type: row.get(20)?,
             })
         })?;
         let mut result = Vec::new();
@@ -579,7 +1222,7 @@ impl GenAISqliteStore {
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
                     agent_name, process_name, pid, user_query, event_json,
-                    trace_id, cache_read_tokens
+                    trace_id, cache_read_tokens, conversation_id, status, interruption_type
              FROM genai_events
              WHERE session_id = ?1
                AND event_type = 'llm_call'
@@ -605,6 +1248,9 @@ impl GenAISqliteStore {
                 event_json: row.get(15)?,
                 trace_id: row.get(16)?,
                 cache_read_tokens: row.get(17)?,
+                conversation_id: row.get(18)?,
+                status: row.get(19)?,
+                interruption_type: row.get(20)?,
             })
         })?;
         let mut result = Vec::new();
@@ -710,7 +1356,7 @@ impl GenAISqliteStore {
 
                 conn.execute(
                     "INSERT INTO genai_events (
-                        event_type, call_id, trace_id, session_id, instance,
+                        event_type, call_id, trace_id, conversation_id, session_id, instance,
                         start_timestamp_ns, end_timestamp_ns, duration_ns, pid, process_name, agent_name,
                         operation_name, provider, model, request_model, response_model,
                         temperature, max_tokens, top_p, frequency_penalty, presence_penalty,
@@ -721,14 +1367,15 @@ impl GenAISqliteStore {
                         user_query, http_method, http_path, status_code,
                         is_sse, sse_event_count, event_json
                     ) VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                        ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-                        ?32, ?33, ?34, ?35, ?36, ?37, ?38
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                        ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                        ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39
                     )",
                     params![
                         "llm_call",
                         call.call_id,
+                        call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
                         call.metadata.get("session_id"),
                         instance,

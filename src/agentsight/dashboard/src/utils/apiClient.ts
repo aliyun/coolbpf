@@ -23,7 +23,7 @@ const API_BASE: string = (() => {
 
 export interface SessionSummary {
   session_id: string;
-  trace_count: number;
+  conversation_count: number;
   first_seen_ns: number;
   last_seen_ns: number;
   total_input_tokens: number;
@@ -34,13 +34,14 @@ export interface SessionSummary {
 
 export interface TraceSummary {
   trace_id: string;
+  conversation_id: string;
   call_count: number;
   total_input_tokens: number;
   total_output_tokens: number;
   start_ns: number;
   end_ns: number | null;
   model: string | null;
-  /** First user_query recorded in this trace (best-effort) */
+  /** First user_query recorded in this conversation (best-effort) */
   user_query: string | null;
 }
 
@@ -66,6 +67,8 @@ export interface TraceEventDetail {
   user_query: string | null;
   /** Raw full event JSON — fallback when output_messages is null */
   event_json: string | null;
+  /** Conversation ID (user query fingerprint) */
+  conversation_id: string | null;
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -98,10 +101,21 @@ export async function fetchSessions(
 
 /**
  * List all trace IDs within a session, with per-trace token stats.
+ * Optional startNs/endNs are forwarded as query parameters for future
+ * backend-side time-range filtering.
  */
-export async function fetchTraces(sessionId: string): Promise<TraceSummary[]> {
+export async function fetchTraces(
+  sessionId: string,
+  startNs?: number | null,
+  endNs?: number | null,
+): Promise<TraceSummary[]> {
+  const params = new URLSearchParams();
+  if (startNs != null) params.set('start_ns', String(startNs));
+  if (endNs != null) params.set('end_ns', String(endNs));
+  const qs = params.toString();
+  const suffix = qs ? `?${qs}` : '';
   return apiFetch<TraceSummary[]>(
-    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/traces`
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/traces${suffix}`
   );
 }
 
@@ -111,6 +125,15 @@ export async function fetchTraces(sessionId: string): Promise<TraceSummary[]> {
 export async function fetchTraceDetail(traceId: string): Promise<TraceEventDetail[]> {
   return apiFetch<TraceEventDetail[]>(
     `${API_BASE}/api/traces/${encodeURIComponent(traceId)}`
+  );
+}
+
+/**
+ * Fetch detailed LLM call events for a conversation (user query).
+ */
+export async function fetchConversationDetail(conversationId: string): Promise<TraceEventDetail[]> {
+  return apiFetch<TraceEventDetail[]>(
+    `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}`
   );
 }
 
@@ -170,6 +193,70 @@ export async function fetchTimeseries(
 
 import type { AtifDocument, AgentHealthResponse } from '../types';
 
+// ─── Token Savings types ─────────────────────────────────────────────────────
+
+export interface DiffLine {
+  type: 'add' | 'remove' | 'context';
+  content: string;
+}
+
+export interface OptimizationItem {
+  id: string;
+  category: 'tool_output' | 'mcp_response';
+  title: string;
+  before_tokens: number;
+  after_tokens: number;
+  saved_tokens: number;
+  before_summary: string;
+  after_summary: string;
+  diff_lines: DiffLine[];
+}
+
+export interface SessionSavings {
+  session_id: string;
+  agent_name: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  saved_tokens: number;
+  savings_rate: number;
+  tool_saved: number;
+  mcp_saved: number;
+  optimization_items: OptimizationItem[];
+}
+
+export interface SavingsSummary {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  total_saved_tokens: number;
+  savings_rate: number;
+  total_tool_saved: number;
+  total_mcp_saved: number;
+}
+
+export interface TokenSavingsResponse {
+  stats_available: boolean;
+  summary: SavingsSummary;
+  sessions: SessionSavings[];
+}
+
+/**
+ * Fetch token savings data within a nanosecond time range.
+ */
+export async function fetchTokenSavings(
+  startNs: number,
+  endNs: number,
+  agentName?: string,
+): Promise<TokenSavingsResponse> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+  });
+  if (agentName) params.set('agent_name', agentName);
+  return apiFetch<TokenSavingsResponse>(`${API_BASE}/api/token-savings?${params.toString()}`);
+}
+
 /**
  * Export a single trace as an ATIF v1.6 trajectory document.
  */
@@ -185,6 +272,183 @@ export async function fetchAtifByTrace(traceId: string): Promise<AtifDocument> {
 export async function fetchAtifBySession(sessionId: string): Promise<AtifDocument> {
   return apiFetch<AtifDocument>(
     `${API_BASE}/api/export/atif/session/${encodeURIComponent(sessionId)}`
+  );
+}
+
+/**
+ * Export a conversation (all LLM calls for a user query) as an ATIF v1.6 trajectory document.
+ */
+export async function fetchAtifByConversation(conversationId: string): Promise<AtifDocument> {
+  return apiFetch<AtifDocument>(
+    `${API_BASE}/api/export/atif/conversation/${encodeURIComponent(conversationId)}`
+  );
+}
+
+// ─── Interruption APIs ───────────────────────────────────────────────────────
+
+export type InterruptionSeverity = 'critical' | 'high' | 'medium' | 'low';
+
+export interface InterruptionRecord {
+  interruption_id: string;
+  session_id: string | null;
+  trace_id: string | null;
+  conversation_id: string | null;
+  call_id: string | null;
+  pid: number | null;
+  agent_name: string | null;
+  interruption_type: string;
+  severity: InterruptionSeverity;
+  occurred_at_ns: number;
+  detail: string | null;
+  resolved: boolean;
+}
+
+export interface InterruptionCountResponse {
+  total: number;
+  by_severity: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+}
+
+export interface InterruptionTypeStat {
+  interruption_type: string;
+  severity: string;
+  count: number;
+}
+
+/**
+ * Fetch per-type interruption stats within a time range.
+ */
+export async function fetchInterruptionStats(
+  startNs: number,
+  endNs: number
+): Promise<InterruptionTypeStat[]> {
+  const params = new URLSearchParams();
+  params.set('start_ns', String(startNs));
+  params.set('end_ns', String(endNs));
+  return apiFetch<InterruptionTypeStat[]>(
+    `${API_BASE}/api/interruptions/stats?${params.toString()}`
+  );
+}
+
+/** Per-(severity, type) detail returned by session/trace-counts endpoints. */
+export interface InterruptionTypeDetail {
+  interruption_type: string;
+  severity: string;
+  count: number;
+}
+
+export interface SessionInterruptionCount {
+  session_id: string;
+  total: number;
+  by_severity: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  types: InterruptionTypeDetail[];
+}
+
+export interface ConversationInterruptionCount {
+  conversation_id: string;
+  total: number;
+  by_severity: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  types: InterruptionTypeDetail[];
+}
+
+/** Map English interruption_type keys to Chinese labels. */
+export const INTERRUPTION_TYPE_CN: Record<string, string> = {
+  llm_error: 'LLM 错误',
+  sse_truncated: 'SSE 截断',
+  context_overflow: '上下文溢出',
+  agent_crash: 'Agent 崩溃',
+  token_limit: 'Token 超限',
+};
+
+/**
+ * Fetch all unresolved interruptions for a session.
+ */
+export async function fetchSessionInterruptions(sessionId: string): Promise<InterruptionRecord[]> {
+  return apiFetch<InterruptionRecord[]>(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/interruptions`
+  );
+}
+
+/**
+ * Fetch all unresolved interruptions for a conversation.
+ */
+export async function fetchConversationInterruptions(conversationId: string): Promise<InterruptionRecord[]> {
+  return apiFetch<InterruptionRecord[]>(
+    `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}/interruptions`
+  );
+}
+
+/**
+ * Fetch interruption counts (total + by severity) for the last 24 h.
+ */
+export async function fetchInterruptionCount(
+  startNs?: number,
+  endNs?: number,
+  agentName?: string
+): Promise<InterruptionCountResponse> {
+  const params = new URLSearchParams();
+  if (startNs !== undefined) params.set('start_ns', String(startNs));
+  if (endNs !== undefined) params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch<InterruptionCountResponse>(`${API_BASE}/api/interruptions/count${qs}`);
+}
+
+/**
+ * Mark an interruption event as resolved.
+ */
+export async function resolveInterruption(interruptionId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/api/interruptions/${encodeURIComponent(interruptionId)}/resolve`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`POST /api/interruptions/${interruptionId}/resolve -> ${res.status}: ${text}`);
+  }
+}
+
+/**
+ * Fetch unresolved interruption count + max severity per session_id.
+ */
+export async function fetchInterruptionSessionCounts(
+  startNs: number,
+  endNs: number
+): Promise<SessionInterruptionCount[]> {
+  const params = new URLSearchParams();
+  params.set('start_ns', String(startNs));
+  params.set('end_ns', String(endNs));
+  return apiFetch<SessionInterruptionCount[]>(
+    `${API_BASE}/api/interruptions/session-counts?${params.toString()}`
+  );
+}
+
+/**
+ * Fetch unresolved interruption count + max severity per conversation_id.
+ */
+export async function fetchInterruptionConversationCounts(
+  startNs: number,
+  endNs: number
+): Promise<ConversationInterruptionCount[]> {
+  const params = new URLSearchParams();
+  params.set('start_ns', String(startNs));
+  params.set('end_ns', String(endNs));
+  return apiFetch<ConversationInterruptionCount[]>(
+    `${API_BASE}/api/interruptions/conversation-counts?${params.toString()}`
   );
 }
 

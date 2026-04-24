@@ -7,8 +7,13 @@ use crate::analyzer::{
     AnalysisResult, TokenRecord, ParsedApiMessage, HttpRecord,
 };
 use crate::analyzer::message::types::OpenAIChatMessage;
-use crate::discovery::matcher::{ProcessContext, AgentMatcher};
+use crate::aggregator::{ConnectionId, ParsedRequest};
+use crate::analyzer::token::TokenParser;
+use crate::discovery::matcher::ProcessContext;
 use crate::discovery::registry::known_agents;
+use crate::parser::sse::ParsedSseEvent;
+use crate::response_map::ResponseSessionMapper;
+use crate::storage::sqlite::{PendingCallInfo, SseEnrichment};
 use super::semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
     InputMessage, OutputMessage, MessagePart, TokenUsage,
@@ -17,6 +22,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Sha256, Digest};
+
+/// Output from `GenAIBuilder::build()`, containing built events and deferred resolution info.
+pub struct BuildOutput {
+    /// Built GenAI semantic events (ready to export, may have fallback session_id)
+    pub events: Vec<GenAISemanticEvent>,
+    /// If set, the session_id was NOT resolved from the ResponseSessionMapper and
+    /// the caller should retry the lookup later using this response ID.
+    /// When the lookup succeeds, update the `session_id` metadata of all events.
+    pub pending_response_id: Option<String>,
+}
 
 /// Builder that constructs GenAI semantic events from AnalysisResult
 pub struct GenAIBuilder {
@@ -46,26 +61,384 @@ impl GenAIBuilder {
         }
     }
 
-    /// Build GenAI semantic events from analysis results
+    /// Build GenAI semantic events AND a `PendingCallInfo` to be written to DB
+    /// before the response arrives.
     ///
-    /// This method reuses already-extracted data (Token, Message, HttpRecord)
-    /// to construct higher-level GenAI semantic events without redundant parsing.
-    pub fn build(&self, results: &[AnalysisResult]) -> Vec<GenAISemanticEvent> {
+    /// Returns `(output, Some(pending_info))` where `pending_info.call_id` matches
+    /// the `call_id` embedded inside the returned `LLMCall` event, so the caller can
+    /// first `insert_pending(pending_info)` and later `complete_pending(event)`.
+    ///
+    /// The `BuildOutput` also carries `pending_response_id` when the session_id
+    /// could not be resolved from the `ResponseSessionMapper` so the caller can
+    /// queue the events for deferred resolution.
+    ///
+    /// Returns `(output, None)` when no LLM API call was detected in `results`.
+    pub fn build_with_pending(
+        &self,
+        results: &[AnalysisResult],
+        response_mapper: &ResponseSessionMapper,
+    ) -> (BuildOutput, Option<PendingCallInfo>) {
         let mut events = Vec::new();
+        let mut pending: Option<PendingCallInfo> = None;
+        let mut pending_response_id = None;
 
-        // Group related results by building LLMCall from multiple sources
-        // TokenRecord + HttpRecord + ParsedApiMessage -> LLMCall
-        if let Some(llm_call) = self.build_llm_call(results) {
+        // Check if the response ID exists but mapper didn't resolve it
+        let parsed_message = results.iter().find_map(|r| match r {
+            AnalysisResult::Message(m) => Some(m.clone()),
+            _ => None,
+        });
+        let response_id = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
+        let mapper_hit = response_id.as_deref()
+            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .is_some();
+
+        if let Some(llm_call) = self.build_llm_call(results, response_mapper) {
+            // Build PendingCallInfo from the same LLMCall before moving it
+            let http_record = results.iter().find_map(|r| match r {
+                AnalysisResult::Http(h) => Some(h.clone()),
+                _ => None,
+            });
+
+            // Extract input messages for the pending record
+            let (input_messages_json, system_instructions_json) = {
+                let sys: Vec<_> = llm_call.request.messages.iter()
+                    .filter(|m| m.role == "system").collect();
+                let non_sys: Vec<_> = llm_call.request.messages.iter()
+                    .filter(|m| m.role != "system").collect();
+                let latest = if let Some(idx) = non_sys.iter().rposition(|m| m.role == "user") {
+                    &non_sys[idx..]
+                } else { &non_sys[..] };
+                (
+                    if latest.is_empty() { None } else { serde_json::to_string(&latest).ok() },
+                    if sys.is_empty() { None } else { serde_json::to_string(&sys).ok() },
+                )
+            };
+
+            pending = Some(PendingCallInfo {
+                call_id: llm_call.call_id.clone(),
+                trace_id: llm_call.metadata.get("response_id").cloned(),
+                conversation_id: llm_call.metadata.get("conversation_id").cloned(),
+                session_id: llm_call.metadata.get("session_id").cloned(),
+                start_timestamp_ns: llm_call.start_timestamp_ns,
+                pid: llm_call.pid,
+                process_name: llm_call.process_name.clone(),
+                agent_name: llm_call.agent_name.clone(),
+                http_method: http_record.as_ref().map(|h| h.method.clone()),
+                http_path: http_record.as_ref().map(|h| h.path.clone()),
+                input_messages: input_messages_json,
+                system_instructions: system_instructions_json,
+                user_query: llm_call.metadata.get("user_query").cloned(),
+                is_sse: llm_call.request.stream,
+                model: Some(llm_call.model.clone()),
+                provider: Some(llm_call.provider.clone()),
+            });
+
             events.push(GenAISemanticEvent::LLMCall(llm_call));
         }
 
-        events
+        // If response_id exists but mapper didn't have it, mark as pending
+        if !events.is_empty() && response_id.is_some() && !mapper_hit {
+            pending_response_id = response_id;
+        }
+
+        (BuildOutput { events, pending_response_id }, pending)
+    }
+
+    /// Build a `PendingCallInfo` directly from a raw `ParsedRequest` and
+    /// `ConnectionId`, without needing a full `AnalysisResult`.
+    ///
+    /// This is used when the event loop detects that a PID has died while its
+    /// connection was still in `RequestPending` or `SseActive` state.  By
+    /// writing a pending record to `genai_events`, the HealthChecker can later
+    /// find it via `list_pending_for_pid` and create a properly correlated
+    /// `InterruptionEvent`.
+    ///
+    /// Returns `None` if the request path is not a known LLM API endpoint or
+    /// the body cannot be parsed at all.
+    pub fn build_pending_from_request(
+        &self,
+        request: &ParsedRequest,
+        conn_id: &ConnectionId,
+    ) -> Option<PendingCallInfo> {
+        // Only process known LLM API paths
+        let path_match = self.is_llm_api_path(&request.path);
+        let body_str = if request.body_len > 0 { Some(request.body_str().to_string()) } else { None };
+        let body_match = !path_match && Self::is_sysom_pop_request(&body_str);
+        if !path_match && !body_match {
+            print!("[GenAI] build_pending: skip non-LLM path={} body_len={}\n",
+                request.path, request.body_len);
+            return None;
+        }
+
+        let call_id = self.generate_id();
+        let body = request.json_body();
+        print!("[GenAI] build_pending: path={} body_parsed={} body_len={}\n",
+            request.path, body.is_some(), request.body_len);
+
+        // Determine if streaming
+        let is_sse = body.as_ref()
+            .and_then(|v| v.get("stream"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Parse messages from body to compute session_id, conversation_id,
+        // user_query, and serialise input_messages / system_instructions
+        let (session_id, conversation_id, user_query, input_messages, system_instructions) =
+            if let Some(ref v) = body {
+                if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
+                    // Diagnostic: dump message roles and content types
+                    let total = messages.len();
+                    let user_count = messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .count();
+                    print!("[GenAI] build_pending: messages.len={} user_count={}\n", total, user_count);
+                    // Print first 3 user messages' content type
+                    for (i, m) in messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .take(3)
+                        .enumerate()
+                    {
+                        let ctype = match m.get("content") {
+                            Some(c) if c.is_string() => format!("string(len={})", c.as_str().unwrap_or("").len()),
+                            Some(c) if c.is_array() => format!("array(len={})", c.as_array().unwrap().len()),
+                            Some(c) if c.is_null() => "null".to_string(),
+                            Some(_) => "other".to_string(),
+                            None => "missing".to_string(),
+                        };
+                        print!("[GenAI] build_pending: user_msg[{}] content_type={}\n", i, ctype);
+                    }
+                    // Helper: extract text from "content" which can be either
+                    // a plain string or an array of content blocks:
+                    //   "content": "text"
+                    //   "content": [{"type":"text","text":"..."},...]
+                    let extract_text = |m: &serde_json::Value| -> Option<String> {
+                        let c = m.get("content")?;
+                        if let Some(s) = c.as_str() {
+                            if !s.is_empty() { return Some(s.to_string()); }
+                        }
+                        if let Some(arr) = c.as_array() {
+                            let text: String = arr.iter()
+                                .filter_map(|item| {
+                                    // [{"type":"text","text":"..."}]
+                                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        item.get("text").and_then(|t| t.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !text.is_empty() { return Some(text); }
+                        }
+                        None
+                    };
+
+                    // session_id: SHA256 of first user message text (same logic
+                    // as compute_session_id but operating on raw JSON values)
+                    let first_user_text = messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .find_map(|m| extract_text(m))
+                        .unwrap_or_default();
+
+                    let session_id = if !first_user_text.is_empty() {
+                        let hash = Sha256::digest(first_user_text.as_bytes());
+                        Some(format!("{:x}", hash)[..32].to_string())
+                    } else {
+                        None
+                    };
+
+                    // Last user message raw text — used for both conversation_id
+                    // (fingerprint hash) and user_query (display text)
+                    let last_user_raw = messages.iter()
+                        .rev()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .find_map(|m| extract_text(m));
+
+                    // conversation_id: SHA256 of last user message raw text
+                    // (same logic as compute_user_query_fingerprint)
+                    let conversation_id = last_user_raw.as_deref().map(|text| {
+                        let hash = Sha256::digest(text.as_bytes());
+                        format!("{:x}", hash)[..32].to_string()
+                    });
+
+                    // user_query: last user message text, stripped of metadata prefix
+                    let user_query = last_user_raw.as_deref()
+                        .map(|s| Self::strip_user_query_prefix(s));
+
+                    // Serialise message subsets for the pending record
+                    let sys: Vec<_> = messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                        .collect();
+                    let non_sys: Vec<_> = messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                        .collect();
+
+                    let input_messages = if non_sys.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&non_sys).ok()
+                    };
+                    let system_instructions = if sys.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&sys).ok()
+                    };
+
+                    (session_id, conversation_id, user_query, input_messages, system_instructions)
+                } else {
+                    // messages key missing or not an array
+                    let keys: Vec<_> = v.as_object()
+                        .map(|o| o.keys().take(10).cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    print!("[GenAI] build_pending: no 'messages' array, top-level keys={:?}\n", keys);
+                    (None, None, None, None, None)
+                }
+            } else {
+                print!("[GenAI] build_pending: body is None (json parse failed)\n");
+                (None, None, None, None, None)
+            };
+
+        // Extract model from request body JSON "model" field
+        let model = body.as_ref()
+            .and_then(|v| v.get("model"))
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        // Extract provider from request path
+        let provider = self.extract_provider_from_path(&request.path);
+
+        // Resolve agent_name from comm using known_agents registry
+        // (PID is dead so /proc is gone, but comm is still available from the captured request)
+        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm);
+
+        print!("[GenAI] build_pending: pid={} session_id={:?} conversation_id={:?} user_query={:?} model={:?} provider={:?} agent={:?}\n",
+            conn_id.pid, session_id, conversation_id,
+            user_query.as_deref().map(|s| if s.len() > 100 { &s[..100] } else { s }),
+            model, provider, agent_name,
+        );
+
+        Some(PendingCallInfo {
+            call_id,
+            trace_id: None,          // LLM API response_id, not available until response
+            conversation_id,          // User query fingerprint hash (from request body)
+            session_id,
+            start_timestamp_ns: request.source_event.timestamp_ns,
+            pid: conn_id.pid as i32,
+            process_name: request.source_event.comm.clone(),
+            agent_name,
+            http_method: Some(request.method.clone()),
+            http_path: Some(request.path.clone()),
+            input_messages,
+            system_instructions,
+            user_query,
+            is_sse,
+            model,
+            provider,
+        })
+    }
+
+    /// Extract enrichment data from SSE events captured before the process died.
+    ///
+    /// Parses sse_events for:
+    /// - model name (from first chunk's "model" field)
+    /// - trace_id / response_id (from first chunk's "id" field)
+    /// - token usage (via TokenParser, from DashScope-style usage chunks)
+    /// - output content (merged content deltas)
+    ///
+    /// Returns `None` if sse_events is empty.
+    pub fn extract_sse_enrichment(sse_events: &[ParsedSseEvent]) -> Option<SseEnrichment> {
+        if sse_events.is_empty() {
+            return None;
+        }
+
+        let token_parser = TokenParser::new();
+        let mut model: Option<String> = None;
+        let mut trace_id: Option<String> = None;
+        let mut content_buf = String::new();
+
+        // Forward scan for model, trace_id, and content deltas
+        for event in sse_events {
+            if event.is_done() {
+                continue;
+            }
+            if let Some(json) = event.json_body() {
+                // Extract model from first chunk that has it
+                if model.is_none() {
+                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
+                        if !m.is_empty() {
+                            model = Some(m.to_string());
+                        }
+                    }
+                }
+                // Extract response id (trace_id) from first chunk that has it
+                if trace_id.is_none() {
+                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() {
+                            trace_id = Some(id.to_string());
+                        }
+                    }
+                }
+                // Accumulate content deltas
+                if let Some(choices) = json.get("choices").and_then(|v| v.as_array()) {
+                    for choice in choices {
+                        if let Some(delta) = choice.get("delta") {
+                            if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                                content_buf.push_str(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reverse scan for token usage (usage chunk is near the end)
+        let usage = sse_events.iter().rev()
+            .find_map(|e| token_parser.parse_event(e));
+
+        let (input_tokens, output_tokens) = match &usage {
+            Some(u) => (Some(u.input_tokens as i64), Some(u.output_tokens as i64)),
+            None => (None, None),
+        };
+
+        // Use model from usage if not found in content chunks
+        if model.is_none() {
+            if let Some(ref u) = usage {
+                model = u.model.clone();
+            }
+        }
+
+        // Build output_messages JSON from accumulated content
+        let output_messages = if !content_buf.is_empty() {
+            // Format as a JSON array matching OutputMessage structure
+            serde_json::to_string(&serde_json::json!([{
+                "role": "assistant",
+                "parts": [{"Text": {"content": content_buf}}]
+            }])).ok()
+        } else {
+            None
+        };
+
+        let event_count = sse_events.len() as i64;
+
+        print!("[GenAI] extract_sse_enrichment: events={} model={:?} trace_id={:?} content_len={} input_tokens={:?} output_tokens={:?}\n",
+            event_count, model, trace_id, content_buf.len(), input_tokens, output_tokens);
+
+        Some(SseEnrichment {
+            model,
+            trace_id,
+            provider: None, // provider already set from request path in insert_pending
+            output_messages,
+            sse_event_count: Some(event_count),
+            input_tokens,
+            output_tokens,
+        })
     }
 
     /// Build LLMCall from analysis results
     ///
     /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    fn build_llm_call(&self, results: &[AnalysisResult]) -> Option<LLMCall> {
+    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
             AnalysisResult::Token(t) => Some(t.clone()),
@@ -85,8 +458,11 @@ impl GenAIBuilder {
         // Need at least HttpRecord to build LLMCall
         let http = http_record?;
         
-        // Check if this is an LLM API call
-        if !self.is_llm_api_path(&http.path) && !http.is_sse {
+        // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
+        let path_match = self.is_llm_api_path(&http.path);
+        let body_match = !path_match && Self::is_sysom_pop_request(&http.request_body);
+        let is_llm = path_match || body_match;
+        if !is_llm && !http.is_sse {
             return None;
         }
 
@@ -107,21 +483,90 @@ impl GenAIBuilder {
         });
 
         // Determine provider and model
-        let provider = token_record.as_ref()
-            .map(|t| t.provider.clone())
-            .or_else(|| self.extract_provider_from_path(&http.path))
+        // Priority: path-based (most specific) > body-based > parsed_message > token_record
+        let provider = self.extract_provider_from_path(&http.path)
+            .or_else(|| Self::extract_provider_from_body(&http.request_body))
+            .or_else(|| parsed_message.as_ref().map(|m| m.provider().to_string()))
+            .or_else(|| token_record.as_ref().map(|t| t.provider.clone()))
             .unwrap_or_else(|| "unknown".to_string());
 
-        let model = token_record.as_ref()
-            .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned())
-            .or_else(|| self.extract_model_from_message(&parsed_message))
+        // Model priority: parsed_message (most accurate) > token_record > body extraction
+        let model = self.extract_model_from_message(&parsed_message)
+            .or_else(|| token_record.as_ref()
+                .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned()))
             .or_else(|| Self::extract_model_from_body(&http.request_body, &http.response_body))
             .unwrap_or_else(|| "unknown".to_string());
 
         // 在 request move 之前提取用户查询、fingerprint 和 session_id
         let query_fp = Self::compute_user_query_fingerprint(&request);
         let user_query = Self::extract_last_user_query(&request);
-        let session_id = Self::compute_session_id(&request);
+        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
+        // fallback 到基于首条 user message 的 hash 计算
+        let response_id_val = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
+        let mapper_session = response_id_val.as_deref()
+            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .map(|s| s.to_string());
+        let session_id = mapper_session.clone()
+            .unwrap_or_else(|| Self::compute_session_id(&request));
+
+        // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
+        let response_id = Self::extract_response_id(&parsed_message, &http)
+            .unwrap_or_else(|| call_id.clone());
+
+        // Extract error message from response body when status_code >= 400
+        let error = if http.status_code >= 400 {
+            http.response_body.as_ref().and_then(|body| {
+                /// Strip HTTP chunked transfer encoding (e.g. "b6\r\n{json}\r\n0\r\n\r\n")
+                /// and return the JSON object substring.
+                fn strip_chunked(body: &str) -> &str {
+                    // Find the first '{' — everything before it may be chunk-size hex + CRLF
+                    let start = match body.find('{') {
+                        Some(idx) => idx,
+                        None => return body,
+                    };
+                    // Find the last '}' — everything after it is chunked trailer
+                    let end = match body.rfind('}') {
+                        Some(idx) => idx + 1,
+                        None => return &body[start..],
+                    };
+                    &body[start..end]
+                }
+
+                /// Try to extract `message` from a JSON value (handles nested / escaped JSON)
+                fn extract_message(v: &serde_json::Value) -> Option<String> {
+                    if let Some(e) = v.get("error") {
+                        if e.is_object() {
+                            // {"error":{"message":"..."}}
+                            if let Some(msg) = e.get("message").and_then(|m| m.as_str()) {
+                                return Some(msg.to_string());
+                            }
+                        } else if let Some(s) = e.as_str() {
+                            // {"error": "{\"error\":{\"message\":\"...\"}}"}  — escaped JSON string
+                            if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+                                if let Some(msg) = inner.get("message").and_then(|m| m.as_str()) {
+                                    return Some(msg.to_string());
+                                }
+                                if let Some(inner_e) = inner.get("error") {
+                                    if let Some(msg) = inner_e.get("message").and_then(|m| m.as_str()) {
+                                        return Some(msg.to_string());
+                                    }
+                                }
+                            }
+                            return Some(s.to_string());
+                        }
+                    }
+                    // Top-level {"message":"..."}
+                    v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
+                }
+
+                let json_str = strip_chunked(body);
+                serde_json::from_str::<serde_json::Value>(json_str).ok()
+                    .and_then(|v| extract_message(&v))
+                    .or_else(|| Some(body.clone()))
+            })
+        } else {
+            None
+        };
 
         Some(LLMCall {
             call_id,
@@ -133,10 +578,10 @@ impl GenAIBuilder {
             request,
             response,
             token_usage,
-            error: None,
+            error,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm),
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -160,9 +605,13 @@ impl GenAIBuilder {
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 } else if http.path.contains("/completions") {
                     meta.insert("operation_name".to_string(), "text_completion".to_string());
+                } else if http.path.contains("/api/v1/copilot/generate_copilot") {
+                    meta.insert("operation_name".to_string(), "chat".to_string());
                 }
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 meta.insert("conversation_id".to_string(), query_fp);
+                // response_id: LLM API 返回的响应 ID，用作 trace_id
+                meta.insert("response_id".to_string(), response_id);
                 // user_query: 用户实际输入的原文
                 if let Some(ref q) = user_query {
                     meta.insert("user_query".to_string(), q.clone());
@@ -219,6 +668,51 @@ impl GenAIBuilder {
                         seed: None,
                         stop_sequences: req.stop_sequences.clone(),
                         stream: req.stream.unwrap_or(false),
+                        tools: None,
+                        raw_body: http.request_body.clone(),
+                    };
+                }
+            }
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                if let Some(req) = request.as_ref() {
+                    let msgs = req.params.messages.iter().map(|m| {
+                        let role = m.role.clone();
+                        let mut parts = Vec::new();
+                        if role == "tool" {
+                            let response_val = serde_json::from_str::<serde_json::Value>(&m.content)
+                                .unwrap_or_else(|_| serde_json::Value::String(m.content.clone()));
+                            parts.push(MessagePart::ToolCallResponse {
+                                id: m.tool_call_id.clone(),
+                                response: response_val,
+                            });
+                        } else {
+                            if !m.content.is_empty() {
+                                parts.push(MessagePart::Text { content: m.content.clone() });
+                            }
+                        }
+                        if let Some(ref tool_calls) = m.tool_calls {
+                            for tc in tool_calls {
+                                let arguments = serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok();
+                                parts.push(MessagePart::ToolCall {
+                                    id: Some(tc.id.clone()),
+                                    name: tc.function.name.clone(),
+                                    arguments,
+                                });
+                            }
+                        }
+                        InputMessage { role, parts, name: m.name.clone() }
+                    }).collect();
+                    return LLMRequest {
+                        messages: msgs,
+                        temperature: req.params.temperature,
+                        max_tokens: req.params.max_tokens,
+                        frequency_penalty: None,
+                        presence_penalty: None,
+                        top_p: req.params.top_p,
+                        top_k: None,
+                        seed: None,
+                        stop_sequences: None,
+                        stream: req.params.stream,
                         tools: None,
                         raw_body: http.request_body.clone(),
                     };
@@ -381,6 +875,47 @@ impl GenAIBuilder {
             _ => (vec![], None),
         };
 
+        // SysOM response handling
+        let (messages, finish_reason) = if messages.is_empty() {
+            match message {
+                Some(ParsedApiMessage::SysomMessage { response, .. }) => {
+                    response.as_ref().map(|resp| {
+                        let choice = resp.choices.first();
+                        let mut parts = Vec::new();
+                        if let Some(choice) = choice {
+                            if !choice.message.content.is_empty() {
+                                parts.push(MessagePart::Text { content: choice.message.content.clone() });
+                            }
+                            if let Some(ref tool_use) = choice.message.tool_use {
+                                for item in tool_use {
+                                    let arguments = serde_json::from_str::<serde_json::Value>(&item.function.arguments).ok();
+                                    parts.push(MessagePart::ToolCall {
+                                        id: Some(item.id.clone()),
+                                        name: item.function.name.clone(),
+                                        arguments,
+                                    });
+                                }
+                            }
+                        }
+                        let msgs = if parts.is_empty() {
+                            vec![]
+                        } else {
+                            vec![OutputMessage {
+                                role: "assistant".to_string(),
+                                parts,
+                                name: None,
+                                finish_reason: Some("stop".to_string()),
+                            }]
+                        };
+                        (msgs, Some("stop".to_string()))
+                    }).unwrap_or_else(|| (vec![], None))
+                }
+                _ => (messages, finish_reason),
+            }
+        } else {
+            (messages, finish_reason)
+        };
+
         // For SSE responses, extract from response_body when no parsed message
         let messages = if messages.is_empty() && http.is_sse {
             // No parsed response — reconstruct from SSE response body directly
@@ -445,7 +980,16 @@ impl GenAIBuilder {
         path.contains("/v1/completions") ||
         path.contains("/v1/messages") ||
         path.contains("/chat/completions") ||
-        path.contains("/completions")
+        path.contains("/completions") ||
+        path.contains("/api/v1/copilot/generate_copilot")
+    }
+
+    /// Check if request body contains SysOM POP API markers
+    /// SysOM uses path "/" with action in body (llmParamString field)
+    fn is_sysom_pop_request(request_body: &Option<String>) -> bool {
+        request_body.as_ref()
+            .map(|b| b.contains("llmParamString"))
+            .unwrap_or(false)
     }
 
     /// Extract provider from path
@@ -454,6 +998,17 @@ impl GenAIBuilder {
             Some("anthropic".to_string())
         } else if path.contains("/v1/chat/completions") || path.contains("/v1/completions") {
             Some("openai".to_string())
+        } else if path.contains("/api/v1/copilot/generate_copilot") {
+            Some("sysom".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Extract provider from request body (for POP API style requests)
+    fn extract_provider_from_body(request_body: &Option<String>) -> Option<String> {
+        if Self::is_sysom_pop_request(request_body) {
+            Some("sysom".to_string())
         } else {
             None
         }
@@ -468,6 +1023,9 @@ impl GenAIBuilder {
             Some(ParsedApiMessage::AnthropicMessage { request, .. }) => {
                 request.as_ref().map(|r| r.model.clone())
             }
+            Some(ParsedApiMessage::SysomMessage { request, .. }) => {
+                request.as_ref().map(|r| r.params.model.clone())
+            }
             _ => None,
         }
     }
@@ -476,13 +1034,25 @@ impl GenAIBuilder {
     ///
     /// 优先从 request body 取（用户请求的 model），
     /// 如果没有则从 response body 取（SSE 响应中的 model）
+    /// 对于 SysOM 请求，需要从 llmParamString 内嵌 JSON 中提取 model
     fn extract_model_from_body(request_body: &Option<String>, response_body: &Option<String>) -> Option<String> {
         // 尝试从 request body 获取
         if let Some(body) = request_body {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                // 标准 OpenAI/Anthropic 格式
                 if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
                     if !model.is_empty() {
                         return Some(model.to_string());
+                    }
+                }
+                // SysOM 格式：model 嵌套在 llmParamString 中
+                if let Some(lps) = v.get("llmParamString").and_then(|v| v.as_str()) {
+                    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(lps) {
+                        if let Some(model) = inner.get("model").and_then(|m| m.as_str()) {
+                            if !model.is_empty() {
+                                return Some(model.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -508,6 +1078,53 @@ impl GenAIBuilder {
                 }
             }
         }
+        None
+    }
+
+    /// Extract the LLM API response ID from parsed message or SSE body.
+    ///
+    /// Priority:
+    /// 1. ParsedApiMessage response.id (OpenAI / Anthropic)
+    /// 2. SSE response body first chunk "id" field
+    /// 3. None (caller should fall back to call_id)
+    fn extract_response_id(parsed_message: &Option<ParsedApiMessage>, http: &HttpRecord) -> Option<String> {
+        // 1. Try parsed message response.id
+        if let Some(msg) = parsed_message {
+            match msg {
+                ParsedApiMessage::OpenAICompletion { response: Some(resp), .. } => {
+                    if !resp.id.is_empty() {
+                        return Some(resp.id.clone());
+                    }
+                }
+                ParsedApiMessage::AnthropicMessage { response: Some(resp), .. } => {
+                    if !resp.id.is_empty() {
+                        return Some(resp.id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. SSE fallback: parse first JSON object from response_body for "id" field
+        if http.is_sse {
+            if let Some(ref body) = http.response_body {
+                // SSE body contains lines like "data: {...}" — find first JSON with "id"
+                for line in body.lines() {
+                    let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
+                    if json_str.is_empty() || json_str == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                            if !id.is_empty() {
+                                return Some(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -612,12 +1229,42 @@ impl GenAIBuilder {
         }
     }
 
-    /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    fn resolve_agent_name(comm: &str) -> Option<String> {
+    /// Resolve agent name from comm string only (no /proc access).
+    /// Used for dead-PID drain where the process is already gone.
+    fn resolve_agent_name_from_comm(comm: &str) -> Option<String> {
         let ctx = ProcessContext {
             comm: comm.to_string(),
             cmdline_args: vec![],
             exe_path: String::new(),
+        };
+        known_agents()
+            .iter()
+            .find(|m| m.matches(&ctx))
+            .map(|m| m.info().name.clone())
+    }
+
+    /// 通过进程名匹配 agent registry，返回已知 agent 名称
+    fn resolve_agent_name(comm: &str, pid: u32) -> Option<String> {
+        // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
+        let cmdline_args = std::fs::read(format!("/proc/{}/cmdline", pid))
+            .ok()
+            .map(|data| {
+                data.split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let exe_path = std::fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let ctx = ProcessContext {
+            comm: comm.to_string(),
+            cmdline_args,
+            exe_path,
         };
         known_agents()
             .iter()
@@ -850,3 +1497,4 @@ impl GenAIBuilder {
         if parts.is_empty() { None } else { Some((parts, finish_reason)) }
     }
 }
+
