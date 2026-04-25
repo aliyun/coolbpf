@@ -38,6 +38,10 @@ if (ENABLE_PROFILE)
   add_subdirectory(profiler)
 endif()
 
+if (ENABLE_AGENTSIGHT)
+  add_subdirectory(agentsight)
+endif()
+
 file(GLOB sources ${PROJECT_SOURCE_DIR}/third/libbpf/src/*.c
      ${CMAKE_CURRENT_SOURCE_DIR}/*.c)
 # share library
@@ -88,6 +92,14 @@ install(FILES ${PROJECT_SOURCE_DIR}/arch/${CMAKE_SYSTEM_PROCESSOR}/vmlinux.h
 
 if (ENABLE_PROFILE)
 # install libprofiler
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/profiler/release/libprofiler.so 
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/profiler/release/libprofiler.so
         DESTINATION ${INSTALL_LIB_DIR})
+endif()
+
+if (ENABLE_AGENTSIGHT)
+# install libagentsight
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/agentsight/release/libagentsight.so
+        DESTINATION ${INSTALL_LIB_DIR})
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/agentsight/include/agentsight.h
+        DESTINATION ${INSTALL_INCLUDE_DIR})
 endif()

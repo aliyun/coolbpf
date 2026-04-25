@@ -16,6 +16,7 @@ option(BUILD_LCC "Build lcc project" OFF)
 OPTION(ENABLE_GCOV "Enable gcov" OFF)
 option(ENABLE_ASAN "Enable asan" OFF)
 option(ENABLE_PROFILE "Enable profile" ON)
+option(ENABLE_AGENTSIGHT "Build AgentSight library" OFF)
 option(ENABLE_STATIC_LINK_ELF "Enable static link libelf" OFF)
 
 IF (ENABLE_GCOV)

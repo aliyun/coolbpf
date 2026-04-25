@@ -8,3 +8,4 @@ lwcb/pylwcb/target
 src/bpf/*.skel.h
 src/profiler/*.skel.h
 src/security/*.skel.h
+src/agentsight/include/agentsight.h
