@@ -83,6 +83,7 @@ const char* agentsight_last_error(void);
 AgentsightConfigHandle* agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle* cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle* cfg, const char* path);
+void agentsight_config_set_cmdline_pattern(AgentsightConfigHandle* cfg, const char* const* patterns, const char* agent_name);
 void agentsight_config_free(AgentsightConfigHandle* cfg);
 
 /* ---- 回调类型 ---- */
@@ -127,6 +128,7 @@ int agentsight_read(AgentsightHandle* h,
 | `agentsight_read` | `int` | \>0=处理的事件数，0=无事件，<0=出错 |
 | `agentsight_last_error` | `const char*` | 错误描述字符串，无错误时返回 NULL |
 | `agentsight_version` | `const char*` | 版本号字符串（如 `"0.2.2"`），静态存储，无需释放 |
+| `agentsight_config_set_cmdline_pattern` | `void` | cfg 或 patterns 为 NULL 时静默忽略 |
 
 ### 2.2 配置默认值
 
@@ -134,6 +136,7 @@ int agentsight_read(AgentsightHandle* h,
 | --- | --- | --- |
 | `verbose` | 0 | 设为 1 开启调试日志输出 |
 | `log_path` | NULL | 日志文件保存路径，NULL 时输出到 stderr |
+| `cmdline_patterns` | 空 | 用户自定义 cmdline glob 匹配规则列表，默认为空（不追加任何用户规则） |
 
 ### 2.3 线程安全
 
@@ -141,6 +144,53 @@ int agentsight_read(AgentsightHandle* h,
 * 回调函数在调用 `agentsight_read()` 的线程上同步执行，无需额外同步
 * 不同 `AgentsightHandle` 实例之间完全独立，可跨线程使用
 * `agentsight_get_eventfd()` 返回的 fd 可安全地在其他线程中用于 epoll/select 等待
+
+### 2.4 Cmdline Pattern 配置
+
+通过 `agentsight_config_set_cmdline_pattern()` 可添加用户自定义的 cmdline 匹配规则，匹配到的进程将被 attach SSL probe 并抓取 HTTPS 数据。
+
+#### 函数签名
+
+```c
+void agentsight_config_set_cmdline_pattern(
+    AgentsightConfigHandle* cfg,
+    const char* const* patterns,
+    const char* agent_name
+);
+```
+
+#### 参数说明
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `cfg` | `AgentsightConfigHandle*` | 配置句柄，为 NULL 时静默忽略 |
+| `patterns` | `const char* const*` | NULL 结尾的 C 字符串指针数组，每个元素为 glob 通配符（支持 `*`/`?`） |
+| `agent_name` | `const char*` | 匹配成功时使用的 agent 名称；为 NULL 时默认使用 `patterns[0]` |
+
+#### 匹配规则
+
+- **按位置一一对应（前缀匹配）**：`patterns[i]` 对 `cmdline[i]` 做 glob 匹配
+- **大小写不敏感**：所有 glob 匹配均忽略大小写
+- **patterns 比 cmdline 短**：忽略多余的 cmdline 元素（前缀匹配成功）
+- **cmdline 比 patterns 短**：不匹配（参数不够）
+- **跳过不关心的位置**：用 `"*"` 作为通配，匹配该位置的任意值
+- **与内置 registry 的关系**：叠加（OR），用户规则追加在内置 matchers 之后，任一匹配即追踪
+
+#### 示例
+
+```c
+/* 匹配 Claude Code: cmdline[0]="node", cmdline[1] 含 "claude" */
+const char* pats[] = {"node", "*claude*", NULL};
+agentsight_config_set_cmdline_pattern(cfg, pats, "Claude Code");
+
+/* 匹配 Aider: 跳过 cmdline[0], cmdline[1] 含 "aider" */
+const char* pats2[] = {"*", "*aider*", NULL};
+agentsight_config_set_cmdline_pattern(cfg, pats2, "Aider");
+
+/* agent_name 为 NULL，默认使用 patterns[0] 作为名称 */
+const char* pats3[] = {"python3", "*my_agent*", NULL};
+agentsight_config_set_cmdline_pattern(cfg, pats3, NULL);
+```
 
 ## 3. 使用示例
 
@@ -291,3 +341,4 @@ make install            # 安装 agentsight CLI
 | v0.1 | 初始版本，轮询 read 模式 |
 | v0.2 | 升级为 eventfd + read 模式；新增 `agentsight_get_eventfd()`；`agentsight_read()` 增加 `flags` 参数；新增 `agentsight_config_set_log_path()`；大 buffer 指针增加 `_len` 字段；新增 `llm_usage` 字段区分 token 数据来源 |
 | v0.2.1 | 集成 CMake 构建系统（`ENABLE_AGENTSIGHT` 选项）；新增 C 示例程序 `tools/examples/agentsight/`；新增 `cbindgen.toml` 自动生成完整 C 头文件；新增 FFI API 文档 |
+| v0.3 | 新增 `agentsight_config_set_cmdline_pattern()` 接口，支持通过 glob 通配符配置 cmdline 匹配规则 |
