@@ -315,7 +315,7 @@ impl GenAISqliteStore {
             CREATE INDEX IF NOT EXISTS idx_genai_trace_timestamp ON genai_events(trace_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_conversation_timestamp ON genai_events(conversation_id, start_timestamp_ns);
             CREATE INDEX IF NOT EXISTS idx_genai_pid_timestamp ON genai_events(pid, start_timestamp_ns);
-            CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns);",
+            CREATE INDEX IF NOT EXISTS idx_genai_instance_timestamp ON genai_events(instance, start_timestamp_ns)",
             // NOTE: idx_genai_status and idx_genai_interruption_type are NOT created here
             // because they depend on columns added via migration. They are created in the
             // migration blocks below, which guarantees the columns exist first.
@@ -377,6 +377,9 @@ impl GenAISqliteStore {
 
         // Migration: add conversation_id column for existing databases
         let _ = conn.execute("ALTER TABLE genai_events ADD COLUMN conversation_id TEXT", []);
+
+        // v5: tool_call_ids JSON array for output tool calls
+        ensure_col!("tool_call_ids", "TEXT");
 
         Ok(())
     }
@@ -475,39 +478,56 @@ impl GenAISqliteStore {
                     if reasons.is_empty() { None } else { serde_json::to_string(&reasons).ok() }
                 };
 
+                let tool_call_ids: Option<String> = {
+                    let ids: Vec<String> = call.response.messages.iter()
+                        .flat_map(|m| m.parts.iter())
+                        .filter_map(|p| {
+                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                                Some(tc_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                };
+
                 let updated = conn.execute(
                     "UPDATE genai_events SET
                         status = 'complete',
                         trace_id            = ?1,
                         conversation_id     = ?2,
-                        end_timestamp_ns    = ?3,
-                        duration_ns         = ?4,
-                        provider            = ?5,
-                        model               = ?6,
-                        request_model       = ?7,
-                        response_model      = ?8,
-                        temperature         = ?9,
-                        max_tokens          = ?10,
-                        top_p               = ?11,
-                        frequency_penalty   = ?12,
-                        presence_penalty    = ?13,
-                        finish_reasons      = ?14,
-                        server_address      = ?15,
-                        input_tokens        = ?16,
-                        output_tokens       = ?17,
-                        total_tokens        = ?18,
-                        cache_creation_tokens = ?19,
-                        cache_read_tokens   = ?20,
-                        system_instructions = ?21,
-                        input_messages      = ?22,
-                        output_messages     = ?23,
-                        status_code         = ?24,
-                        sse_event_count     = ?25,
-                        event_json          = ?26
-                    WHERE call_id = ?27 AND status = 'pending'",
+                        session_id          = ?3,
+                        end_timestamp_ns    = ?4,
+                        duration_ns         = ?5,
+                        provider            = ?6,
+                        model               = ?7,
+                        request_model       = ?8,
+                        response_model      = ?9,
+                        temperature         = ?10,
+                        max_tokens          = ?11,
+                        top_p               = ?12,
+                        frequency_penalty   = ?13,
+                        presence_penalty    = ?14,
+                        finish_reasons      = ?15,
+                        server_address      = ?16,
+                        input_tokens        = ?17,
+                        output_tokens       = ?18,
+                        total_tokens        = ?19,
+                        cache_creation_tokens = ?20,
+                        cache_read_tokens   = ?21,
+                        system_instructions = ?22,
+                        input_messages      = ?23,
+                        output_messages     = ?24,
+                        status_code         = ?25,
+                        sse_event_count     = ?26,
+                        event_json          = ?27,
+                        tool_call_ids       = ?28
+                    WHERE call_id = ?29 AND status = 'pending'",
                     params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
+                        call.metadata.get("session_id"),
                         call.end_timestamp_ns as i64,
                         call.duration_ns as i64,
                         call.provider,
@@ -532,6 +552,7 @@ impl GenAISqliteStore {
                         call.metadata.get("status_code").and_then(|s| s.parse::<i64>().ok()),
                         call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
                         event_json,
+                        tool_call_ids,
                         call.call_id,
                     ],
                 )?;
@@ -901,6 +922,52 @@ impl GenAISqliteStore {
                 let call_id: String = row?;
                 // 1-based turn index
                 result.insert(call_id, idx + 1);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Build a mapping from `tool_call_id` to the turn index of the LLM call
+    /// that issued it.
+    ///
+    /// Reads the `tool_call_ids` JSON array column from `genai_events` and
+    /// expands it so that each individual tool_call_id maps to the turn index
+    /// (1-based) of its parent LLM call.
+    pub fn get_tool_call_turn_indices(
+        &self,
+        session_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, usize>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut result = std::collections::HashMap::new();
+
+        for sid in session_ids {
+            let sql = "SELECT call_id, tool_call_ids FROM genai_events \
+                       WHERE event_type = 'llm_call' AND session_id = ?1 \
+                       ORDER BY start_timestamp_ns ASC";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![sid], |row| {
+                let call_id: String = row.get(0)?;
+                let tool_call_ids: Option<String> = row.get(1)?;
+                Ok((call_id, tool_call_ids))
+            })?;
+
+            for (idx, row) in rows.enumerate() {
+                let (call_id, tool_call_ids_json) = row?;
+                let turn = idx + 1; // 1-based
+
+                // Also map the call_id itself (for backward compat with
+                // stats.db that may still store call_id as tool_use_id)
+                result.insert(call_id.clone(), turn);
+
+                // Expand each tool_call_id in the JSON array
+                if let Some(json_str) = tool_call_ids_json {
+                    if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json_str) {
+                        for tc_id in ids {
+                            result.insert(tc_id, turn);
+                        }
+                    }
+                }
             }
         }
 
@@ -1386,6 +1453,21 @@ impl GenAISqliteStore {
                     else { serde_json::to_string(&reasons).ok() }
                 };
 
+                // Extract tool_call_ids from response messages (outgoing tool calls)
+                let tool_call_ids: Option<String> = {
+                    let ids: Vec<String> = call.response.messages.iter()
+                        .flat_map(|m| m.parts.iter())
+                        .filter_map(|p| {
+                            if let crate::genai::semantic::MessagePart::ToolCall { id: Some(tc_id), .. } = p {
+                                Some(tc_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if ids.is_empty() { None } else { serde_json::to_string(&ids).ok() }
+                };
+
                 // Get instance ID (same logic as SLS uploader)
                 let instance = crate::genai::sls::SlsUploader::get_instance_id();
 
@@ -1400,12 +1482,12 @@ impl GenAISqliteStore {
                         cache_creation_tokens, cache_read_tokens,
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
-                        is_sse, sse_event_count, event_json
+                        is_sse, sse_event_count, event_json, tool_call_ids
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40
                     )",
                     params![
                         "llm_call",
@@ -1447,6 +1529,7 @@ impl GenAISqliteStore {
                         call.metadata.get("is_sse").map(|s| if s == "true" { 1i64 } else { 0 }),
                         call.metadata.get("sse_event_count").and_then(|s| s.parse::<i64>().ok()),
                         event_json,
+                        tool_call_ids,
                     ],
                 )?;
             }

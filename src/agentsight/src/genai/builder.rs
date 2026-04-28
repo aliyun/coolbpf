@@ -77,22 +77,13 @@ impl GenAIBuilder {
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
+        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
         let mut pending_response_id = None;
 
-        // Check if the response ID exists but mapper didn't resolve it
-        let parsed_message = results.iter().find_map(|r| match r {
-            AnalysisResult::Message(m) => Some(m.clone()),
-            _ => None,
-        });
-        let response_id = parsed_message.as_ref().and_then(|m| m.response_id()).map(|s| s.to_string());
-        let mapper_hit = response_id.as_deref()
-            .and_then(|rid| response_mapper.get_session_by_response_id(rid))
-            .is_some();
-
-        if let Some(llm_call) = self.build_llm_call(results, response_mapper) {
+        if let Some(llm_call) = self.build_llm_call(results, response_mapper, pid_agent_name_cache) {
             // Build PendingCallInfo from the same LLMCall before moving it
             let http_record = results.iter().find_map(|r| match r {
                 AnalysisResult::Http(h) => Some(h.clone()),
@@ -113,6 +104,23 @@ impl GenAIBuilder {
                     if sys.is_empty() { None } else { serde_json::to_string(&sys).ok() },
                 )
             };
+
+            // Determine response_id from call metadata (may come from parsed_message
+            // or SSE body fallback), and check if mapper resolved it.
+            let response_id = llm_call.metadata.get("response_id").cloned();
+            let mapper_hit = response_id.as_deref()
+                .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+                .is_some();
+
+            // If response_id exists but mapper didn't resolve session_id, queue
+            // for deferred resolution so the next FileWrite event can fix it.
+            if response_id.is_some() && !mapper_hit {
+                pending_response_id = response_id;
+                log::debug!(
+                    "GenAI response_id {} not yet in mapper, will defer session_id resolution",
+                    pending_response_id.as_deref().unwrap_or_default()
+                );
+            }
 
             pending = Some(PendingCallInfo {
                 call_id: llm_call.call_id.clone(),
@@ -136,11 +144,6 @@ impl GenAIBuilder {
             events.push(GenAISemanticEvent::LLMCall(llm_call));
         }
 
-        // If response_id exists but mapper didn't have it, mark as pending
-        if !events.is_empty() && response_id.is_some() && !mapper_hit {
-            pending_response_id = response_id;
-        }
-
         (BuildOutput { events, pending_response_id }, pending)
     }
 
@@ -159,21 +162,18 @@ impl GenAIBuilder {
         &self,
         request: &ParsedRequest,
         conn_id: &ConnectionId,
+        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
         let path_match = self.is_llm_api_path(&request.path);
         let body_str = if request.body_len > 0 { Some(request.body_str().to_string()) } else { None };
         let body_match = !path_match && Self::is_sysom_pop_request(&body_str);
         if !path_match && !body_match {
-            print!("[GenAI] build_pending: skip non-LLM path={} body_len={}\n",
-                request.path, request.body_len);
             return None;
         }
 
         let call_id = self.generate_id();
         let body = request.json_body();
-        print!("[GenAI] build_pending: path={} body_parsed={} body_len={}\n",
-            request.path, body.is_some(), request.body_len);
 
         // Determine if streaming
         let is_sse = body.as_ref()
@@ -186,27 +186,6 @@ impl GenAIBuilder {
         let (session_id, conversation_id, user_query, input_messages, system_instructions) =
             if let Some(ref v) = body {
                 if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
-                    // Diagnostic: dump message roles and content types
-                    let total = messages.len();
-                    let user_count = messages.iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .count();
-                    print!("[GenAI] build_pending: messages.len={} user_count={}\n", total, user_count);
-                    // Print first 3 user messages' content type
-                    for (i, m) in messages.iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .take(3)
-                        .enumerate()
-                    {
-                        let ctype = match m.get("content") {
-                            Some(c) if c.is_string() => format!("string(len={})", c.as_str().unwrap_or("").len()),
-                            Some(c) if c.is_array() => format!("array(len={})", c.as_array().unwrap().len()),
-                            Some(c) if c.is_null() => "null".to_string(),
-                            Some(_) => "other".to_string(),
-                            None => "missing".to_string(),
-                        };
-                        print!("[GenAI] build_pending: user_msg[{}] content_type={}\n", i, ctype);
-                    }
                     // Helper: extract text from "content" which can be either
                     // a plain string or an array of content blocks:
                     //   "content": "text"
@@ -287,14 +266,9 @@ impl GenAIBuilder {
                     (session_id, conversation_id, user_query, input_messages, system_instructions)
                 } else {
                     // messages key missing or not an array
-                    let keys: Vec<_> = v.as_object()
-                        .map(|o| o.keys().take(10).cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    print!("[GenAI] build_pending: no 'messages' array, top-level keys={:?}\n", keys);
                     (None, None, None, None, None)
                 }
             } else {
-                print!("[GenAI] build_pending: body is None (json parse failed)\n");
                 (None, None, None, None, None)
             };
 
@@ -308,15 +282,8 @@ impl GenAIBuilder {
         // Extract provider from request path
         let provider = self.extract_provider_from_path(&request.path);
 
-        // Resolve agent_name from comm using known_agents registry
-        // (PID is dead so /proc is gone, but comm is still available from the captured request)
-        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm);
-
-        print!("[GenAI] build_pending: pid={} session_id={:?} conversation_id={:?} user_query={:?} model={:?} provider={:?} agent={:?}\n",
-            conn_id.pid, session_id, conversation_id,
-            user_query.as_deref().map(|s| if s.len() > 100 { &s[..100] } else { s }),
-            model, provider, agent_name,
-        );
+        // Resolve agent_name: check pid→name cache first (works for dead PIDs), then comm-based fallback
+        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache);
 
         Some(PendingCallInfo {
             call_id,
@@ -421,9 +388,6 @@ impl GenAIBuilder {
 
         let event_count = sse_events.len() as i64;
 
-        print!("[GenAI] extract_sse_enrichment: events={} model={:?} trace_id={:?} content_len={} input_tokens={:?} output_tokens={:?}\n",
-            event_count, model, trace_id, content_buf.len(), input_tokens, output_tokens);
-
         Some(SseEnrichment {
             model,
             trace_id,
@@ -438,7 +402,7 @@ impl GenAIBuilder {
     /// Build LLMCall from analysis results
     ///
     /// Combines data from TokenRecord, HttpRecord, and ParsedApiMessage
-    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper) -> Option<LLMCall> {
+    fn build_llm_call(&self, results: &[AnalysisResult], response_mapper: &ResponseSessionMapper, pid_agent_name_cache: &std::collections::HashMap<u32, String>) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {
             AnalysisResult::Token(t) => Some(t.clone()),
@@ -466,7 +430,7 @@ impl GenAIBuilder {
             return None;
         }
 
-        let call_id = self.generate_id();
+        let internal_id = self.generate_id();
 
         // Build request from parsed message or HTTP record
         let request = self.build_request(&parsed_message, &http);
@@ -510,8 +474,11 @@ impl GenAIBuilder {
             .unwrap_or_else(|| Self::compute_session_id(&request));
 
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
-        let response_id = Self::extract_response_id(&parsed_message, &http)
-            .unwrap_or_else(|| call_id.clone());
+        // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
+        // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
+        let response_id = Self::extract_response_id(&parsed_message, &http);
+        let call_id = response_id.clone().unwrap_or_else(|| internal_id.clone());
+        let response_id = response_id.unwrap_or_else(|| call_id.clone());
 
         // Extract error message from response body when status_code >= 400
         let error = if http.status_code >= 400 {
@@ -581,7 +548,7 @@ impl GenAIBuilder {
             error,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm, http.pid),
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);
@@ -1105,10 +1072,22 @@ impl GenAIBuilder {
             }
         }
 
-        // 2. SSE fallback: parse first JSON object from response_body for "id" field
+        // 2. SSE fallback: extract "id" field from response body
         if http.is_sse {
             if let Some(ref body) = http.response_body {
-                // SSE body contains lines like "data: {...}" — find first JSON with "id"
+                // Try JSON array format first (from HTTP/2 stream aggregation)
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                    if let Some(arr) = v.as_array() {
+                        for chunk in arr {
+                            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+                                if !id.is_empty() {
+                                    return Some(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Try SSE line format (from HTTP/1.1: "data: {...}" per line)
                 for line in body.lines() {
                     let json_str = line.strip_prefix("data: ").unwrap_or(line).trim();
                     if json_str.is_empty() || json_str == "[DONE]" {
@@ -1231,7 +1210,11 @@ impl GenAIBuilder {
 
     /// Resolve agent name from comm string only (no /proc access).
     /// Used for dead-PID drain where the process is already gone.
-    fn resolve_agent_name_from_comm(comm: &str) -> Option<String> {
+    fn resolve_agent_name_from_comm(comm: &str, pid: u32, cache: &std::collections::HashMap<u32, String>) -> Option<String> {
+        // First check the pid→agent_name cache (works even for dead processes)
+        if let Some(name) = cache.get(&pid) {
+            return Some(name.clone());
+        }
         let ctx = ProcessContext {
             comm: comm.to_string(),
             cmdline_args: vec![],
@@ -1244,7 +1227,11 @@ impl GenAIBuilder {
     }
 
     /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    fn resolve_agent_name(comm: &str, pid: u32) -> Option<String> {
+    fn resolve_agent_name(comm: &str, pid: u32, cache: &std::collections::HashMap<u32, String>) -> Option<String> {
+        // First check the pid→agent_name cache (works even for dead processes)
+        if let Some(name) = cache.get(&pid) {
+            return Some(name.clone());
+        }
         // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
         let cmdline_args = std::fs::read(format!("/proc/{}/cmdline", pid))
             .ok()

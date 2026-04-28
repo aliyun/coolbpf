@@ -25,18 +25,16 @@ pub struct AuditCommand {
     /// Show summary statistics
     #[structopt(long)]
     pub summary: bool,
-
-    /// Custom audit database path
-    #[structopt(long)]
-    pub db: Option<String>,
 }
 
 impl AuditCommand {
     pub fn execute(&self) {
-        let db_path = self.db
-            .as_ref()
-            .map(|p| std::path::PathBuf::from(p))
-            .unwrap_or_else(|| SqliteConfig::default().db_path());
+        let db_path = SqliteConfig::default().db_path();
+
+        if !db_path.exists() {
+            eprintln!("Database file not found: {:?}", db_path);
+            std::process::exit(1);
+        }
 
         let store = match AuditStore::new(&db_path) {
             Ok(s) => s,

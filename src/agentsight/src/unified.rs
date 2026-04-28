@@ -19,6 +19,7 @@
 //! ```
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,8 @@ pub struct AgentSight {
     ffi_sender: Option<FfiEventSender>,
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
+    /// Cache of pid → agent_name, persists after process exit for deferred resolution
+    pid_agent_name_cache: HashMap<u32, String>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -134,6 +137,12 @@ impl AgentSight {
         // Attach SSL probes to already-running agents
         for agent in &existing_agents {
             Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
+        }
+
+        // Build pid → agent_name cache from existing agents (persists after process exit)
+        let mut pid_agent_name_cache = HashMap::new();
+        for agent in &existing_agents {
+            pid_agent_name_cache.insert(agent.pid, agent.agent_info.name.clone());
         }
 
         // Start polling (non-blocking)
@@ -267,6 +276,7 @@ impl AgentSight {
             pending_genai: Vec::new(),
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
+            pid_agent_name_cache,
         })
     }
 
@@ -366,7 +376,7 @@ impl AgentSight {
             let analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper);
+            let (output, pending_info) = self.genai_builder.build_with_pending(&analysis_results, &self.response_mapper, &self.pid_agent_name_cache);
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {
@@ -442,6 +452,7 @@ impl AgentSight {
                 // Check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
+                    self.pid_agent_name_cache.insert(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
                 }
             }
@@ -592,9 +603,6 @@ impl AgentSight {
             return;
         }
 
-        print!("[DrainCheck] Found {} dead-PID connection(s) to persist\n",
-            drained.len());
-
         use crate::aggregator::ConnectionState;
         use crate::genai::GenAIBuilder;
 
@@ -610,21 +618,15 @@ impl AgentSight {
                 _ => continue,
             };
 
-            print!("[DrainCheck] dead-PID conn: pid={} ssl_ptr={:#x} state={} path={} sse_events={}\n",
-                conn_id.pid, conn_id.ssl_ptr, state_name, request.path, sse_events.len());
-
-            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id) {
+            if let Some(pending) = self.genai_builder.build_pending_from_request(&request, &conn_id, &self.pid_agent_name_cache) {
                 if let Some(ref store) = self.genai_sqlite_store {
                     let call_id = pending.call_id.clone();
                     let pid = pending.pid;
 
                     if let Err(e) = store.insert_pending(&pending) {
-                        print!("[DrainCheck] FAIL persist: {}\n", e);
+                        log::warn!("[DrainCheck] FAIL persist: {}", e);
                         continue;
                     }
-                    print!("[DrainCheck] OK persisted: pid={} call_id={} session_id={:?} conversation_id={:?}\n",
-                        conn_id.pid, call_id, pending.session_id, pending.conversation_id);
-
                     // ── Session ID reconciliation ──────────────────────────
                     // The drain path computes session_id via SHA256 hash fallback,
                     // but normal flow uses ResponseSessionMapper (agent .jsonl UUID).
@@ -633,18 +635,13 @@ impl AgentSight {
                         Ok(Some(ref real_session_id)) => {
                             if pending.session_id.as_deref() != Some(real_session_id.as_str()) {
                                 if let Err(e) = store.update_session_id(&call_id, real_session_id) {
-                                    print!("[DrainCheck] FAIL update session_id: {}\n", e);
-                                } else {
-                                    print!("[DrainCheck] session_id reconciled: {:?} -> {}\n",
-                                        pending.session_id, real_session_id);
+                                    log::warn!("[DrainCheck] FAIL update session_id: {}", e);
                                 }
                             }
                         }
-                        Ok(None) => {
-                            print!("[DrainCheck] no completed session found for pid={}, keeping hash fallback\n", pid);
-                        }
+                        Ok(None) => {}
                         Err(e) => {
-                            print!("[DrainCheck] FAIL lookup session: {}\n", e);
+                            log::warn!("[DrainCheck] FAIL lookup session: {}", e);
                         }
                     }
 
@@ -726,21 +723,18 @@ impl AgentSight {
                                         }
                                     }
                                 } else {
-                                    print!("[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation\n",
+                                    log::warn!("[DrainCheck] tokenizer unavailable for model {:?}, skipping token computation",
                                         enrichment.model.as_deref().or(pending.model.as_deref()));
                                 }
                             }
                             if let Err(e) = store.enrich_pending_from_sse(&call_id, &enrichment) {
-                                print!("[DrainCheck] FAIL enrich SSE: {}\n", e);
-                            } else {
-                                print!("[DrainCheck] SSE enriched: model={:?} trace_id={:?} input_tokens={:?} output_tokens={:?}\n",
-                                    enrichment.model, enrichment.trace_id, enrichment.input_tokens, enrichment.output_tokens);
+                                log::warn!("[DrainCheck] FAIL enrich SSE: {}", e);
                             }
                         }
                     }
                 }
             } else {
-                print!("[DrainCheck] build_pending returned None: pid={} path={} body_len={}\n",
+                log::debug!("[DrainCheck] build_pending returned None: pid={} path={} body_len={}",
                     conn_id.pid, request.path, request.body_len);
             }
         }
