@@ -85,7 +85,7 @@ void agentsight_config_set_verbose(AgentsightConfigHandle* cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle* cfg, const char* path);
 void agentsight_config_set_cmdline_pattern(AgentsightConfigHandle* cfg, const char* const* patterns, const char* agent_name, int allow);
 void agentsight_config_set_domain_pattern(AgentsightConfigHandle* cfg, const char* pattern);
-int agentsight_config_load_file(AgentsightConfigHandle* cfg, const char* path);
+int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_str);
 void agentsight_config_free(AgentsightConfigHandle* cfg);
 
 /* ---- 回调类型 ---- */
@@ -132,7 +132,7 @@ int agentsight_read(AgentsightHandle* h,
 | `agentsight_version` | `const char*` | 版本号字符串（如 `"0.2.2"`），静态存储，无需释放 |
 | `agentsight_config_set_cmdline_pattern` | `void` | cfg 或 patterns 为 NULL 时静默忽略 |
 | `agentsight_config_set_domain_pattern` | `void` | cfg 或 pattern 为 NULL 时静默忽略 |
-| `agentsight_config_load_file` | `int` | 0=成功，<0=失败（文件不存在或解析错误） |
+| `agentsight_config_load_config` | `int` | 0=成功，<0=失败（解析错误） |
 
 ### 2.2 线程安全
 
@@ -300,9 +300,9 @@ agentsight_start(h);
 #### C API
 
 ```c
-/* 从 TOML 文件加载 pattern 配置，追加到已有规则中。
- * 返回 0=成功，<0=失败（文件不存在或解析错误，可用 agentsight_last_error() 查看）。 */
-int agentsight_config_load_file(AgentsightConfigHandle* cfg, const char* path);
+/* 从 TOML 字符串加载配置，追加到已有规则中。
+ * 返回 0=成功，<0=失败（解析错误，可用 agentsight_last_error() 查看）。 */
+int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_str);
 ```
 
 #### 文件格式
@@ -356,9 +356,9 @@ patterns = ["*.deepseek.com", "generativelanguage.googleapis.com"]
 
 #### 加载行为
 
-- `agentsight_config_load_file()` 将文件中的规则**追加**到已有配置，不清空之前通过 C API 添加的规则
-- 可多次调用加载多个文件，规则持续累加
-- 文件不存在或解析失败时返回 `<0`，不影响已有配置
+- `agentsight_config_load_config()` 将 TOML 字符串中的规则**追加**到已有配置，不清空之前通过 C API 添加的规则
+- 可多次调用，规则持续累加
+- 解析失败时返回 `<0`，不影响已有配置
 
 #### 使用示例
 
@@ -366,8 +366,16 @@ patterns = ["*.deepseek.com", "generativelanguage.googleapis.com"]
 AgentsightConfigHandle* cfg = agentsight_config_new();
 agentsight_config_set_verbose(cfg, 1);
 
-/* 从文件加载 pattern 规则 */
-if (agentsight_config_load_file(cfg, "/etc/agentsight/config.toml") < 0) {
+/* 从 TOML 字符串加载配置 */
+const char* toml =
+    "[[cmdline.allow]]\n"
+    "patterns = [\"node\", \"*claude*\"]\n"
+    "agent_name = \"Claude Code\"\n"
+    "\n"
+    "[[domain]]\n"
+    "patterns = [\"*.openai.com\", \"*.anthropic.com\"]\n";
+
+if (agentsight_config_load_config(cfg, toml) < 0) {
     fprintf(stderr, "load config failed: %s\n", agentsight_last_error());
 }
 
@@ -569,4 +577,4 @@ make install            # 安装 agentsight CLI
 | v0.2 | 升级为 eventfd + read 模式；新增 `agentsight_get_eventfd()`；`agentsight_read()` 增加 `flags` 参数；新增 `agentsight_config_set_log_path()`；大 buffer 指针增加 `_len` 字段；新增 `llm_usage` 字段区分 token 数据来源 |
 | v0.2.1 | 集成 CMake 构建系统（`ENABLE_AGENTSIGHT` 选项）；新增 C 示例程序 `tools/examples/agentsight/`；新增 `cbindgen.toml` 自动生成完整 C 头文件；新增 FFI API 文档 |
 | v0.3 | `agentsight_config_set_cmdline_pattern()` 新增 `allow` 参数：allow=1 为进程匹配规则，allow=0 为域名黑名单 |
-| v0.4 | 新增 `agentsight_config_set_domain_pattern()` 接口，支持域名白名单；与 cmdline pattern 形成 OR 匹配逻辑；新增 `agentsight_config_load_file()` 支持 TOML 配置文件加载 |
+| v0.4 | 新增 `agentsight_config_set_domain_pattern()` 接口，支持域名白名单；与 cmdline pattern 形成 AND 匹配逻辑；新增 `agentsight_config_load_config()` 支持 TOML 字符串加载配置 |
