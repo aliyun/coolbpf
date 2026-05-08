@@ -83,8 +83,8 @@ const char* agentsight_last_error(void);
 AgentsightConfigHandle* agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle* cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle* cfg, const char* path);
-void agentsight_config_set_cmdline_pattern(AgentsightConfigHandle* cfg, const char* const* patterns, const char* agent_name, int allow);
-void agentsight_config_set_domain_pattern(AgentsightConfigHandle* cfg, const char* pattern);
+void agentsight_config_add_cmdline_rule(AgentsightConfigHandle* cfg, const char* const* rules, const char* agent_name, int allow);
+void agentsight_config_add_domain_rule(AgentsightConfigHandle* cfg, const char* rule);
 int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_str);
 void agentsight_config_free(AgentsightConfigHandle* cfg);
 
@@ -130,8 +130,8 @@ int agentsight_read(AgentsightHandle* h,
 | `agentsight_read` | `int` | \>0=处理的事件数，0=无事件，<0=出错 |
 | `agentsight_last_error` | `const char*` | 错误描述字符串，无错误时返回 NULL |
 | `agentsight_version` | `const char*` | 版本号字符串（如 `"0.2.2"`），静态存储，无需释放 |
-| `agentsight_config_set_cmdline_pattern` | `void` | cfg 或 patterns 为 NULL 时静默忽略 |
-| `agentsight_config_set_domain_pattern` | `void` | cfg 或 pattern 为 NULL 时静默忽略 |
+| `agentsight_config_add_cmdline_rule` | `void` | cfg 或 rules 为 NULL 时静默忽略 |
+| `agentsight_config_add_domain_rule` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
 | `agentsight_config_load_config` | `int` | 0=成功，<0=失败（解析错误） |
 
 ### 2.2 线程安全
@@ -149,19 +149,19 @@ int agentsight_read(AgentsightHandle* h,
 | --- | --- | --- |
 | `verbose` | 0 | 设为 1 开启调试日志输出 |
 | `log_path` | NULL | 日志文件保存路径，NULL 时输出到 stderr |
-| `cmdline_patterns` | 空 | 用户自定义规则列表；allow=1 为进程白名单，allow=0 为域名黑名单 |
-| `domain_patterns` | 空（不过滤） | 域名白名单规则列表，默认为空表示不添加白名单 |
+| `cmdline_rules` | 空 | 用户自定义规则列表；allow=1 为进程白名单，allow=0 为进程黑名单 |
+| `domain_rules` | 空 | 域名白名单规则列表，SNI 阶段独立判定是否 attach |
 
-### 3.2 Cmdline Pattern 配置
+### 3.2 Cmdline Rule 配置
 
-通过 `agentsight_config_set_cmdline_pattern()` 可添加用户自定义的匹配规则。`allow=1` 时添加进程匹配规则（匹配到的进程将被 attach SSL probe 并抓取 HTTPS 数据）；`allow=0` 时添加域名黑名单规则（已追踪进程访问黑名单域名时事件被丢弃）。
+通过 `agentsight_config_add_cmdline_rule()` 可添加用户自定义的进程匹配规则。`allow=1` 时添加进程白名单（匹配到的进程 attach SSL 探针）；`allow=0` 时添加进程黑名单（匹配到的进程不 attach）。
 
 #### 函数签名
 
 ```c
-void agentsight_config_set_cmdline_pattern(
+void agentsight_config_add_cmdline_rule(
     AgentsightConfigHandle* cfg,
-    const char* const* patterns,
+    const char* const* rules,
     const char* agent_name,
     int allow
 );
@@ -172,59 +172,57 @@ void agentsight_config_set_cmdline_pattern(
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `cfg` | `AgentsightConfigHandle*` | 配置句柄，为 NULL 时静默忽略 |
-| `patterns` | `const char* const*` | NULL 结尾的 C 字符串指针数组 |
+| `rules` | `const char* const*` | NULL 结尾的 C 字符串指针数组 |
 | `agent_name` | `const char*` | allow=1 时匹配成功使用的 agent 名称；allow=0 时忽略（传 NULL） |
-| `allow` | `int` | 1=进程匹配规则（patterns 为 cmdline glob），0=域名黑名单（patterns 为域名 glob） |
+| `allow` | `int` | 1=进程白名单（attach），0=进程黑名单（不 attach） |
 
-#### allow=1：进程匹配
+#### allow=1：进程白名单
 
-patterns 为 cmdline glob 通配符数组，按位置一一对应做前缀匹配：
+rules 为 cmdline glob 通配符数组，按位置一一对应做前缀匹配：
 
-- **按位置一一对应（前缀匹配）**：`patterns[i]` 对 `cmdline[i]` 做 glob 匹配
+- **按位置一一对应（前缀匹配）**：`rules[i]` 对 `cmdline[i]` 做 glob 匹配
 - **大小写不敏感**：所有 glob 匹配均忽略大小写
-- **patterns 比 cmdline 短**：忽略多余的 cmdline 元素（前缀匹配成功）
-- **cmdline 比 patterns 短**：不匹配（参数不够）
+- **rules 比 cmdline 短**：忽略多余的 cmdline 元素（前缀匹配成功）
+- **cmdline 比 rules 短**：不匹配（参数不够）
 - **跳过不关心的位置**：用 `"*"` 作为通配，匹配该位置的任意值
 
-#### allow=0：域名黑名单
+#### allow=0：进程黑名单
 
-patterns 为域名 glob 通配符数组，已追踪进程访问匹配的域名时事件被丢弃：
+rules 格式与 allow=1 相同（cmdline glob），匹配到的进程不 attach：
 
-- **Glob 通配符**：支持 `*`（匹配任意字符序列）和 `?`（匹配单个字符）
-- **大小写不敏感**：域名匹配忽略大小写
-- **在 SNI 事件阶段评估**：仅对已追踪进程产生的事件生效
-- **与 domain_pattern 白名单为 AND 关系**：域名必须在白名单中且不在黑名单中，才 attach
+- **匹配方式与 allow=1 相同**：按位置一一对应做 glob 前缀匹配
+- **优先级高于 allow=1**：同时匹配白名单和黑名单时，黑名单生效（不 attach）
 
 #### 示例
 
 ```c
 /* 匹配 Claude Code 进程 (allow=1) */
 const char* pats[] = {"node", "*claude*", NULL};
-agentsight_config_set_cmdline_pattern(cfg, pats, "Claude Code", 1);
+agentsight_config_add_cmdline_rule(cfg, pats, "Claude Code", 1);
 
 /* 匹配 Aider 进程 (allow=1) */
 const char* pats2[] = {"*", "*aider*", NULL};
-agentsight_config_set_cmdline_pattern(cfg, pats2, "Aider", 1);
+agentsight_config_add_cmdline_rule(cfg, pats2, "Aider", 1);
 
-/* 域名黑名单 (allow=0)：过滤噪音域名 */
-const char* deny[] = {"*.sentry.io", "*.npmjs.org", NULL};
-agentsight_config_set_cmdline_pattern(cfg, deny, NULL, 0);
+/* 进程黑名单 (allow=0)：不 attach webpack 相关 node 进程 */
+const char* deny[] = {"node", "*webpack*", NULL};
+agentsight_config_add_cmdline_rule(cfg, deny, NULL, 0);
 ```
 
-### 3.3 Domain Pattern 配置
+### 3.3 Domain Rule 配置
 
-通过 `agentsight_config_set_domain_pattern()` 可配置域名白名单规则，命中即放行，与 Cmdline Pattern 为 OR 关系。
+通过 `agentsight_config_add_domain_rule()` 可配置域名白名单规则，用于 SNI 阶段判定是否 attach SSL 探针。
 
 #### 设计动机
 
-用户可能关心特定域名的流量（如 LLM API 域名），无论访问该域名的进程是否匹配 cmdline pattern。Domain Pattern 提供域名级别的白名单能力：只要域名命中白名单，事件即放行。
+用户可能关心特定域名的流量（如 LLM API 域名），Domain Rule 提供域名级别的过滤能力：当 SNI 事件的域名命中白名单且进程不在黑名单时，attach SSL 探针。
 
 #### 函数签名
 
 ```c
-void agentsight_config_set_domain_pattern(
+void agentsight_config_add_domain_rule(
     AgentsightConfigHandle* cfg,
-    const char* pattern
+    const char* rule
 );
 ```
 
@@ -233,12 +231,12 @@ void agentsight_config_set_domain_pattern(
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `cfg` | `AgentsightConfigHandle*` | 配置句柄，为 NULL 时静默忽略 |
-| `pattern` | `const char*` | 域名 glob 模式（支持 `*`/`?`），为 NULL 时静默忽略 |
+| `rule` | `const char*` | 域名 glob 模式（支持 `*`/`?`），为 NULL 时静默忽略 |
 
 #### 行为语义
 
-- **不调用**：不添加任何白名单规则，所有 SNI 事件均不 attach SSL 探针
-- **调用一次或多次**：域名必须命中任一 pattern 才会 attach（前提是不被黑名单排除）
+- **不调用**：SNI 阶段不会 attach SSL 探针（仅阶段一的 cmdline_allow 可触发 attach）
+- **调用一次或多次**：域名必须命中任一 rule 才会 attach SSL 探针
 - **多次调用叠加**：规则之间为 OR 关系，不覆盖已有规则
 
 #### 多次调用叠加
@@ -270,17 +268,17 @@ Host: api.anthropic.com:443
 ```c
 AgentsightConfigHandle* cfg = agentsight_config_new();
 
-/* 追踪 Claude Code 进程 (cmdline allow=1) */
+/* Claude Code 进程白名单 */
 const char* pats[] = {"node", "*claude*", NULL};
-agentsight_config_set_cmdline_pattern(cfg, pats, "Claude Code", 1);
+agentsight_config_add_cmdline_rule(cfg, pats, "Claude Code", 1);
 
-/* 域名黑名单 (cmdline allow=0)：过滤噪音域名 */
-const char* deny[] = {"*.sentry.io", "*.npmjs.org", NULL};
-agentsight_config_set_cmdline_pattern(cfg, deny, NULL, 0);
+/* 进程黑名单：不 attach webpack */
+const char* deny[] = {"node", "*webpack*", NULL};
+agentsight_config_add_cmdline_rule(cfg, deny, NULL, 0);
 
-/* 域名白名单：无论哪个进程，访问这些域名就输出 */
-agentsight_config_set_domain_pattern(cfg, "*.openai.com");
-agentsight_config_set_domain_pattern(cfg, "*.anthropic.com");
+/* 域名白名单：仅 attach 这些域名的 SSL 连接 */
+agentsight_config_add_domain_rule(cfg, "*.openai.com");
+agentsight_config_add_domain_rule(cfg, "*.anthropic.com");
 
 AgentsightHandle* h = agentsight_new(cfg);
 agentsight_config_free(cfg);
@@ -288,14 +286,15 @@ agentsight_start(h);
 ```
 
 上述配置效果：
-- Claude 进程访问 `api.openai.com` → attach（命中白名单，不在黑名单）
-- Claude 进程访问 `o123.ingest.sentry.io` → 不 attach（命中黑名单，被排除）
-- Claude 进程访问 `example.com` → 不 attach（未命中白名单）
-- 非追踪进程访问任意域名 → 无事件（进程未被追踪，无 SNI 监控）
+- Claude 进程访问 `api.openai.com` → attach（阶段一 cmdline_allow 命中，阶段二 domain_rule 也命中）
+- Claude 进程访问 `example.com` → attach（阶段一 cmdline_allow 命中即 attach）
+- webpack 进程访问 `api.openai.com` → 不 attach（cmdline_deny 黑名单一票否决）
+- 未知进程访问 `api.openai.com` → attach（阶段二 domain_rule 命中，进程不在黑名单）
+- 未知进程访问 `example.com` → 不 attach（两阶段都未命中）
 
 ### 3.4 TOML 配置文件
 
-除了通过 C API 逐条配置，也可通过 TOML 文件一次性加载所有 pattern 规则。
+除了通过 C API 逐条配置，也可通过 TOML 文件一次性加载所有规则。
 
 #### C API
 
@@ -315,32 +314,32 @@ int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_
 verbose = 1
 log_path = "/var/log/agentsight.log"
 
-# --- 进程匹配规则（cmdline allow=1）---
+# --- 进程匹配规则 ---
 [[cmdline.allow]]
-patterns = ["node", "*claude*"]
+rules = ["node", "*claude*"]
 agent_name = "Claude Code"
 
 [[cmdline.allow]]
-patterns = ["*", "*aider*"]
+rules = ["*", "*aider*"]
 agent_name = "Aider"
 
 [[cmdline.allow]]
-patterns = ["python3", "*my_agent*"]
+rules = ["python3", "*my_agent*"]
 agent_name = "My Agent"
 
-# --- 域名黑名单（cmdline allow=0）---
+# --- 进程黑名单 ---
 [[cmdline.deny]]
-patterns = ["*.sentry.io", "*.sentry-cdn.com"]
+rules = ["node", "*webpack*"]
 
 [[cmdline.deny]]
-patterns = ["*.npmjs.org", "registry.npmmirror.com"]
+rules = ["python3", "*celery*"]
 
-# --- 域名白名单（domain_pattern）---
+# --- 域名白名单（domain_rule）---
 [[domain]]
-patterns = ["*.openai.com", "*.anthropic.com"]
+rules = ["*.openai.com", "*.anthropic.com"]
 
 [[domain]]
-patterns = ["*.deepseek.com", "generativelanguage.googleapis.com"]
+rules = ["*.deepseek.com", "generativelanguage.googleapis.com"]
 ```
 
 #### 字段说明
@@ -349,10 +348,10 @@ patterns = ["*.deepseek.com", "generativelanguage.googleapis.com"]
 | --- | --- | --- |
 | `general.verbose` | int (可选) | 1=开启调试日志，0=关闭，默认 0 |
 | `general.log_path` | string (可选) | 日志文件路径，省略时输出到 stderr |
-| `cmdline.allow[].patterns` | string array | cmdline glob 数组，按位置一一匹配 |
+| `cmdline.allow[].rules` | string array | cmdline glob 数组，按位置一一匹配 |
 | `cmdline.allow[].agent_name` | string | 匹配成功时的 agent 名称 |
-| `cmdline.deny[].patterns` | string array | 域名 glob 数组，匹配到的域名事件被丢弃 |
-| `domain[].patterns` | string array | 域名白名单 glob 数组，命中即放行 |
+| `cmdline.deny[].rules` | string array | cmdline glob 数组，匹配到的进程不 attach |
+| `domain[].rules` | string array | 域名白名单 glob 数组，命中即 attach |
 
 #### 加载行为
 
@@ -369,18 +368,18 @@ agentsight_config_set_verbose(cfg, 1);
 /* 从 TOML 字符串加载配置 */
 const char* toml =
     "[[cmdline.allow]]\n"
-    "patterns = [\"node\", \"*claude*\"]\n"
+    "rules = [\"node\", \"*claude*\"]\n"
     "agent_name = \"Claude Code\"\n"
     "\n"
     "[[domain]]\n"
-    "patterns = [\"*.openai.com\", \"*.anthropic.com\"]\n";
+    "rules = [\"*.openai.com\", \"*.anthropic.com\"]\n";
 
 if (agentsight_config_load_config(cfg, toml) < 0) {
     fprintf(stderr, "load config failed: %s\n", agentsight_last_error());
 }
 
 /* 也可继续通过 API 追加规则 */
-agentsight_config_set_domain_pattern(cfg, "*.my-custom-llm.com");
+agentsight_config_add_domain_rule(cfg, "*.my-custom-llm.com");
 
 AgentsightHandle* h = agentsight_new(cfg);
 agentsight_config_free(cfg);
@@ -389,43 +388,47 @@ agentsight_start(h);
 
 ### 3.5 匹配判定逻辑
 
-匹配分为两个阶段：
+匹配分为两个独立阶段，均用于判定是否 attach SSL 探针：
 
 #### 阶段一：进程创建时
 
-当新进程创建时，检查 cmdline_allow 规则：
+当新进程创建时，仅根据 cmdline 判断是否 attach SSL 探针：
 
 ```
-进程被追踪 = cmdline_allow匹配(进程)
+attach_ssl = cmdline_allow匹配(进程)
 ```
 
-匹配成功则 attach SSL 探针，开始捕获该进程的 HTTPS 流量。
+- 若进程命中 cmdline_allow，attach SSL 探针
+- 此阶段不涉及域名判断（域名信息尚不存在）
 
 #### 阶段二：SNI 事件到达时
 
-当被追踪进程产生 SNI 事件时，按以下条件判定是否 attach SSL 探针：
+当 SNI 事件到达时，判定是否 attach SSL 探针：
 
 ```
-attach_ssl = domain_pattern匹配(域名) AND NOT cmdline_deny匹配(域名)
+attach_ssl = domain_rule匹配(域名) AND NOT cmdline_deny匹配(进程)
 ```
 
 流程图：
 
 ```
-SNI 事件到达（来自已追踪进程）
+SNI 事件到达
   │
-  ├─ 域名命中 domain_pattern 白名单？── 否 ──→ ❌ 不 attach
+  ├─ 进程命中 cmdline_deny 黑名单？── 是 ──→ ❌ 不 attach
   │
-  ├─ 域名命中 cmdline_deny 黑名单？─── 是 ──→ ❌ 不 attach
-  │
-  └─ 通过 ─────────────────────────────────→ ✅ attach SSL 探针，捕获 HTTPS 数据
+  └─ 否
+      │
+      ├─ 域名命中 domain_rule？──── 是 ──→ ✅ attach SSL 探针
+      │
+      └─ 否 ────────────────────────────→ ❌ 不 attach
 ```
 
 关键语义：
-- **cmdline_allow 决定追踪哪些进程**：仅在进程创建时评估一次，匹配后监控其 SNI 事件
-- **domain_pattern 白名单是前置条件**：域名必须命中白名单才有资格 attach
-- **cmdline_deny 黑名单是排除条件**：即使命中白名单，黑名单也能排除
-- **都不配置**：不追踪任何进程，无事件输出
+- **两阶段独立**：阶段一和阶段二分别独立判定，任一阶段命中即 attach
+- **阶段一只看 cmdline**：cmdline_allow 命中即 attach，不需要等到 SNI 事件
+- **阶段二只看 domain 和黑名单**：domain_rule 命中即 attach
+- **cmdline_deny 两阶段都生效**：黑名单一票否决
+- **都不配置**：无事件输出
 
 ## 4. 使用示例
 
@@ -576,5 +579,5 @@ make install            # 安装 agentsight CLI
 | v0.1 | 初始版本，轮询 read 模式 |
 | v0.2 | 升级为 eventfd + read 模式；新增 `agentsight_get_eventfd()`；`agentsight_read()` 增加 `flags` 参数；新增 `agentsight_config_set_log_path()`；大 buffer 指针增加 `_len` 字段；新增 `llm_usage` 字段区分 token 数据来源 |
 | v0.2.1 | 集成 CMake 构建系统（`ENABLE_AGENTSIGHT` 选项）；新增 C 示例程序 `tools/examples/agentsight/`；新增 `cbindgen.toml` 自动生成完整 C 头文件；新增 FFI API 文档 |
-| v0.3 | `agentsight_config_set_cmdline_pattern()` 新增 `allow` 参数：allow=1 为进程匹配规则，allow=0 为域名黑名单 |
-| v0.4 | 新增 `agentsight_config_set_domain_pattern()` 接口，支持域名白名单；与 cmdline pattern 形成 AND 匹配逻辑；新增 `agentsight_config_load_config()` 支持 TOML 字符串加载配置 |
+| v0.3 | `agentsight_config_add_cmdline_rule()` 新增 `allow` 参数：allow=1 为进程白名单，allow=0 为进程黑名单 |
+| v0.4 | 新增 `agentsight_config_add_domain_rule()` 接口，支持域名白名单；新增 `agentsight_config_load_config()` 支持 TOML 字符串加载配置 |
