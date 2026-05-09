@@ -83,9 +83,9 @@ const char* agentsight_last_error(void);
 AgentsightConfigHandle* agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle* cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle* cfg, const char* path);
-void agentsight_config_add_cmdline_rule(AgentsightConfigHandle* cfg, const char* const* rules, const char* agent_name, int allow);
+void agentsight_config_add_cmdline_rule(AgentsightConfigHandle* cfg, const char* const* rule, const char* agent_name, int allow);
 void agentsight_config_add_domain_rule(AgentsightConfigHandle* cfg, const char* rule);
-int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_str);
+int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* json_str);
 void agentsight_config_free(AgentsightConfigHandle* cfg);
 
 /* ---- 回调类型 ---- */
@@ -130,7 +130,7 @@ int agentsight_read(AgentsightHandle* h,
 | `agentsight_read` | `int` | \>0=处理的事件数，0=无事件，<0=出错 |
 | `agentsight_last_error` | `const char*` | 错误描述字符串，无错误时返回 NULL |
 | `agentsight_version` | `const char*` | 版本号字符串（如 `"0.2.2"`），静态存储，无需释放 |
-| `agentsight_config_add_cmdline_rule` | `void` | cfg 或 rules 为 NULL 时静默忽略 |
+| `agentsight_config_add_cmdline_rule` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
 | `agentsight_config_add_domain_rule` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
 | `agentsight_config_load_config` | `int` | 0=成功，<0=失败（解析错误） |
 
@@ -161,7 +161,7 @@ int agentsight_read(AgentsightHandle* h,
 ```c
 void agentsight_config_add_cmdline_rule(
     AgentsightConfigHandle* cfg,
-    const char* const* rules,
+    const char* const* rule,
     const char* agent_name,
     int allow
 );
@@ -172,23 +172,23 @@ void agentsight_config_add_cmdline_rule(
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `cfg` | `AgentsightConfigHandle*` | 配置句柄，为 NULL 时静默忽略 |
-| `rules` | `const char* const*` | NULL 结尾的 C 字符串指针数组 |
+| `rule` | `const char* const*` | NULL 结尾的 C 字符串指针数组 |
 | `agent_name` | `const char*` | allow=1 时匹配成功使用的 agent 名称；allow=0 时忽略（传 NULL） |
 | `allow` | `int` | 1=进程白名单（attach），0=进程黑名单（不 attach） |
 
 #### allow=1：进程白名单
 
-rules 为 cmdline glob 通配符数组，按位置一一对应做前缀匹配：
+rule 为 cmdline glob 通配符数组，按位置一一对应做前缀匹配：
 
-- **按位置一一对应（前缀匹配）**：`rules[i]` 对 `cmdline[i]` 做 glob 匹配
+- **按位置一一对应（前缀匹配）**：`rule[i]` 对 `cmdline[i]` 做 glob 匹配
 - **大小写不敏感**：所有 glob 匹配均忽略大小写
-- **rules 比 cmdline 短**：忽略多余的 cmdline 元素（前缀匹配成功）
-- **cmdline 比 rules 短**：不匹配（参数不够）
+- **rule 比 cmdline 短**：忽略多余的 cmdline 元素（前缀匹配成功）
+- **cmdline 比 rule 短**：不匹配（参数不够）
 - **跳过不关心的位置**：用 `"*"` 作为通配，匹配该位置的任意值
 
 #### allow=0：进程黑名单
 
-rules 格式与 allow=1 相同（cmdline glob），匹配到的进程不 attach：
+rule 格式与 allow=1 相同（cmdline glob），匹配到的进程不 attach：
 
 - **匹配方式与 allow=1 相同**：按位置一一对应做 glob 前缀匹配
 - **优先级高于 allow=1**：同时匹配白名单和黑名单时，黑名单生效（不 attach）
@@ -292,70 +292,56 @@ agentsight_start(h);
 - 未知进程访问 `api.openai.com` → attach（阶段二 domain_rule 命中，进程不在黑名单）
 - 未知进程访问 `example.com` → 不 attach（两阶段都未命中）
 
-### 3.4 TOML 配置文件
+### 3.4 JSON 配置文件
 
-除了通过 C API 逐条配置，也可通过 TOML 文件一次性加载所有规则。
+除了通过 C API 逐条配置，也可通过 JSON 字符串一次性加载所有规则。
 
 #### C API
 
 ```c
-/* 从 TOML 字符串加载配置，追加到已有规则中。
+/* 从 JSON 字符串加载配置，追加到已有规则中。
  * 返回 0=成功，<0=失败（解析错误，可用 agentsight_last_error() 查看）。 */
-int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* toml_str);
+int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* json_str);
 ```
 
 #### 文件格式
 
-```toml
-# /etc/agentsight/config.toml
-
-# --- 通用配置 ---
-[general]
-verbose = 1
-log_path = "/var/log/agentsight.log"
-
-# --- 进程匹配规则 ---
-[[cmdline.allow]]
-rules = ["node", "*claude*"]
-agent_name = "Claude Code"
-
-[[cmdline.allow]]
-rules = ["*", "*aider*"]
-agent_name = "Aider"
-
-[[cmdline.allow]]
-rules = ["python3", "*my_agent*"]
-agent_name = "My Agent"
-
-# --- 进程黑名单 ---
-[[cmdline.deny]]
-rules = ["node", "*webpack*"]
-
-[[cmdline.deny]]
-rules = ["python3", "*celery*"]
-
-# --- 域名白名单（domain_rule）---
-[[domain]]
-rules = ["*.openai.com", "*.anthropic.com"]
-
-[[domain]]
-rules = ["*.deepseek.com", "generativelanguage.googleapis.com"]
+```json
+{
+  "verbose": 1,
+  "log_path": "/var/log/agentsight.log",
+  "cmdline": {
+    "allow": [
+      { "rule": ["node", "*claude*"], "agent_name": "Claude Code" },
+      { "rule": ["*", "*aider*"], "agent_name": "Aider" },
+      { "rule": ["python3", "*my_agent*"], "agent_name": "My Agent" }
+    ],
+    "deny": [
+      { "rule": ["node", "*webpack*"] },
+      { "rule": ["python3", "*celery*"] }
+    ]
+  },
+  "domain": [
+    { "rule": ["*.openai.com", "*.anthropic.com"] },
+    { "rule": ["*.deepseek.com", "generativelanguage.googleapis.com"] }
+  ]
+}
 ```
 
 #### 字段说明
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `general.verbose` | int (可选) | 1=开启调试日志，0=关闭，默认 0 |
-| `general.log_path` | string (可选) | 日志文件路径，省略时输出到 stderr |
-| `cmdline.allow[].rules` | string array | cmdline glob 数组，按位置一一匹配 |
+| `verbose` | int (可选) | 1=开启调试日志，0=关闭，默认 0 |
+| `log_path` | string (可选) | 日志文件路径，省略时输出到 stderr |
+| `cmdline.allow[].rule` | string array | cmdline glob 数组，按位置一一匹配 |
 | `cmdline.allow[].agent_name` | string | 匹配成功时的 agent 名称 |
-| `cmdline.deny[].rules` | string array | cmdline glob 数组，匹配到的进程不 attach |
-| `domain[].rules` | string array | 域名白名单 glob 数组，命中即 attach |
+| `cmdline.deny[].rule` | string array | cmdline glob 数组，匹配到的进程不 attach |
+| `domain[].rule` | string array | 域名白名单 glob 数组，命中即 attach |
 
 #### 加载行为
 
-- `agentsight_config_load_config()` 将 TOML 字符串中的规则**追加**到已有配置，不清空之前通过 C API 添加的规则
+- `agentsight_config_load_config()` 将 JSON 字符串中的规则**追加**到已有配置，不清空之前通过 C API 添加的规则
 - 可多次调用，规则持续累加
 - 解析失败时返回 `<0`，不影响已有配置
 
@@ -365,16 +351,13 @@ rules = ["*.deepseek.com", "generativelanguage.googleapis.com"]
 AgentsightConfigHandle* cfg = agentsight_config_new();
 agentsight_config_set_verbose(cfg, 1);
 
-/* 从 TOML 字符串加载配置 */
-const char* toml =
-    "[[cmdline.allow]]\n"
-    "rules = [\"node\", \"*claude*\"]\n"
-    "agent_name = \"Claude Code\"\n"
-    "\n"
-    "[[domain]]\n"
-    "rules = [\"*.openai.com\", \"*.anthropic.com\"]\n";
+/* 从 JSON 字符串加载配置 */
+const char* json =
+    "{\"cmdline\":{\"allow\":[{\"rule\":[\"node\",\"*claude*\"],"
+    "\"agent_name\":\"Claude Code\"}]},"
+    "\"domain\":[{\"rule\":[\"*.openai.com\",\"*.anthropic.com\"]}]}";
 
-if (agentsight_config_load_config(cfg, toml) < 0) {
+if (agentsight_config_load_config(cfg, json) < 0) {
     fprintf(stderr, "load config failed: %s\n", agentsight_last_error());
 }
 
@@ -580,4 +563,4 @@ make install            # 安装 agentsight CLI
 | v0.2 | 升级为 eventfd + read 模式；新增 `agentsight_get_eventfd()`；`agentsight_read()` 增加 `flags` 参数；新增 `agentsight_config_set_log_path()`；大 buffer 指针增加 `_len` 字段；新增 `llm_usage` 字段区分 token 数据来源 |
 | v0.2.1 | 集成 CMake 构建系统（`ENABLE_AGENTSIGHT` 选项）；新增 C 示例程序 `tools/examples/agentsight/`；新增 `cbindgen.toml` 自动生成完整 C 头文件；新增 FFI API 文档 |
 | v0.3 | `agentsight_config_add_cmdline_rule()` 新增 `allow` 参数：allow=1 为进程白名单，allow=0 为进程黑名单 |
-| v0.4 | 新增 `agentsight_config_add_domain_rule()` 接口，支持域名白名单；新增 `agentsight_config_load_config()` 支持 TOML 字符串加载配置 |
+| v0.4 | 新增 `agentsight_config_add_domain_rule()` 接口，支持域名白名单；新增 `agentsight_config_load_config()` 支持 JSON 字符串加载配置 |
