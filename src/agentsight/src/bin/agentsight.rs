@@ -10,7 +10,7 @@
 use structopt::StructOpt;
 
 mod cli;
-use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand, interruption::InterruptionCommand};
+use cli::{token::TokenCommand, trace::TraceCommand, audit::AuditCommand, discover::DiscoverCommand, metrics::MetricsCommand, interruption::InterruptionCommand, skill_metrics::SkillMetricsCommand};
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
 
@@ -29,6 +29,9 @@ pub enum Command {
     Metrics(MetricsCommand),
     /// Query and manage session interruption events detected during agent conversations
     Interruption(InterruptionCommand),
+    /// Compute and display skill usage metrics
+    #[structopt(name = "skill-metrics")]
+    SkillMetrics(SkillMetricsCommand),
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
@@ -44,6 +47,7 @@ fn main() {
         Command::Discover(discover_cmd) => discover_cmd.execute(),
         Command::Metrics(metrics_cmd) => metrics_cmd.execute(),
         Command::Interruption(interruption_cmd) => interruption_cmd.execute(),
+        Command::SkillMetrics(skill_metrics_cmd) => skill_metrics_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
     }

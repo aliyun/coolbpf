@@ -186,6 +186,13 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .service(handlers::resolve_interruption)
             .service(handlers::get_interruption)
             .service(handlers::get_token_savings)
+            // Skill Metrics API routes
+            .service(handlers::skill_metrics_all)
+            .service(handlers::skill_metrics_downloads)
+            .service(handlers::skill_metrics_loads)
+            .service(handlers::skill_metrics_usage_ratio)
+            .service(handlers::skill_metrics_distribution)
+            .service(handlers::skill_metrics_hotness)
             // Frontend static files (catch-all, must be last)
             .service(serve_frontend)
     })

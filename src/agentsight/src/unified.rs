@@ -30,7 +30,7 @@ use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
-use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, SlsUploader};
+use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::interruption::{InterruptionDetector, DetectorConfig};
 use crate::parser::Parser;
@@ -120,18 +120,44 @@ impl AgentSight {
     /// let config = AgentsightConfig::new();
     /// let mut sight = AgentSight::new(config)?;
     /// ```
-    pub fn new(config: AgentsightConfig) -> Result<Self> {
+    pub fn new(mut config: AgentsightConfig) -> Result<Self> {
         config.apply_verbose();
 
+        // Load rules from config file only when config_path is set (CLI --config)
+        // FFI users provide rules via API, no config file needed.
+        if let Some(path) = config.config_path.clone() {
+            let load_result = if path.exists() {
+                config.load_from_file(&path)
+            } else {
+                match crate::config::ensure_default_agents_config(&path) {
+                    Ok(()) => config.load_from_file(&path),
+                    Err(e) => Err(e),
+                }
+            };
+            match load_result {
+                Ok(()) => {
+                    log::info!("Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
+                        config.cmdline_rules.len(), config.domain_rules.len(), path);
+                }
+                Err(e) => {
+                    log::warn!("Failed to load config from {:?}: {}, using embedded defaults", path, e);
+                    config.cmdline_rules = crate::config::default_cmdline_rules();
+                }
+            }
+        }
+
+        let all_cmdline_rules = config.cmdline_rules.clone();
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
+        let enable_udpdns = !config.domain_rules.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
 
-        // Create scanner and scan for existing agent processes
-        let mut scanner = AgentScanner::new();
+        // Create scanner with all rules (allow/deny/domain)
+        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.domain_rules);
         let existing_agents = scanner.scan();
 
         // Attach SSL probes to already-running agents
@@ -155,25 +181,27 @@ impl AgentSight {
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
 
-        // Always add local JSONL exporter
-        genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
-
-        // Add SLS exporter if configured, otherwise fallback to SQLite
-        if config.sls_enabled() {
-            match SlsUploader::new(&config) {
-                Ok(uploader) => {
-                    log::info!("SLS exporter enabled");
-                    genai_exporters.push(Box::new(uploader));
-                }
-                Err(e) => {
-                    log::warn!("Failed to initialize SLS exporter: {}", e);
-                }
+        // When SLS_LOGTAIL_FILE is set, use Logtail file exporter only (skip local storage)
+        // — the Logtail file will be collected by iLogtail and uploaded to SLS.
+        if let Some(exporter) = LogtailExporter::new() {
+            // SLS 模式必须能获取到 uid (owner-account-id)，否则拒绝启动
+            let uid = crate::genai::instance_id::get_owner_account_id();
+            if uid.is_empty() {
+                anyhow::bail!(
+                    "SLS Logtail exporter is enabled (SLS_LOGTAIL_FILE set) but failed to \
+                     fetch owner-account-id from ECS metadata service. \
+                     Cannot upload logs without uid. Aborting."
+                );
             }
+            log::info!("Logtail file exporter enabled ({}), uid={}", exporter.path().display(), uid);
+            genai_exporters.push(Box::new(exporter));
         } else {
-            // No SLS credentials configured, use SQLite as local storage
+            // No Logtail: use local JSONL + SQLite
+            genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
+
             match GenAISqliteStore::new() {
                 Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled (SLS not configured)");
+                    log::info!("SQLite GenAI exporter enabled");
                     let store = Arc::new(store);
                     genai_sqlite_store = Some(Arc::clone(&store));
                     genai_exporters.push(Box::new(store));
@@ -318,6 +346,9 @@ impl AgentSight {
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
         log::debug!("Attaching to pid {}, agent name: {}", pid, agent_name);
+        if let Err(e) = probes.add_traced_pid(pid) {
+            log::warn!("Failed to add pid {} to traced_processes map: {}", pid, e);
+        }
         if let Err(e) = probes.attach_process(pid as i32) {
             log::error!("Failed to attach SSL probe to pid {}: {}", pid, e);
         } else {
@@ -362,6 +393,21 @@ impl AgentSight {
             self.handle_filewrite_event(fw_event);
             // After mapper is updated, try to resolve any pending GenAI events
             self.resolve_pending_genai();
+            return None;
+        }
+
+        // Handle UDP DNS events (domain-based attachment)
+        if let Event::UdpDns(ref dns_event) = event {
+            log::debug!("[UDP-DNS] pid={} comm={} domain={}",
+                dns_event.pid, dns_event.comm, dns_event.domain);
+
+            if self.scanner.on_dns_event(dns_event.pid, &dns_event.domain) {
+                log::info!("[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
+                    dns_event.pid, dns_event.domain);
+                if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
+                    log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
+                }
+            }
             return None;
         }
 
@@ -449,7 +495,16 @@ impl AgentSight {
 
         match event {
             ProcMonEvent::Exec { pid, comm, .. } => {
-                // Check if this is a known agent and start tracking
+                // Read cmdline for deny-check and custom matching
+                let cmdline_args = crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", pid));
+
+                // Phase 1: check deny rules first (blacklist overrides everything)
+                if self.scanner.is_denied(&cmdline_args) {
+                    log::debug!("ProcMon: pid={} denied by cmdline rule, skipping attach", pid);
+                    return;
+                }
+
+                // Phase 2: check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.insert(*pid, agent_name.clone());
@@ -790,7 +845,7 @@ impl AgentSight {
 
     /// Flush any pending GenAI events that have exceeded the timeout.
     /// Called during idle periods of the event loop.
-    fn flush_expired_pending_genai(&mut self) {
+    pub fn flush_expired_pending_genai(&mut self) {
         if self.pending_genai.is_empty() {
             return;
         }

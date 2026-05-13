@@ -53,6 +53,10 @@ fn main() {
     // Generate filewrite skeleton and bindings
     generate_skeleton(&mut out, "filewrite");
     generate_header(&mut out, "filewrite");
+
+    // Generate udpdns skeleton and bindings
+    generate_skeleton(&mut out, "udpdns");
+    generate_header(&mut out, "udpdns");
     
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");
@@ -79,7 +83,14 @@ fn main() {
     let header_path = PathBuf::from(&crate_dir).join("include").join("agentsight.h");
     std::fs::create_dir_all(header_path.parent().unwrap())
         .expect("Failed to create include/ directory");
-    cbindgen::generate(&crate_dir)
+    cbindgen::Builder::new()
+        .with_crate(&crate_dir)
+        .with_config(
+            cbindgen::Config::from_file(PathBuf::from(&crate_dir).join("cbindgen.toml"))
+                .expect("Failed to read cbindgen.toml"),
+        )
+        .with_parse_exclude(&["skill_metrics".to_string()])
+        .generate()
         .expect("cbindgen failed to generate C header")
         .write_to_file(&header_path);
     println!("cargo:rerun-if-changed=src/ffi.rs");

@@ -7,7 +7,8 @@ pub mod semantic;
 pub mod builder;
 pub mod exporter;
 pub mod storage;
-pub mod sls;
+pub mod instance_id;
+pub mod logtail;
 
 pub use semantic::{
     GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
@@ -18,7 +19,7 @@ pub use semantic::{
 pub use exporter::GenAIExporter;
 pub use builder::GenAIBuilder;
 pub use storage::{GenAIStore, GenAIStoreStats};
-pub use sls::SlsUploader;
+pub use logtail::LogtailExporter;
 
 // Blanket implementation: Arc<T> implements GenAIExporter if T does.
 // This allows storing an Arc<GenAISqliteStore> both in genai_exporters and

@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod interruption;
 #[cfg(feature = "server")]
 pub mod serve;
+pub mod skill_metrics;
 
 /// Parse period string into TimePeriod
 pub fn parse_period(s: &str) -> agentsight::TimePeriod {

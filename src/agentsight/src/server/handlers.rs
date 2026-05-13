@@ -64,19 +64,24 @@ pub async fn list_sessions(
     }
 }
 
-/// GET /api/sessions/{session_id}/traces
+/// GET /api/sessions/{session_id}/traces?start_ns=<i64>&end_ns=<i64>
 ///
-/// Returns all conversations belonging to a session with token stats.
+/// Returns conversations belonging to a session with token stats.
+/// Optional `start_ns`/`end_ns` query parameters filter conversations by time.
 #[get("/api/sessions/{session_id}/traces")]
 pub async fn list_traces_by_session(
     data: web::Data<AppState>,
     path: web::Path<String>,
+    query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
     let db_path = &data.storage_path;
     let session_id = path.into_inner();
 
+    let start_ns = query.start_ns;
+    let end_ns = query.end_ns;
+
     match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => match store.list_traces_by_session(&session_id) {
+        Ok(store) => match store.list_traces_by_session(&session_id, start_ns, end_ns) {
             Ok(traces) => HttpResponse::Ok().json(traces),
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
@@ -1118,4 +1123,149 @@ pub async fn get_token_savings(
         },
         sessions: resp_sessions,
     })
+}
+
+// ─── Skill Metrics endpoints ─────────────────────────────────────────────────
+
+/// Query parameters for skill metrics endpoints.
+#[derive(Debug, Deserialize)]
+pub struct SkillMetricsQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub agent_name: Option<String>,
+    /// Granularity for hotness trend: "day" or "week" (default: "week")
+    pub granularity: Option<String>,
+}
+
+/// GET /api/skill-metrics — full skill metrics report
+#[get("/api/skill-metrics")]
+pub async fn skill_metrics_all(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions::all(),
+    )
+}
+
+/// GET /api/skill-metrics/downloads
+#[get("/api/skill-metrics/downloads")]
+pub async fn skill_metrics_downloads(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions {
+            downloads: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// GET /api/skill-metrics/loads
+#[get("/api/skill-metrics/loads")]
+pub async fn skill_metrics_loads(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions {
+            loads: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// GET /api/skill-metrics/usage-ratio
+#[get("/api/skill-metrics/usage-ratio")]
+pub async fn skill_metrics_usage_ratio(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions {
+            usage_ratio: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// GET /api/skill-metrics/distribution
+#[get("/api/skill-metrics/distribution")]
+pub async fn skill_metrics_distribution(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions {
+            distribution: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// GET /api/skill-metrics/hotness
+#[get("/api/skill-metrics/hotness")]
+pub async fn skill_metrics_hotness(
+    data: web::Data<AppState>,
+    query: web::Query<SkillMetricsQuery>,
+) -> impl Responder {
+    compute_skill_metrics_response(
+        &data.storage_path,
+        &query,
+        crate::skill_metrics::MetricOptions {
+            hotness: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Shared implementation for all skill metrics endpoints.
+fn compute_skill_metrics_response(
+    storage_path: &std::path::Path,
+    query: &SkillMetricsQuery,
+    mut options: crate::skill_metrics::MetricOptions,
+) -> HttpResponse {
+    // Apply granularity from query params
+    if let Some(ref g) = query.granularity {
+        if g == "day" {
+            options.hotness_granularity = crate::skill_metrics::HotnessGranularity::Day;
+        }
+    }
+
+    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    // Default: 7 days
+    let start_ns = query
+        .start_ns
+        .unwrap_or_else(|| end_ns - 7 * 86_400_000_000_000i64);
+
+    let store = match GenAISqliteStore::new_with_path(storage_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    let events = match store.get_events_in_time_range(start_ns, end_ns, query.agent_name.as_deref())
+    {
+        Ok(e) => e,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    let report = crate::skill_metrics::compute_skill_metrics(&events, &options);
+    HttpResponse::Ok().json(report)
 }

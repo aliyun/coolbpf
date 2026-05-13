@@ -42,6 +42,7 @@ pub mod genai;
 pub mod atif;
 pub mod response_map;
 pub mod interruption;
+pub mod skill_metrics;
 #[cfg(feature = "server")]
 pub mod server;
 mod unified;
@@ -91,13 +92,12 @@ pub use probes::FileWatchEvent;
 pub use response_map::ResponseSessionMapper;
 
 // Re-export discovery types
-pub use discovery::{AgentInfo, AgentMatcher, AgentScanner, DiscoveredAgent, ProcessContext, known_agents};
-
+pub use discovery::{AgentInfo, AgentScanner, CmdlineGlobMatcher, DiscoveredAgent, ProcessContext};
+pub use config::default_cmdline_rules;
 
 // Re-export genai types
 pub use genai::{
     GenAIBuilder, GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse,
     MessagePart, InputMessage, OutputMessage, ToolUse, AgentInteraction, StreamChunk, ToolDefinition,
-    GenAIStore, GenAIStoreStats, SlsUploader, GenAIExporter,
+    GenAIStore, GenAIStoreStats, LogtailExporter, GenAIExporter,
 };
-
