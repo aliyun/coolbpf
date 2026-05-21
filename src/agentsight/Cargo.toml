@@ -69,7 +69,7 @@ thiserror = "1.0.63"
 typed-arena = "2.0.2"
 uname = "0.1.1"
 # Static link OpenSSL to avoid runtime dependency on libssl.so.1.1
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { version = "0.10.78", features = ["vendored"] }
 # HTTP API server (optional, enabled by "server" feature)
 actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }
