@@ -509,6 +509,26 @@ impl AgentSight {
                                     );
                                 }
                             }
+                            // ── FFI fan-out ──────────────────────────────────────
+                            // The deferred path (pending_response_id.is_some())
+                            // delivers LLMCall events to embedded consumers via
+                            // export_genai_events(), which in FFI mode pushes to
+                            // self.ffi_sender. This branch bypasses
+                            // export_genai_events() because the SQLite two-phase
+                            // write is hand-rolled above — but that bypass would
+                            // also skip the FFI fan-out, silently dropping every
+                            // LLMCall whose session_id is resolvable at build time
+                            // (i.e. whenever ResponseSessionMapper already has the
+                            // response_id, which is the common case after the very
+                            // first call). Push explicitly so embedded consumers
+                            // (LoongCollector / iLogtail) always receive the call.
+                            if let Some(ref sender) = self.ffi_sender {
+                                for event in &output.events {
+                                    if let GenAISemanticEvent::LLMCall(call) = event {
+                                        sender.send(FfiEvent::Llm(call.clone()));
+                                    }
+                                }
+                            }
                         } else {
                             self.export_genai_events(&output.events);
                         }
