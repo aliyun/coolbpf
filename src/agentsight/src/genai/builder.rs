@@ -282,8 +282,9 @@ impl GenAIBuilder {
         // Extract provider from request path
         let provider = self.extract_provider_from_path(&request.path);
 
-        // Resolve agent_name: check pid→name cache first (works for dead PIDs), then comm-based fallback
-        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache);
+        // Resolve agent_name: check pid→name cache first, then comm-based matching, then comm as fallback
+        let agent_name = Self::resolve_agent_name_from_comm(&request.source_event.comm, conn_id.pid as u32, pid_agent_name_cache)
+            .or_else(|| Some(request.source_event.comm_str()));
 
         Some(PendingCallInfo {
             call_id,
@@ -548,7 +549,8 @@ impl GenAIBuilder {
             error,
             pid: http.pid as i32,
             process_name: http.comm.clone(),
-            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache),
+            agent_name: Self::resolve_agent_name(&http.comm, http.pid, pid_agent_name_cache)
+                .or_else(|| Some(http.comm.clone())),
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);

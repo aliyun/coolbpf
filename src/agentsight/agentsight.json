@@ -1,4 +1,5 @@
 {
+  "tcp_targets": [],
   "cmdline": {
     "allow": [
       {"rule": ["hermes*"], "agent_name": "Hermes"},

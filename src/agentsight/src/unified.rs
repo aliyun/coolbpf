@@ -156,13 +156,8 @@ impl AgentSight {
 
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.domain_rules.is_empty();
-        let mut probes = Probes::new(
-            &[],
-            config.target_uid,
-            config.enable_filewatch,
-            enable_udpdns,
-        )
-        .context("Failed to create probes")?;
+        let mut probes =
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &config.tcp_targets).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
@@ -466,7 +461,7 @@ impl AgentSight {
 
         // Analyze and store results
         for agg_result in &aggregated_results {
-            let analysis_results = self.analyzer.analyze_aggregated(agg_result);
+            let mut analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
             let (output, pending_info) = self.genai_builder.build_with_pending(
@@ -474,6 +469,16 @@ impl AgentSight {
                 &self.response_mapper,
                 &self.pid_agent_name_cache,
             );
+
+            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
+            for ar in &mut analysis_results {
+                if let crate::analyzer::AnalysisResult::Token(t) = ar {
+                    if t.agent.is_none() {
+                        t.agent = self.pid_agent_name_cache.get(&t.pid).cloned()
+                            .or_else(|| Some(t.comm.clone()));
+                    }
+                }
+            }
 
             if !output.events.is_empty() {
                 if output.pending_response_id.is_some() {

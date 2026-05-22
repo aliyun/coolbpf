@@ -1,4 +1,6 @@
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context;
 
@@ -129,6 +131,56 @@ pub struct DomainRule {
 /// `cmdline.allow` entries with `rule` and `agent_name`.
 const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 
+// ==================== TCP Target Configuration ====================
+
+/// A single TCP traffic capture target.
+///
+/// Filters captured plain-HTTP traffic by destination IP and/or port.
+/// `ip = None` means any destination IP; `port = None` means any port.
+///
+/// String format (used in JSON config and CLI):
+///   `":8080"`          → port-only (any IP, port 8080)
+///   `"10.0.0.1"`       → IP-only   (IP 10.0.0.1, any port)
+///   `"10.0.0.1:8080"`  → exact     (IP 10.0.0.1, port 8080)
+#[derive(Debug, Clone, PartialEq)]
+pub struct TcpTarget {
+    pub ip: Option<Ipv4Addr>,
+    pub port: Option<u16>,
+}
+
+impl FromStr for TcpTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.starts_with(':') {
+            // ":port" — port-only
+            let port: u16 = s[1..]
+                .parse()
+                .map_err(|_| format!("invalid port in '{}'", s))?;
+            Ok(TcpTarget { ip: None, port: Some(port) })
+        } else if s.contains(':') {
+            // "ip:port"
+            let mut parts = s.rsplitn(2, ':');
+            let port_str = parts.next().unwrap();
+            let ip_str = parts.next().unwrap();
+            let ip: Ipv4Addr = ip_str
+                .parse()
+                .map_err(|_| format!("invalid IP in '{}'", s))?;
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| format!("invalid port in '{}'", s))?;
+            Ok(TcpTarget { ip: Some(ip), port: Some(port) })
+        } else {
+            // "ip" — IP-only
+            let ip: Ipv4Addr = s
+                .parse()
+                .map_err(|_| format!("invalid IP address '{}'", s))?;
+            Ok(TcpTarget { ip: Some(ip), port: None })
+        }
+    }
+}
+
 
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
@@ -141,6 +193,10 @@ struct JsonFullConfig {
     cmdline: Option<JsonCmdline>,
     #[serde(default)]
     domain: Option<Vec<JsonDomainGroup>>,
+    #[serde(default)]
+    tcp_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    tcp_targets: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -282,6 +338,9 @@ pub struct AgentsightConfig {
     pub poll_timeout_ms: u64,
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
     pub enable_filewatch: bool,
+    /// TCP capture targets for plain HTTP capture (empty = disabled).
+    /// Each entry specifies destination IP, port, or both.
+    pub tcp_targets: Vec<TcpTarget>,
 
     // --- HTTP/Aggregation Configuration ---
     /// LRU cache capacity for HTTP connections
@@ -336,6 +395,7 @@ impl Default for AgentsightConfig {
             target_uid: None,
             poll_timeout_ms: DEFAULT_POLL_TIMEOUT_MS,
             enable_filewatch: false,
+            tcp_targets: Vec::new(),
 
             // HTTP/Aggregation defaults
             connection_capacity: DEFAULT_CONNECTION_CAPACITY,
@@ -418,6 +478,12 @@ impl AgentsightConfig {
         self
     }
 
+    /// Set TCP capture targets for plain HTTP traffic capture
+    pub fn set_tcp_targets(mut self, targets: Vec<TcpTarget>) -> Self {
+        self.tcp_targets = targets;
+        self
+    }
+
     /// Set connection capacity
     pub fn set_connection_capacity(mut self, capacity: usize) -> Self {
         self.connection_capacity = capacity;
@@ -441,6 +507,22 @@ impl AgentsightConfig {
         }
         if let Some(p) = parsed.log_path.take() {
             self.log_path = Some(p);
+        }
+        if let Some(targets) = parsed.tcp_targets.take() {
+            let mut result = Vec::new();
+            for s in &targets {
+                match s.parse::<TcpTarget>() {
+                    Ok(t) => result.push(t),
+                    Err(e) => log::warn!("Ignoring invalid tcp_targets entry '{}': {}", s, e),
+                }
+            }
+            self.tcp_targets = result;
+        } else if let Some(ports) = parsed.tcp_ports.take() {
+            // backward compat: "tcp_ports": [8080] → port-only targets
+            self.tcp_targets = ports
+                .into_iter()
+                .map(|p| TcpTarget { ip: None, port: Some(p) })
+                .collect();
         }
 
         let (cmdline_rules, domain_rules) = extract_rules(parsed);
