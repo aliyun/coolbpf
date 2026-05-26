@@ -16,9 +16,8 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Write,
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     path::Path,
-    slice,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -88,14 +87,11 @@ impl SslEvent {
         }
     }
 
-    /// Parse comm from the BPF struct field (layout matches C `char comm[16]`; generated
-    /// bindings may use `[i8; 16]` or `[u8; 16]` depending on target / libbpf-cargo version).
-    fn parse_comm<T>(comm: &[T; 16]) -> String {
-        debug_assert_eq!(mem::size_of::<T>(), 1);
-        let bytes = unsafe { slice::from_raw_parts(comm.as_ptr() as *const u8, 16) };
-        let bytes: Vec<u8> = bytes
+    /// Parse comm from raw C char array
+    fn parse_comm(comm: &[i8; 16]) -> String {
+        let bytes: Vec<u8> = comm
             .iter()
-            .copied()
+            .map(|&c| c as u8)
             .take_while(|&b| b != 0)
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
@@ -283,12 +279,6 @@ impl SslSniff {
                 SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
                 SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
                 SslLibKind::Boring => {
-                    // BoringSSL detection in priority order:
-                    //   1. Symbol-based attach via .dynsym SSL_read/SSL_write/SSL_do_handshake.
-                    //      Works for BoringSSL builds that export these symbols
-                    //      (e.g. Hermes Node v22+, some self-built Node distributions).
-                    //   2. Byte-pattern offset scan for stripped builds whose SSL_*
-                    //      symbols are hidden (Claude Code's Node, Chrome, etc.).
                     match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
                         Ok(ls) => Ok(ls),
                         Err(sym_err) => {
@@ -690,11 +680,11 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
     Ok(results)
 }
 
-/// Convert a null-terminated byte array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
-fn comm_to_string(comm: &[u8]) -> String {
+/// Convert a null-terminated `i8` array (from C `char comm[TASK_COMM_LEN]`) to a `String`.
+fn comm_to_string(comm: &[i8]) -> String {
     let bytes: Vec<u8> = comm
         .iter()
-        .copied()
+        .map(|&c| c as u8)
         .take_while(|&b| b != 0)
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
@@ -835,16 +825,6 @@ fn attach_nss(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<Vec<Li
     ])
 }
 
-/// Attach SSL probes to a BoringSSL build that exports its core symbols.
-///
-/// Some BoringSSL-embedding binaries (e.g. Hermes Node v22+) keep
-/// `SSL_read` / `SSL_write` / `SSL_do_handshake` visible in `.dynsym`, so we
-/// can attach by symbol name just like for OpenSSL. We deliberately do **not**
-/// try `SSL_write_ex` / `SSL_read_ex` here — BoringSSL drops these variants,
-/// so probing them would always fail.
-///
-/// Returns `Err` if any symbol is missing or attach fails; the caller is
-/// expected to fall back to byte-pattern offset detection.
 fn attach_boringssl_by_symbol(
     skel: &mut SslsniffSkel<'_>,
     lib: &str,

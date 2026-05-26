@@ -110,7 +110,7 @@ impl Probes {
                 .context("failed to create udpdns")?;
             Some(dns)
         } else {
-            log::info!("UDP DNS probe disabled (no domain_rules configured)");
+            log::info!("UDP DNS probe disabled (no https/http domain rules configured)");
             None
         };
 
@@ -325,6 +325,15 @@ impl Probes {
     /// Detach SSL probes for a process and clean up traced inodes.
     pub fn detach_ssl_probes(&mut self, pid: u32) {
         self.sslsniff.detach_process(pid);
+    }
+
+    pub fn add_tcp_target(&mut self, target: &TcpTarget) -> Result<()> {
+        if let Some(ref mut tcp) = self.tcpsniff {
+            tcp.add_target(target)
+        } else {
+            log::warn!("TcpSniff not enabled, cannot add runtime target {:?}", target);
+            Ok(())
+        }
     }
 
     /// Get a handle to the traced_processes map

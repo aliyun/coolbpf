@@ -91,6 +91,8 @@ pub struct AgentSight {
     last_drain_check: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: HashMap<u32, String>,
+    /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
+    http_domains: Vec<String>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -135,9 +137,10 @@ impl AgentSight {
             match load_result {
                 Ok(()) => {
                     log::info!(
-                        "Loaded {} cmdline rule(s) and {} domain rule(s) from {:?}",
+                        "Loaded {} cmdline rule(s), {} https rule(s), {} http target(s) from {:?}",
                         config.cmdline_rules.len(),
-                        config.domain_rules.len(),
+                        config.https_rules.len(),
+                        config.http_targets.len(),
                         path
                     );
                 }
@@ -154,16 +157,60 @@ impl AgentSight {
 
         let all_cmdline_rules = config.cmdline_rules.clone();
 
+        // Derive tcp_targets from http_targets (endpoint entries only)
+        let mut tcp_targets: Vec<crate::config::TcpTarget> = config
+            .http_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::config::HttpTarget::Endpoint(ep) => Some(ep.clone()),
+                crate::config::HttpTarget::Domain(_) => None,
+            })
+            .collect();
+
+        // Collect http domain patterns for DNS-based resolution
+        let http_domains: Vec<String> = config
+            .http_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::config::HttpTarget::Domain(d) => Some(d.clone()),
+                crate::config::HttpTarget::Endpoint(_) => None,
+            })
+            .collect();
+
+        // Startup DNS resolve: exact http domains → IPs → append to tcp_targets
+        for domain in &http_domains {
+            if domain.contains('*') || domain.contains('?') || domain.contains('[') {
+                continue;
+            }
+            use std::net::ToSocketAddrs;
+            match (domain.as_str(), 0u16).to_socket_addrs() {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        if let std::net::IpAddr::V4(ipv4) = addr.ip() {
+                            log::info!("http domain resolve: {} → {}", domain, ipv4);
+                            tcp_targets.push(crate::config::TcpTarget {
+                                ip: Some(ipv4),
+                                port: None,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("http domain resolve failed for {}: {}", domain, e);
+                }
+            }
+        }
+
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
-        let enable_udpdns = !config.domain_rules.is_empty();
+        let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &config.tcp_targets).context("Failed to create probes")?;
+            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
 
-        // Create scanner with all rules (allow/deny/domain)
-        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.domain_rules);
+        // Create scanner with all rules (allow/deny/https)
+        let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.https_rules);
         let existing_agents = scanner.scan();
 
         // Attach SSL probes to already-running agents
@@ -171,7 +218,7 @@ impl AgentSight {
             Self::attach_process_internal(&mut probes, agent.pid, &agent.agent_info.name);
         }
 
-        // Connection scan: find processes with established connections to domain_rules IPs
+        // Connection scan: find processes with established connections to https_rules IPs
         let already_traced: HashSet<u32> = existing_agents.iter().map(|a| a.pid).collect();
         let conn_results = if scanner.has_domain_rules() {
             let conn_scanner = crate::discovery::ConnectionScanner::new(&scanner);
@@ -339,6 +386,7 @@ impl AgentSight {
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
             pid_agent_name_cache,
+            http_domains,
         })
     }
 
@@ -440,6 +488,7 @@ impl AgentSight {
                 dns_event.domain
             );
 
+            // HTTPS rules: attach SSL probes to the process
             if self.scanner.on_dns_event(dns_event.pid, &dns_event.domain) {
                 log::info!(
                     "[UDP-DNS] Attaching to pid={} via domain rule (domain={})",
@@ -450,6 +499,37 @@ impl AgentSight {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
                 }
             }
+
+            // HTTP domains: resolve DNS domain → IP, add to tcpsniff BPF map
+            if crate::discovery::matcher::match_domain_glob(&dns_event.domain, &self.http_domains) {
+                use std::net::ToSocketAddrs;
+                match (dns_event.domain.as_str(), 0u16).to_socket_addrs() {
+                    Ok(addrs) => {
+                        for addr in addrs {
+                            if let std::net::IpAddr::V4(ipv4) = addr.ip() {
+                                log::info!(
+                                    "[UDP-DNS] Adding http target {} → {}",
+                                    dns_event.domain, ipv4
+                                );
+                                let target = crate::config::TcpTarget {
+                                    ip: Some(ipv4),
+                                    port: None,
+                                };
+                                if let Err(e) = self.probes.add_tcp_target(&target) {
+                                    log::warn!("[UDP-DNS] Failed to add tcp target {}: {}", ipv4, e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[UDP-DNS] DNS resolve failed for http domain {}: {}",
+                            dns_event.domain, e
+                        );
+                    }
+                }
+            }
+
             return None;
         }
 
@@ -514,19 +594,6 @@ impl AgentSight {
                                     );
                                 }
                             }
-                            // ── FFI fan-out ──────────────────────────────────────
-                            // The deferred path (pending_response_id.is_some())
-                            // delivers LLMCall events to embedded consumers via
-                            // export_genai_events(), which in FFI mode pushes to
-                            // self.ffi_sender. This branch bypasses
-                            // export_genai_events() because the SQLite two-phase
-                            // write is hand-rolled above — but that bypass would
-                            // also skip the FFI fan-out, silently dropping every
-                            // LLMCall whose session_id is resolvable at build time
-                            // (i.e. whenever ResponseSessionMapper already has the
-                            // response_id, which is the common case after the very
-                            // first call). Push explicitly so embedded consumers
-                            // (LoongCollector / iLogtail) always receive the call.
                             if let Some(ref sender) = self.ffi_sender {
                                 for event in &output.events {
                                     if let GenAISemanticEvent::LLMCall(call) = event {

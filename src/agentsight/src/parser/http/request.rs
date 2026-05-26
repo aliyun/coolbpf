@@ -319,6 +319,19 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_chunked_json_binary_body_does_not_panic() {
+        // A hex digit + \r\n + arbitrary invalid-UTF8 bytes (rendered as
+        // replacement chars by from_utf8_lossy) that intentionally place
+        // chunk_size past a multi-byte boundary.
+        let mut raw: Vec<u8> = b"c27\r\n".to_vec();
+        for _ in 0..4096 {
+            raw.push(0xC2); // invalid stray UTF-8 lead byte
+        }
+        let lossy = String::from_utf8_lossy(&raw);
+        assert!(ParsedRequest::decode_chunked_json(&lossy).is_none());
+    }
+
+    #[test]
     fn test_trace_args() {
         let body = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"m\":1}";
         let event = make_ssl_event(body);
