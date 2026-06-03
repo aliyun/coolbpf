@@ -113,6 +113,7 @@ struct {
 //   1. exact ip+port match
 //   2. ip-only match (port=0 means any port)
 //   3. port-only match (ip=0 means any ip)
+//   4. full wildcard (ip=0, port=0) — capture every TCP connection
 static __always_inline bool is_target_conn(struct sock *sk)
 {
     struct tcp_target_key key = {};
@@ -133,6 +134,11 @@ static __always_inline bool is_target_conn(struct sock *sk)
     // 3. port-only (ip wildcard)
     key.ip = 0;
     key.port = dport;
+    if (bpf_map_lookup_elem(&tcp_targets, &key))
+        return true;
+
+    // 4. full wildcard — match-all (ip=0, port=0)
+    key.port = 0;
     return bpf_map_lookup_elem(&tcp_targets, &key) != NULL;
 }
 

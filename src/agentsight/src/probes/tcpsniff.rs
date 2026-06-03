@@ -142,6 +142,7 @@ impl TcpSniff {
         let map = binding.tcp_targets();
         let dummy: u8 = 1;
 
+        let mut wildcard_all = false;
         for target in targets {
             let ip_be: u32 = match target.ip {
                 Some(Ipv4Addr::UNSPECIFIED) | None => 0u32,
@@ -151,6 +152,9 @@ impl TcpSniff {
                 None => 0u16,
                 Some(p) => p.to_be(),
             };
+            if ip_be == 0 && port_be == 0 {
+                wildcard_all = true;
+            }
             // Serialize key as [ip_be(4)] [port_be(2)] [pad(2)]
             let mut key = [0u8; 8];
             key[0..4].copy_from_slice(&ip_be.to_ne_bytes());
@@ -161,6 +165,13 @@ impl TcpSniff {
                 .with_context(|| format!("failed to add target {:?} to tcp_targets map", target))?;
         }
 
+        if wildcard_all {
+            log::warn!(
+                "TcpSniff: full wildcard target (any IP, any port) configured — \
+                 ALL outgoing TCP traffic will be captured. This has noticeable overhead; \
+                 prefer narrowing by IP/port for production use."
+            );
+        }
         log::info!(
             "TcpSniff: configured {} target(s): {:?}",
             targets.len(),

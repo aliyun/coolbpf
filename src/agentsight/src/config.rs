@@ -149,8 +149,11 @@ const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 ///
 /// String format (used in JSON config and CLI):
 ///   `":8080"`          → port-only (any IP, port 8080)
+///   `"*:8080"`         → port-only (alias of `:8080`)
 ///   `"10.0.0.1"`       → IP-only   (IP 10.0.0.1, any port)
+///   `"10.0.0.1:*"`     → IP-only   (alias of `10.0.0.1`)
 ///   `"10.0.0.1:8080"`  → exact     (IP 10.0.0.1, port 8080)
+///   `"*"` / `"*:*"` / `":*"` → full wildcard (any IP, any port — captures **all** TCP traffic)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TcpTarget {
     pub ip: Option<Ipv4Addr>,
@@ -162,30 +165,52 @@ impl FromStr for TcpTarget {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        if s.is_empty() {
+            return Err("empty TcpTarget string".to_string());
+        }
+
+        // Full wildcard shortcuts: "*", "*:*", ":*"
+        if s == "*" || s == "*:*" || s == ":*" {
+            return Ok(TcpTarget { ip: None, port: None });
+        }
+
+        // Helper: parse `"*"` as wildcard, otherwise as IPv4.
+        let parse_ip = |t: &str| -> Result<Option<Ipv4Addr>, String> {
+            if t == "*" {
+                Ok(None)
+            } else {
+                t.parse::<Ipv4Addr>()
+                    .map(Some)
+                    .map_err(|_| format!("invalid IP address '{}'", t))
+            }
+        };
+        // Helper: parse `"*"` as wildcard, otherwise as u16 port.
+        let parse_port = |t: &str| -> Result<Option<u16>, String> {
+            if t == "*" {
+                Ok(None)
+            } else {
+                t.parse::<u16>()
+                    .map(Some)
+                    .map_err(|_| format!("invalid port '{}'", t))
+            }
+        };
+
         if s.starts_with(':') {
             // ":port" — port-only
-            let port: u16 = s[1..]
-                .parse()
-                .map_err(|_| format!("invalid port in '{}'", s))?;
-            Ok(TcpTarget { ip: None, port: Some(port) })
+            let port = parse_port(&s[1..])?;
+            Ok(TcpTarget { ip: None, port })
         } else if s.contains(':') {
-            // "ip:port"
+            // "ip:port" (either side may be `*`)
             let mut parts = s.rsplitn(2, ':');
             let port_str = parts.next().unwrap();
             let ip_str = parts.next().unwrap();
-            let ip: Ipv4Addr = ip_str
-                .parse()
-                .map_err(|_| format!("invalid IP in '{}'", s))?;
-            let port: u16 = port_str
-                .parse()
-                .map_err(|_| format!("invalid port in '{}'", s))?;
-            Ok(TcpTarget { ip: Some(ip), port: Some(port) })
+            let ip = parse_ip(ip_str)?;
+            let port = parse_port(port_str)?;
+            Ok(TcpTarget { ip, port })
         } else {
-            // "ip" — IP-only
-            let ip: Ipv4Addr = s
-                .parse()
-                .map_err(|_| format!("invalid IP address '{}'", s))?;
-            Ok(TcpTarget { ip: Some(ip), port: None })
+            // "ip" — IP-only (no `*` here — already handled above)
+            let ip = parse_ip(s)?;
+            Ok(TcpTarget { ip, port: None })
         }
     }
 }
@@ -710,6 +735,69 @@ pub fn ktime_to_unix_ns(ktime_ns: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tcp_target_parse_exact() {
+        let t: TcpTarget = "10.0.0.1:8080".parse().unwrap();
+        assert_eq!(t.ip, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(t.port, Some(8080));
+    }
+
+    #[test]
+    fn test_tcp_target_parse_port_only() {
+        let t: TcpTarget = ":8080".parse().unwrap();
+        assert_eq!(t.ip, None);
+        assert_eq!(t.port, Some(8080));
+
+        // "*:8080" is an alias of ":8080"
+        let t2: TcpTarget = "*:8080".parse().unwrap();
+        assert_eq!(t2, t);
+    }
+
+    #[test]
+    fn test_tcp_target_parse_ip_only() {
+        let t: TcpTarget = "10.0.0.1".parse().unwrap();
+        assert_eq!(t.ip, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(t.port, None);
+
+        // "10.0.0.1:*" is an alias of "10.0.0.1"
+        let t2: TcpTarget = "10.0.0.1:*".parse().unwrap();
+        assert_eq!(t2, t);
+    }
+
+    #[test]
+    fn test_tcp_target_parse_full_wildcard() {
+        for s in ["*", "*:*", ":*"] {
+            let t: TcpTarget = s.parse().unwrap();
+            assert_eq!(t.ip, None, "{}", s);
+            assert_eq!(t.port, None, "{}", s);
+        }
+    }
+
+    #[test]
+    fn test_tcp_target_parse_invalid() {
+        assert!("".parse::<TcpTarget>().is_err());
+        assert!("not-an-ip".parse::<TcpTarget>().is_err());
+        assert!("10.0.0.1:bad".parse::<TcpTarget>().is_err());
+        assert!("bad:8080".parse::<TcpTarget>().is_err());
+    }
+
+    #[test]
+    fn test_tcp_target_parse_via_http_targets() {
+        let json = r#"{"http": [{"rule": ["*", "*:8080", "10.0.0.1:*", "10.0.0.1:9090", "some.host.com"]}]}"#;
+        let (_, _, http_targets) = parse_json_rules(json).unwrap();
+        assert_eq!(http_targets.len(), 5);
+        // 0: full wildcard endpoint
+        match &http_targets[0] {
+            HttpTarget::Endpoint(t) => {
+                assert_eq!(t.ip, None);
+                assert_eq!(t.port, None);
+            }
+            _ => panic!("expected Endpoint"),
+        }
+        // 4: domain (unparseable as TcpTarget)
+        matches!(http_targets[4], HttpTarget::Domain(_));
+    }
 
     #[test]
     fn test_default_constants() {
