@@ -5,7 +5,7 @@
 // Exposes a `SslSniff` struct with a builder-style API.
 
 use crate::config;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use libbpf_rs::{
     Link, MapHandle, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
@@ -28,6 +28,7 @@ use std::{
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
+#[allow(non_camel_case_types, non_upper_case_globals, dead_code, non_snake_case)]
 pub mod bpf {
     include!(concat!(env!("OUT_DIR"), "/sslsniff.skel.rs"));
     include!(concat!(env!("OUT_DIR"), "/sslsniff.rs"));

@@ -146,6 +146,12 @@ pub struct AgentsightLLMData {
     pub response_messages_len: u32,
     pub tools: *const c_char,
     pub tools_len: u32,
+    /// Incremental (latest-round) request messages: the same per-round
+    /// increment stored in SQLite (`genai_events.input_messages`). System
+    /// messages are dropped and everything from the last `user` message onward
+    /// is kept (inclusive). JSON array of InputMessage.
+    pub input_message_delta: *const c_char,
+    pub input_message_delta_len: u32,
 }
 
 // ===========================================================================
@@ -207,6 +213,7 @@ struct LlmDataHolder {
     _req_messages: CString,
     _resp_messages: CString,
     _tools: CString,
+    _input_message_delta: CString,
 }
 
 fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
@@ -304,6 +311,15 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let req_messages = safe_cstring(&req_messages_json);
     let resp_messages = safe_cstring(&resp_messages_json);
 
+    // Incremental (latest-round) input messages: the same per-round increment
+    // stored in SQLite (`genai_events.input_messages`). Drops system messages
+    // and keeps everything from the last `user` message onward.
+    let input_delta =
+        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
+    let input_message_delta_json =
+        serde_json::to_string(&input_delta).unwrap_or_default();
+    let input_message_delta = safe_cstring(&input_message_delta_json);
+
     let tools_json = call
         .request
         .tools
@@ -339,6 +355,8 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         response_messages_len: resp_messages_json.len() as u32,
         tools: tools.as_ptr(),
         tools_len: tools_json.len() as u32,
+        input_message_delta: input_message_delta.as_ptr(),
+        input_message_delta_len: input_message_delta_json.len() as u32,
     };
 
     LlmDataHolder {
@@ -354,6 +372,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         _req_messages: req_messages,
         _resp_messages: resp_messages,
         _tools: tools,
+        _input_message_delta: input_message_delta,
     }
 }
 
@@ -936,5 +955,51 @@ mod tests {
         assert_eq!(cfg.verbose, true);
         assert_eq!(cfg.cmdline_rules.len(), 1);
         assert_eq!(cfg.https_rules.len(), 1);
+    }
+
+    #[test]
+    fn test_load_json_http_endpoint() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "http": [
+                {"rule": [":8080", "10.0.0.1:9090"]}
+            ]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.http_targets.len(), 2);
+        match &cfg.http_targets[0] {
+            crate::config::HttpTarget::Endpoint(t) => {
+                assert_eq!(t.ip, None);
+                assert_eq!(t.port, Some(8080));
+            }
+            _ => panic!("expected Endpoint"),
+        }
+        match &cfg.http_targets[1] {
+            crate::config::HttpTarget::Endpoint(t) => {
+                assert_eq!(t.ip, Some(std::net::Ipv4Addr::new(10, 0, 0, 1)));
+                assert_eq!(t.port, Some(9090));
+            }
+            _ => panic!("expected Endpoint"),
+        }
+    }
+
+    #[test]
+    fn test_load_json_http_domain() {
+        let mut cfg = new_cfg();
+        let json = r#"{
+            "http": [
+                {"rule": ["model-svc.default.svc", "*.internal.com"]}
+            ]
+        }"#;
+        assert!(cfg.load_from_json(json).is_ok());
+        assert_eq!(cfg.http_targets.len(), 2);
+        match &cfg.http_targets[0] {
+            crate::config::HttpTarget::Domain(d) => assert_eq!(d, "model-svc.default.svc"),
+            _ => panic!("expected Domain"),
+        }
+        match &cfg.http_targets[1] {
+            crate::config::HttpTarget::Domain(d) => assert_eq!(d, "*.internal.com"),
+            _ => panic!("expected Domain"),
+        }
     }
 }

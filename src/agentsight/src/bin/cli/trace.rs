@@ -62,12 +62,18 @@ impl TraceCommand {
     
     /// Run the actual tracing logic using AgentSight
     fn run_tracing(&self) {
-        // Build AgentSight config (empty target_pids means trace all processes)
+        // Build AgentSight config (empty target_pids means trace all processes).
+        // Note: `traceEnabled=false` from agentsight.json does NOT stop the agent
+        // — token consumption (LLM call) data must always be collected by default.
+        // The toggle only affects the SLS upload layer (LogtailExporter): when
+        // traceEnabled=false, conversation content fields (gen_ai.input.messages /
+        // gen_ai.output.messages) are dropped from uploaded records, but token
+        // metadata (model, provider, token counts, etc.) is still uploaded.
         let config = AgentsightConfig::new()
             .set_verbose(self.verbose)
             .set_enable_filewatch(self.enable_filewatch)
             .set_config_path(std::path::PathBuf::from(&self.config));
-        
+
         // Create AgentSight (auto-attaches probes and starts polling)
         let mut sight = match AgentSight::new(config) {
             Ok(s) => s,
