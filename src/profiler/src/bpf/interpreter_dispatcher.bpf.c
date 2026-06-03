@@ -34,6 +34,7 @@ void maybe_add_apm_info(Trace *trace) {
 
   DEBUG_PRINT("Trace is within a process with APM integration enabled");
 
+#if defined(__x86_64__)
   if (proc->tracing_type == TRACE_GO_AGENT) {
     const struct task_struct* task_ptr = (struct task_struct*)bpf_get_current_task();
     const void* fs_base;
@@ -54,6 +55,7 @@ void maybe_add_apm_info(Trace *trace) {
     __builtin_memcpy(trace->trace_id, trace_id, sizeof(trace->trace_id));
     return;
   }
+#endif
 
   u64 tsd_base;
   if (tsd_get_base((void **)&tsd_base) != 0) {
