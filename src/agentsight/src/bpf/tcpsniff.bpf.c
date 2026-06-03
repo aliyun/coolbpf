@@ -93,6 +93,18 @@ struct {
     __type(value, __u8);
 } tcp_targets SEC(".maps");
 
+// --- Per-connection HTTP protocol cache ---
+// Once a connection is identified as HTTP (first request/response matches),
+// all subsequent data on that connection is passed through without re-checking.
+// This is critical for SSE/chunked responses where later chunks don't start
+// with HTTP keywords.  LRU eviction handles cleanup without explicit close hooks.
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 4096);
+    __type(key, u64);   // sock pointer as connection identifier
+    __type(value, u8);  // 1 = confirmed HTTP
+} tcp_http_conns SEC(".maps");
+
 // --- Stash map for tcp_recvmsg entry → exit ---
 struct tcp_recv_args {
     u64 sk;           // struct sock * as u64
@@ -142,6 +154,37 @@ static __always_inline bool is_target_conn(struct sock *sk)
     return bpf_map_lookup_elem(&tcp_targets, &key) != NULL;
 }
 
+// Lightweight HTTP protocol detection on already-copied buffer.
+// Returns true if the payload starts with a known HTTP method or "HTTP" response.
+// Used to filter non-HTTP traffic (TLS, Redis, MySQL, etc.) in the BPF layer
+// before submitting to the ring buffer, avoiding costly kernel→userspace copies.
+static __always_inline bool is_http_payload(const char *buf, u32 len)
+{
+    if (len < 4)
+        return false;
+    if (buf[0] == 'H' && buf[1] == 'T' && buf[2] == 'T' && buf[3] == 'P')
+        return true;
+    if (buf[0] == 'G' && buf[1] == 'E' && buf[2] == 'T' && buf[3] == ' ')
+        return true;
+    if (buf[0] == 'P' && buf[1] == 'O' && buf[2] == 'S' && buf[3] == 'T')
+        return true;
+    if (buf[0] == 'P' && buf[1] == 'U' && buf[2] == 'T' && buf[3] == ' ')
+        return true;
+    if (buf[0] == 'H' && buf[1] == 'E' && buf[2] == 'A' && buf[3] == 'D')
+        return true;
+    if (len >= 6 && buf[0] == 'D' && buf[1] == 'E' && buf[2] == 'L' &&
+        buf[3] == 'E' && buf[4] == 'T' && buf[5] == 'E')
+        return true;
+    if (len >= 5 && buf[0] == 'P' && buf[1] == 'A' && buf[2] == 'T' &&
+        buf[3] == 'C' && buf[4] == 'H')
+        return true;
+    if (buf[0] == 'O' && buf[1] == 'P' && buf[2] == 'T' && buf[3] == 'I')
+        return true;
+    if (buf[0] == 'C' && buf[1] == 'O' && buf[2] == 'N' && buf[3] == 'N')
+        return true;
+    return false;
+}
+
 // Emit a probe_SSL_data_t event given a pre-resolved user buffer pointer.
 static __always_inline int emit_tcp_event_buf(
     struct sock *sk,
@@ -181,6 +224,15 @@ static __always_inline int emit_tcp_event_buf(
 
     int ret = bpf_probe_read_user(&data->buf, buf_copy_size, user_buf);
     if (ret == 0) {
+        u64 sk_key = (u64)sk;
+        if (!bpf_map_lookup_elem(&tcp_http_conns, &sk_key)) {
+            if (!is_http_payload((const char *)data->buf, buf_copy_size)) {
+                bpf_ringbuf_discard(data, 0);
+                return 0;
+            }
+            u8 val = 1;
+            bpf_map_update_elem(&tcp_http_conns, &sk_key, &val, BPF_ANY);
+        }
         data->buf_filled = 1;
         data->buf_size = buf_copy_size;
     } else {
@@ -264,10 +316,18 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
 
     int ret = bpf_probe_read_user(&data->buf[0], iov0_copy, iov0_base);
     if (ret != 0) {
-        data->buf_filled = 0;
-        data->buf_size = 0;
-        bpf_ringbuf_submit(data, 0);
+        bpf_ringbuf_discard(data, 0);
         return 0;
+    }
+
+    u64 sk_key = (u64)sk;
+    if (!bpf_map_lookup_elem(&tcp_http_conns, &sk_key)) {
+        if (!is_http_payload((const char *)data->buf, iov0_copy)) {
+            bpf_ringbuf_discard(data, 0);
+            return 0;
+        }
+        u8 val = 1;
+        bpf_map_update_elem(&tcp_http_conns, &sk_key, &val, BPF_ANY);
     }
 
     u32 total_copied = iov0_copy;
