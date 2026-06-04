@@ -383,6 +383,11 @@ export const INTERRUPTION_TYPE_CN: Record<string, string> = {
   context_overflow: '上下文溢出',
   agent_crash: 'Agent 崩溃',
   token_limit: 'Token 超限',
+  rate_limit: '速率限制',
+  auth_error: '鉴权错误',
+  network_timeout: '网络超时',
+  service_unavailable: '服务不可用',
+  safety_filter: '安全过滤',
 };
 
 /**

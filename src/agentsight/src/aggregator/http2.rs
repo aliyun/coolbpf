@@ -197,23 +197,49 @@ impl Http2Stream {
         result
     }
 
-    /// Get request body as string (concatenates all data frames)
+    /// Content-Encoding header from response headers (e.g. "gzip", "deflate")
+    pub fn content_encoding(&self) -> Option<String> {
+        self.response_headers.as_ref()
+            .map(|h| {
+                let headers = h.decode_headers_stateless();
+                headers.iter()
+                    .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
+                    .and_then(|(_, value)| value.clone())
+            })
+            .flatten()
+    }
+
+    /// Content-Encoding header from request headers
+    pub fn request_content_encoding(&self) -> Option<String> {
+        self.request_headers.as_ref()
+            .map(|h| {
+                let headers = h.decode_headers_stateless();
+                headers.iter()
+                    .find(|(name, _)| name == "content-encoding" || name == "Content-Encoding")
+                    .and_then(|(_, value)| value.clone())
+            })
+            .flatten()
+    }
+
+    /// Get request body as decompressed string (concatenates all data frames)
     pub fn request_body_str(&self) -> Option<String> {
         let body = self.request_body();
         if body.is_empty() {
             None
         } else {
-            String::from_utf8(body).ok()
+            crate::utils::decompress::decompress_body_to_string(
+                &body, self.request_content_encoding().as_deref())
         }
     }
 
-    /// Get response body as string (concatenates all data frames)
+    /// Get response body as decompressed string (concatenates all data frames)
     pub fn response_body_str(&self) -> Option<String> {
         let body = self.response_body();
         if body.is_empty() {
             None
         } else {
-            String::from_utf8(body).ok()
+            crate::utils::decompress::decompress_body_to_string(
+                &body, self.content_encoding().as_deref())
         }
     }
 

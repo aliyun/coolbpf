@@ -801,6 +801,9 @@ impl AgentSight {
                         if let Err(e) = istore.insert(ie) {
                             log::warn!("Failed to store interruption event: {}", e);
                         }
+                        // Also export to iLogtail file (no-op if SLS_LOGTAIL_FILE unset),
+                        // so the SLS index keeps interruption records co-located with LLM calls.
+                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
                         // Also stamp genai_events row with interruption_type
                         if let Some(ref sqlite) = self.genai_sqlite_store {
                             let _ = sqlite.update_interruption_type(

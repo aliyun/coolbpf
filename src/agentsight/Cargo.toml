@@ -70,6 +70,7 @@ typed-arena = "2.0.2"
 uname = "0.1.1"
 # Static link OpenSSL to avoid runtime dependency on libssl.so.1.1
 openssl = { version = "0.10", features = ["vendored"] }
+flate2 = "1"
 # HTTP API server (optional, enabled by "server" feature)
 actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }
