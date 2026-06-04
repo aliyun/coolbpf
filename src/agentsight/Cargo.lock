@@ -229,6 +229,7 @@ dependencies = [
  "ctrlc",
  "daemonize",
  "env_logger",
+ "flate2",
  "futures",
  "gimli",
  "glob",

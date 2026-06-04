@@ -15,6 +15,7 @@ use super::semantic::GenAISemanticEvent;
 use super::exporter::GenAIExporter;
 use super::instance_id;
 use super::encrypt::MessageEncryptor;
+use crate::interruption::types::InterruptionEvent;
 
 /// 环境变量名称
 pub const LOGTAIL_ENV_VAR: &str = "SLS_LOGTAIL_FILE";
@@ -331,6 +332,136 @@ pub fn events_to_flat_records(events: &[GenAISemanticEvent], encryptor: Option<&
     }
 
     records
+}
+
+/// 将中断事件转换为扁平化 key-value 记录
+///
+/// 通过 `gen_ai.operation.name = "interruption"` 与 LLMCall 记录区分。
+/// 复用通用字段（instance/uid/pid/agent.name/session.id/conversation.id/trace_id/
+/// start_timestamp_ns），并增加 `agentsight.interruption.*` 专属字段，便于在 SLS
+/// 中以同一索引同时查询会话与中断事件。
+pub fn interruption_events_to_flat_records(events: &[InterruptionEvent]) -> Vec<BTreeMap<String, String>> {
+    let hostname = instance_id::get_instance_id();
+    let uid = instance_id::get_owner_account_id();
+    let mut records = Vec::with_capacity(events.len());
+
+    for event in events {
+        let mut m = BTreeMap::new();
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // iLogtail 保留字段
+        m.insert("__time__".to_string(), timestamp.to_string());
+        m.insert("__source__".to_string(), hostname.to_string());
+        m.insert("__topic__".to_string(), "agentsight".to_string());
+
+        m.insert("instance".to_string(), hostname.to_string());
+        if !uid.is_empty() {
+            m.insert("uid".to_string(), uid.to_string());
+        }
+
+        // 区分字段：与 LLMCall/ToolUse 等记录区分
+        m.insert("gen_ai.operation.name".to_string(), "interruption".to_string());
+
+        // ── 复用 LLMCall 记录的关联字段 ──
+        if let Some(pid) = event.pid {
+            m.insert("agentsight.pid".to_string(), pid.to_string());
+        }
+        if let Some(ref name) = event.agent_name {
+            m.insert("agentsight.agent.name".to_string(), name.clone());
+        }
+        if let Some(ref sid) = event.session_id {
+            m.insert("gen_ai.session.id".to_string(), sid.clone());
+        }
+        if let Some(ref cid) = event.conversation_id {
+            m.insert("gen_ai.conversation.id".to_string(), cid.clone());
+        }
+        if let Some(ref tid) = event.trace_id {
+            m.insert("trace_id".to_string(), tid.clone());
+        }
+        m.insert("agentsight.start_timestamp_ns".to_string(), event.occurred_at_ns.to_string());
+
+        // ── 中断事件专属字段 ──
+        m.insert("agentsight.interruption.id".to_string(), event.interruption_id.clone());
+        m.insert(
+            "agentsight.interruption.type".to_string(),
+            event.interruption_type.as_str().to_string(),
+        );
+        m.insert(
+            "agentsight.interruption.severity".to_string(),
+            event.severity.as_str().to_string(),
+        );
+        m.insert(
+            "agentsight.interruption.resolved".to_string(),
+            event.resolved.to_string(),
+        );
+        if let Some(ref detail) = event.detail {
+            m.insert("agentsight.interruption.detail".to_string(), detail.clone());
+        }
+        if let Some(ref cid) = event.call_id {
+            m.insert("agentsight.interruption.call_id".to_string(), cid.clone());
+        }
+
+        records.push(m);
+    }
+
+    records
+}
+
+/// 将中断事件批量导出到 iLogtail 文件（追加写入）
+///
+/// 仅在环境变量 `SLS_LOGTAIL_FILE` 设置时生效；否则为空操作。
+/// 与 `LogtailExporter::write_batch` 写入同一文件，由 iLogtail 统一采集到 SLS。
+pub fn export_interruption_events(events: &[InterruptionEvent]) {
+    if events.is_empty() {
+        return;
+    }
+    let path_str = match logtail_path() {
+        Some(p) => p,
+        None => return,
+    };
+    let path = PathBuf::from(path_str);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let records = interruption_events_to_flat_records(events);
+    if records.is_empty() {
+        return;
+    }
+
+    let file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!(
+                "Failed to open logtail file {:?} for interruption export: {}",
+                path, e
+            );
+            return;
+        }
+    };
+
+    let mut writer = BufWriter::new(file);
+    for record in &records {
+        match serde_json::to_string(record) {
+            Ok(json_line) => {
+                if let Err(e) = writeln!(writer, "{}", json_line) {
+                    log::warn!("Failed to write interruption logtail record: {}", e);
+                    return;
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to serialize interruption logtail record: {}", e);
+            }
+        }
+    }
+
+    if let Err(e) = writer.flush() {
+        log::warn!("Failed to flush logtail file (interruption): {}", e);
+    }
 }
 
 #[cfg(test)]

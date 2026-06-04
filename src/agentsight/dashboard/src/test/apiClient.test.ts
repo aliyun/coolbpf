@@ -60,6 +60,11 @@ describe('apiClient', () => {
       expect(INTERRUPTION_TYPE_CN.context_overflow).toBe('上下文溢出');
       expect(INTERRUPTION_TYPE_CN.agent_crash).toBe('Agent 崩溃');
       expect(INTERRUPTION_TYPE_CN.token_limit).toBe('Token 超限');
+      expect(INTERRUPTION_TYPE_CN.rate_limit).toBe('速率限制');
+      expect(INTERRUPTION_TYPE_CN.auth_error).toBe('鉴权错误');
+      expect(INTERRUPTION_TYPE_CN.network_timeout).toBe('网络超时');
+      expect(INTERRUPTION_TYPE_CN.service_unavailable).toBe('服务不可用');
+      expect(INTERRUPTION_TYPE_CN.safety_filter).toBe('安全过滤');
     });
   });
 

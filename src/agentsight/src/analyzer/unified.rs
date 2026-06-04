@@ -759,9 +759,9 @@ impl Analyzer {
                 let response_body = resp.parsed.json_body()
                     .map(|v| serde_json::to_string(&v).unwrap_or_default())
                     .or_else(|| {
-                        let body = resp.parsed.body();
-                        if body.is_empty() { None }
-                        else { Some(String::from_utf8_lossy(body).to_string()) }
+                        let body_str = resp.parsed.body_str_decompressed();
+                        if body_str.is_empty() { None }
+                        else { Some(body_str) }
                     });
 
                 Some(HttpRecord {

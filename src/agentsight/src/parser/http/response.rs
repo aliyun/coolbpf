@@ -20,25 +20,39 @@ pub struct ParsedResponse {
 }
 
 impl ParsedResponse {
-    /// 获取 body 数据（零拷贝）
+    /// 获取 body 数据（零拷贝，原始字节，未解压）
     pub fn body(&self) -> &[u8] {
         &self.source_event.buf[self.body_offset..self.body_offset + self.body_len]
     }
 
+    /// Content-Encoding header value (lowercase), e.g. "gzip", "deflate", or None
+    pub fn content_encoding(&self) -> Option<&str> {
+        self.headers.get("content-encoding").map(|e| e.as_str())
+    }
+
+    /// 获取解压后的 body 字节（应用于完整组装的响应，非部分 SSL 事件）
+    pub fn decompressed_body(&self) -> Vec<u8> {
+        crate::utils::decompress::decompress_body(self.body(), self.content_encoding())
+    }
+
+    /// 获取解压后的 body 字符串（应用于完整组装的响应）
+    pub fn body_str_decompressed(&self) -> String {
+        crate::utils::decompress::decompress_body_to_string(self.body(), self.content_encoding())
+            .unwrap_or_default()
+    }
+
+    /// 原始 body 字符串（不解压，用于部分 SSL 事件或内部调试）
     pub fn body_str(&self) -> &str {
         std::str::from_utf8(self.body()).unwrap_or("")
     }
-    
-    /// 尝试将 body 解析为 JSON
-    /// 
-    /// 如果 body 是有效的 UTF-8 且是有效的 JSON，返回解析后的 Value
-    /// 否则返回 null
+
+    /// 尝试将 body 解析为 JSON（自动处理 gzip/deflate 解压）
     pub fn json_body(&self) -> Option<serde_json::Value> {
         if self.body_len == 0 {
             return None;
         }
-        let body = self.body();
-        let body_str = String::from_utf8_lossy(body);
+        let decompressed = self.decompressed_body();
+        let body_str = String::from_utf8_lossy(&decompressed);
         serde_json::from_str(&body_str).ok()
     }
 

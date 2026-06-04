@@ -169,12 +169,11 @@ impl TraceArgs for AggregatedResponse {
         if self.parsed.body_len > 0 && !self.parsed.is_sse() {
             args.insert("body_length".to_string(), json!(self.parsed.body_len));
 
-            // Try to parse as JSON first, fallback to string
+            // Try to parse as JSON first (with gzip decompression), fallback to decompressed string
             if let Some(json_body) = self.parsed.json_body() {
                 args.insert("body".to_string(), json_body);
             } else {
-                let body = self.parsed.body();
-                let body_str = String::from_utf8_lossy(body).to_string();
+                let body_str = self.parsed.body_str_decompressed();
                 if !body_str.is_empty() {
                     args.insert("body".to_string(), json!(body_str));
                 }
