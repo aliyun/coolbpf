@@ -1,5 +1,8 @@
 {
-  "https": [],
+  "runtime": {
+    "sls_logtail_path": ""
+  },
+  "https": [{"rule": ["dashscope.aliyuncs.com"]}],
   "http": [],
   "encryption": {
     "public_key": ""
