@@ -702,6 +702,56 @@ impl GenAISqliteStore {
         .unwrap_or(0)
     }
 
+    /// Fetch the most recent N LLM calls for a conversation (for loop detection).
+    ///
+    /// Returns lightweight summaries ordered oldest-first (ascending timestamp).
+    /// Used by LoopDetector to analyze repetitive patterns across calls.
+    pub fn get_recent_calls_for_conversation(
+        &self,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Vec<crate::interruption::RecentCallSummary> {
+        let conn = self.conn.lock().unwrap();
+        // Subquery fetches latest N rows desc, outer query reverses to asc order
+        let sql = "SELECT call_id, output_messages, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0) \
+                   FROM (SELECT call_id, output_messages, input_tokens, output_tokens, start_timestamp_ns \
+                         FROM genai_events \
+                         WHERE event_type = 'llm_call' \
+                           AND conversation_id = ?1 \
+                           AND status != 'pending' \
+                         ORDER BY start_timestamp_ns DESC \
+                         LIMIT ?2) \
+                   ORDER BY start_timestamp_ns ASC";
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let rows = match stmt.query_map(params![conversation_id, limit as i64], |row| {
+            let call_id: String = row.get(0)?;
+            let output_messages_json: Option<String> = row.get(1)?;
+            let input_tokens: i64 = row.get(2)?;
+            let output_tokens: i64 = row.get(3)?;
+            Ok((call_id, output_messages_json, input_tokens, output_tokens))
+        }) {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+
+        rows.filter_map(|r| r.ok())
+            .map(|(call_id, output_json, input_tokens, output_tokens)| {
+                let (tool_call_names, output_text_snippet) =
+                    parse_output_messages_for_loop_detection(output_json.as_deref());
+                crate::interruption::RecentCallSummary {
+                    call_id,
+                    tool_call_names,
+                    output_text_snippet,
+                    input_tokens,
+                    output_tokens,
+                }
+            })
+            .collect()
+    }
+
     /// List all pending calls for a specific PID.
     ///
     /// Returns (call_id, session_id, trace_id, conversation_id) tuples for all
@@ -2022,4 +2072,56 @@ impl GenAIExporter for GenAISqliteStore {
             }
         }
     }
+}
+
+// ─── Helper for loop detection ───────────────────────────────────────────────
+
+/// Parse the `output_messages` JSON column to extract tool call names and text snippets.
+///
+/// The JSON structure follows the OTel GenAI parts format stored by `store_event()`:
+/// ```json
+/// [{"role":"assistant","parts":[{"type":"tool_call","name":"read_file",...},{"type":"text","content":"..."}]}]
+/// ```
+fn parse_output_messages_for_loop_detection(json_str: Option<&str>) -> (Vec<String>, String) {
+    let Some(json_str) = json_str else {
+        return (vec![], String::new());
+    };
+
+    let messages: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return (vec![], String::new()),
+    };
+
+    let mut tool_names = Vec::new();
+    let mut text_parts = Vec::new();
+
+    for msg in &messages {
+        if let Some(parts) = msg.get("parts").and_then(|p| p.as_array()) {
+            for part in parts {
+                match part.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_call") => {
+                        if let Some(name) = part.get("name").and_then(|n| n.as_str()) {
+                            tool_names.push(name.to_string());
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(content) = part.get("content").and_then(|c| c.as_str()) {
+                            text_parts.push(content);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Build a snippet from text parts (max 200 chars)
+    let full_text = text_parts.join(" ");
+    let snippet = if full_text.len() > 200 {
+        full_text.chars().take(200).collect()
+    } else {
+        full_text
+    };
+
+    (tool_names, snippet)
 }

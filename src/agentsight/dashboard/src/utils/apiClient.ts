@@ -389,6 +389,7 @@ export const INTERRUPTION_TYPE_CN: Record<string, string> = {
   service_unavailable: '服务不可用',
   safety_filter: '安全过滤',
   retry_storm: '重试风暴',
+  dead_loop: '死循环',
 };
 
 /**

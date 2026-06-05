@@ -99,6 +99,10 @@ pub struct AgentSight {
     sls_activated: Arc<AtomicBool>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
     pending_logtail: Arc<Mutex<Option<Box<dyn GenAIExporter>>>>,
+    /// DeadLoop auto-kill: enabled flag
+    deadloop_kill_enabled: bool,
+    /// DeadLoop auto-kill: trigger threshold (kill after N detections)
+    deadloop_kill_after_count: usize,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -330,6 +334,18 @@ impl AgentSight {
                     genai_exporters.push(Box::new(exporter));
                     sls_activated.store(true, Ordering::SeqCst);
                 }
+                // Also initialize SQLite store for detection queries + lifecycle
+                match GenAISqliteStore::new() {
+                    Ok(store) => {
+                        log::info!("SQLite GenAI store initialized (detection + lifecycle)");
+                        let store = Arc::new(store);
+                        genai_sqlite_store = Some(Arc::clone(&store));
+                        genai_exporters.push(Box::new(store));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize SQLite GenAI store: {}", e);
+                    }
+                }
             } else {
                 // No Logtail: use local JSONL + SQLite
                 genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
@@ -463,6 +479,8 @@ impl AgentSight {
             http_domains,
             sls_activated,
             pending_logtail,
+            deadloop_kill_enabled: config.deadloop_kill_enabled,
+            deadloop_kill_after_count: config.deadloop_kill_after_count,
         })
     }
 
@@ -1053,6 +1071,72 @@ impl AgentSight {
                                 &llm_call.call_id,
                                 ie.interruption_type.as_str(),
                             );
+                        }
+                    }
+
+                    // ── Cross-call DeadLoop detection ──────────────────────────────
+                    // After single-call detection, check for repetitive patterns
+                    // across the conversation's recent calls.
+                    if let Some(ref cid) = llm_call.metadata.get("conversation_id") {
+                        // When auto-kill is enabled, allow multiple detection events
+                        // (up to kill_after_count) so the count threshold can be reached.
+                        // When disabled, deduplicate to at most one event per conversation.
+                        let existing_count = istore.count_for_conversation(
+                            cid,
+                            &crate::interruption::InterruptionType::DeadLoop,
+                        );
+                        let should_detect = if self.deadloop_kill_enabled {
+                            existing_count < self.deadloop_kill_after_count
+                        } else {
+                            existing_count == 0
+                        };
+
+                        if should_detect {
+                            if let Some(ref sqlite) = self.genai_sqlite_store {
+                                let loop_detector = crate::interruption::LoopDetector::default();
+                                let recent = sqlite.get_recent_calls_for_conversation(
+                                    cid,
+                                    loop_detector.config.window_size,
+                                );
+                                if let Some(loop_event) = loop_detector.detect(
+                                    cid,
+                                    llm_call.metadata.get("session_id").map(|s| s.as_str()),
+                                    llm_call.agent_name.as_deref(),
+                                    Some(llm_call.pid),
+                                    llm_call.end_timestamp_ns as i64,
+                                    &recent,
+                                ) {
+                                    let _ = istore.insert(&loop_event);
+                                    crate::genai::logtail::export_interruption_events(std::slice::from_ref(&loop_event));
+                                    log::warn!(
+                                        "DeadLoop detected in conversation {}: {:?}",
+                                        cid, loop_event.detail
+                                    );
+
+                                    // ── Auto-kill 止血 ──
+                                    // Kill when detection count reaches threshold.
+                                    // count_for_conversation now includes the event we just inserted.
+                                    if self.deadloop_kill_enabled {
+                                        let new_count = existing_count + 1;
+                                        if new_count >= self.deadloop_kill_after_count {
+                                            if let Some(pid) = loop_event.pid {
+                                                log::error!(
+                                                    "DeadLoop auto-kill: sending SIGTERM to pid {} (conversation={}, detections={})",
+                                                    pid, cid, new_count
+                                                );
+                                                unsafe {
+                                                    libc::kill(pid, libc::SIGTERM);
+                                                }
+                                            }
+                                        } else {
+                                            log::warn!(
+                                                "DeadLoop auto-kill: detection {}/{} for conversation {}, waiting...",
+                                                new_count, self.deadloop_kill_after_count, cid
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

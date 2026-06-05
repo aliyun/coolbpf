@@ -208,6 +208,21 @@ impl InterruptionStore {
         Ok(updated > 0)
     }
 
+    /// Count unresolved interruptions of a given type for a conversation.
+    ///
+    /// Used by the DeadLoop auto-kill feature to determine whether the kill
+    /// threshold has been reached.
+    pub fn count_for_conversation(&self, conversation_id: &str, itype: &InterruptionType) -> usize {
+        let conn = self.conn.lock().unwrap();
+        let result: Result<i64, _> = conn.query_row(
+            "SELECT COUNT(*) FROM interruption_events
+             WHERE conversation_id=?1 AND interruption_type=?2 AND resolved=0",
+            params![conversation_id, itype.as_str()],
+            |row| row.get(0),
+        );
+        result.unwrap_or(0) as usize
+    }
+
     // ─── Query ──────────────────────────────────────────────────────────────
 
     /// List interruptions within a time range.

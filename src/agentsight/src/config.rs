@@ -235,6 +235,19 @@ struct JsonFullConfig {
     encryption: Option<JsonEncryption>,
     #[serde(default)]
     runtime: Option<JsonRuntime>,
+    #[serde(default)]
+    deadloop: Option<JsonDeadloop>,
+}
+
+/// DeadLoop 检测配置区段
+#[derive(serde::Deserialize, Clone, Debug)]
+struct JsonDeadloop {
+    /// 是否启用自动 kill（默认 false，仅记录日志）
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// 触发自动 kill 的循环检测次数阈值（默认 3）
+    #[serde(default)]
+    kill_after_count: Option<usize>,
 }
 
 /// Runtime 动态配置区段（支持热加载，无需重启）
@@ -469,6 +482,12 @@ pub struct AgentsightConfig {
     /// SLS Logtail 输出文件路径（来自 `runtime.sls_logtail_path`）。
     /// 非空时激活 SLS 上传。支持运行期热加载。
     pub sls_logtail_path: Option<String>,
+
+    // --- DeadLoop Auto-Kill Configuration ---
+    /// 是否启用 DeadLoop 自动 kill 止血（默认 false）
+    pub deadloop_kill_enabled: bool,
+    /// 触发 kill 的循环次数阈值（检测到 N 次后 kill）
+    pub deadloop_kill_after_count: usize,
 }
 
 impl Default for AgentsightConfig {
@@ -523,6 +542,10 @@ impl Default for AgentsightConfig {
 
             // Runtime dynamic configuration defaults
             sls_logtail_path: None,
+
+            // DeadLoop auto-kill defaults (disabled by default)
+            deadloop_kill_enabled: false,
+            deadloop_kill_after_count: 3,
         }
     }
 }
@@ -640,6 +663,16 @@ impl AgentsightConfig {
                 if !trimmed.is_empty() {
                     self.sls_logtail_path = Some(trimmed.to_string());
                 }
+            }
+        }
+
+        // 解析 deadloop 自动 kill 配置
+        if let Some(ref dl) = parsed.deadloop {
+            if let Some(enabled) = dl.enabled {
+                self.deadloop_kill_enabled = enabled;
+            }
+            if let Some(count) = dl.kill_after_count {
+                self.deadloop_kill_after_count = count;
             }
         }
 
