@@ -539,3 +539,82 @@ fn errors_match(a: &str, b: &str) -> bool {
     // Substring containment: if one fully contains the other
     na.contains(&nb) || nb.contains(&na)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_store() -> InterruptionStore {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("test_interruption_{}.db",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos()));
+        InterruptionStore::new_with_path(&path).unwrap()
+    }
+
+    fn make_event(conversation_id: &str, itype: InterruptionType) -> InterruptionEvent {
+        InterruptionEvent {
+            interruption_id: format!("int-{}",
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos()),
+            session_id: Some("sess-1".to_string()),
+            trace_id: None,
+            conversation_id: Some(conversation_id.to_string()),
+            call_id: None,
+            pid: Some(1234),
+            agent_name: Some("TestAgent".to_string()),
+            interruption_type: itype,
+            severity: crate::interruption::types::Severity::Critical,
+            occurred_at_ns: 1000000000,
+            detail: None,
+            resolved: false,
+        }
+    }
+
+    #[test]
+    fn test_count_for_conversation_empty() {
+        let store = temp_store();
+        let count = store.count_for_conversation("conv-999", &InterruptionType::DeadLoop);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_count_for_conversation_single() {
+        let store = temp_store();
+        let event = make_event("conv-1", InterruptionType::DeadLoop);
+        store.insert(&event).unwrap();
+        let count = store.count_for_conversation("conv-1", &InterruptionType::DeadLoop);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_count_for_conversation_multiple() {
+        let store = temp_store();
+        for i in 0..3 {
+            let mut event = make_event("conv-2", InterruptionType::DeadLoop);
+            event.interruption_id = format!("int-multi-{}", i);
+            store.insert(&event).unwrap();
+        }
+        let count = store.count_for_conversation("conv-2", &InterruptionType::DeadLoop);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_count_for_conversation_different_type_not_counted() {
+        let store = temp_store();
+        let event = make_event("conv-3", InterruptionType::RetryStorm);
+        store.insert(&event).unwrap();
+        let count = store.count_for_conversation("conv-3", &InterruptionType::DeadLoop);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_count_for_conversation_different_conv_not_counted() {
+        let store = temp_store();
+        let mut event = make_event("conv-4", InterruptionType::DeadLoop);
+        event.interruption_id = "int-other-conv".to_string();
+        store.insert(&event).unwrap();
+        let count = store.count_for_conversation("conv-5", &InterruptionType::DeadLoop);
+        assert_eq!(count, 0);
+    }
+}

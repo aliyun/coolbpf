@@ -2125,3 +2125,80 @@ fn parse_output_messages_for_loop_detection(json_str: Option<&str>) -> (Vec<Stri
 
     (tool_names, snippet)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_output_messages_for_loop_detection;
+
+    #[test]
+    fn test_parse_output_none() {
+        let (tools, text) = parse_output_messages_for_loop_detection(None);
+        assert!(tools.is_empty());
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_parse_output_invalid_json() {
+        let (tools, text) = parse_output_messages_for_loop_detection(Some("not json"));
+        assert!(tools.is_empty());
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_parse_output_tool_calls_only() {
+        let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"read_file"},{"type":"tool_call","name":"write_file"}]}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert_eq!(tools, vec!["read_file", "write_file"]);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_parse_output_text_only() {
+        let json = r#"[{"role":"assistant","parts":[{"type":"text","content":"Hello world"}]}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert!(tools.is_empty());
+        assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn test_parse_output_mixed() {
+        let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"search"},{"type":"text","content":"Found results"}]}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert_eq!(tools, vec!["search"]);
+        assert_eq!(text, "Found results");
+    }
+
+    #[test]
+    fn test_parse_output_multiple_text_parts() {
+        let json = r#"[{"role":"assistant","parts":[{"type":"text","content":"Part 1"},{"type":"text","content":"Part 2"}]}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert_eq!(text, "Part 1 Part 2");
+    }
+
+    #[test]
+    fn test_parse_output_text_truncated_at_200_chars() {
+        let long_content = "a".repeat(300);
+        let json = format!(
+            r#"[{{"role":"assistant","parts":[{{"type":"text","content":"{}"}}]}}]"#,
+            long_content
+        );
+        let (_, text) = parse_output_messages_for_loop_detection(Some(&json));
+        assert_eq!(text.len(), 200);
+    }
+
+    #[test]
+    fn test_parse_output_empty_parts_array() {
+        let json = r#"[{"role":"assistant","parts":[]}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert!(tools.is_empty());
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_parse_output_no_parts_field() {
+        let json = r#"[{"role":"assistant"}]"#;
+        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        assert!(tools.is_empty());
+        assert!(text.is_empty());
+    }
+}

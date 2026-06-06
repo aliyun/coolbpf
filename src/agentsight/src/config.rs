@@ -1164,4 +1164,49 @@ mod tests {
         config.load_from_json(json).unwrap();
         assert_eq!(config.sls_logtail_path, None);
     }
+
+    // ─── DeadLoop config tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_deadloop_config_defaults() {
+        let config = AgentsightConfig::new();
+        assert!(!config.deadloop_kill_enabled);
+        assert_eq!(config.deadloop_kill_after_count, 3);
+    }
+
+    #[test]
+    fn test_load_from_json_deadloop_enabled() {
+        let json = r#"{"deadloop": {"enabled": true, "kill_after_count": 5}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.deadloop_kill_enabled);
+        assert_eq!(config.deadloop_kill_after_count, 5);
+    }
+
+    #[test]
+    fn test_load_from_json_deadloop_disabled_explicit() {
+        let json = r#"{"deadloop": {"enabled": false}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.deadloop_kill_enabled);
+        assert_eq!(config.deadloop_kill_after_count, 3); // keeps default
+    }
+
+    #[test]
+    fn test_load_from_json_deadloop_partial_only_count() {
+        let json = r#"{"deadloop": {"kill_after_count": 10}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.deadloop_kill_enabled); // keeps default
+        assert_eq!(config.deadloop_kill_after_count, 10);
+    }
+
+    #[test]
+    fn test_load_from_json_no_deadloop_section() {
+        let json = r#"{"cmdline": {"allow": []}}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.deadloop_kill_enabled);
+        assert_eq!(config.deadloop_kill_after_count, 3);
+    }
 }
