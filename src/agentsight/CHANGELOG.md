@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0
+
+- Add deadloop detection and auto-kill mechanism for runaway agent processes.
+- Add retry storm detection and `/metrics` interruption counters.
+- Add BPF-layer HTTP protocol filter and wildcard capture (`*`) for unknown IP/port targets.
+- Add client-side hybrid encryption for sensitive message fields.
+- Add `traceEnabled` configuration toggle with SLS upload layer enforcement.
+- Add HTTP domain rules resolved to tcpsniff BPF map via DNS.
+- Add default DashScope HTTPS rule and `anolisa_release` module.
+- Add FFI interface for `tcp_targets` and `input_delta` config.
+- Add CO-RE compatibility to UDP DNS probe for kernel 6.0+.
+- Support runtime SLS logtail path via config hot-reload.
+- Expand interruption types and add logtail export.
+- Restructure config to `https`/`http` rules.
+- Refactor query `stats.db` by `tool_use_id` and unify savings display.
+- Refactor load encryption public key from `agentsight.json`.
+- Fix decode HPACK Huffman headers.
+- Fix BoringSSL probe attachment, FFI event delivery, and chunked-body panic.
+- Fix preserve initial SSE chunk in event-stream responses.
+- Fix `c_char` / BPF comm portability (i8 vs u8).
+- Remove dead code and deprecated APIs.
+
 ## 0.5.0
 
 - Add Claude Code support including SSL probe attach for BoringSSL, Anthropic SSE thinking/tool_use content blocks, and `message.id`-based session correlation.
