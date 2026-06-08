@@ -214,10 +214,27 @@ impl AgentSight {
         // Create probes - agent discovery is handled by AgentScanner via ProcMon events
         let enable_udpdns = !config.https_rules.is_empty() || !http_domains.is_empty();
         let mut probes =
-            Probes::new(&[], config.target_uid, config.enable_filewatch, enable_udpdns, &tcp_targets).context("Failed to create probes")?;
+            Probes::new_with_cgroup_filter(
+                &[],
+                config.target_uid,
+                config.enable_filewatch,
+                enable_udpdns,
+                &tcp_targets,
+                config.cgroup_filter_enabled,
+            )
+            .context("Failed to create probes")?;
 
         // Attach procmon for process monitoring
         probes.attach().context("Failed to attach probes")?;
+
+        // Seed cgroup_filter map with pre-configured cgroup inode IDs
+        if config.cgroup_filter_enabled && !config.cgroup_ids.is_empty() {
+            for &cg_id in &config.cgroup_ids {
+                probes.add_traced_cgroup(cg_id)
+                    .context("Failed to register cgroup_id")?;
+                log::info!("Registered cgroup_id {}", cg_id);
+            }
+        }
 
         // Create scanner with all rules (allow/deny/https)
         let mut scanner = AgentScanner::from_rules(&all_cmdline_rules, &config.https_rules);

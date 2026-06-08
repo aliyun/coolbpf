@@ -66,33 +66,93 @@ pub struct Probes {
 
 impl Probes {
     /// Create a new unified probe manager
-    /// 
+    ///
     /// # Arguments
     /// * `target_pids` - Initial PIDs to trace (empty means trace all matching UID)
     /// * `target_uid` - Optional UID filter
-    pub fn new(target_pids: &[u32], target_uid: Option<u32>, enable_filewatch: bool, enable_udpdns: bool, tcp_targets: &[TcpTarget]) -> Result<Self> {
-        // Create proctrace first - it will own the traced_processes map and ring buffer
-        let proctrace = ProcTrace::new_with_target(target_pids, target_uid)
-            .context("failed to create proctrace")?;
-        
+    /// * `enable_filewatch` - Enable filewatch probe
+    /// * `enable_udpdns` - Enable udpdns probe
+    /// * `tcp_targets` - TCP targets for plain HTTP capture
+    pub fn new(
+        target_pids: &[u32],
+        target_uid: Option<u32>,
+        enable_filewatch: bool,
+        enable_udpdns: bool,
+        tcp_targets: &[TcpTarget],
+    ) -> Result<Self> {
+        Self::new_with_cgroup_filter(
+            target_pids,
+            target_uid,
+            enable_filewatch,
+            enable_udpdns,
+            tcp_targets,
+            false,
+        )
+    }
+
+    /// Create a new unified probe manager with explicit cgroup-level filtering toggle.
+    ///
+    /// When `cgroup_filter_enabled` is true, every probe (except procmon, which
+    /// keeps full audit coverage) gates its events behind the shared
+    /// `cgroup_filter` map. Cgroup ids can then be registered at runtime via
+    /// `add_traced_cgroup`. When false (default), every probe behaves exactly
+    /// like before this feature existed.
+    pub fn new_with_cgroup_filter(
+        target_pids: &[u32],
+        target_uid: Option<u32>,
+        enable_filewatch: bool,
+        enable_udpdns: bool,
+        tcp_targets: &[TcpTarget],
+        cgroup_filter_enabled: bool,
+    ) -> Result<Self> {
+        // Create proctrace first - it owns the traced_processes map, the ring
+        // buffer, and (when enabled) the cgroup_filter map.
+        let proctrace = ProcTrace::new_with_target_and_maps(
+            target_pids,
+            target_uid,
+            None,
+            None,
+            cgroup_filter_enabled,
+        )
+        .context("failed to create proctrace")?;
+
         // Get handles to the shared maps for reuse
         let map_handle = proctrace.traced_processes_handle()
             .context("failed to get traced_processes handle")?;
         let rb_handle = proctrace.rb_handle()
             .context("failed to get rb handle")?;
-        
+
+        // Only fetch a cgroup_filter handle when the feature is on; when off,
+        // we let each probe load its own private (unused) cgroup_filter map
+        // so we never burn an extra fd in the steady state.
+        let cgroup_filter_handle = if cgroup_filter_enabled {
+            Some(
+                proctrace
+                    .cgroup_filter_handle()
+                    .context("failed to get cgroup_filter handle")?,
+            )
+        } else {
+            None
+        };
+        let cgroup_filter_ref = cgroup_filter_handle.as_ref();
+
         // Create sslsniff - it will reuse both the traced_processes map and ring buffer
         let sslsniff = SslSniff::new_with_traced_processes(Some(&map_handle), Some(&rb_handle))
             .context("failed to create sslsniff")?;
 
-        // Create procmon - it reuses the ring buffer
+        // Create procmon - it reuses the ring buffer (no cgroup filter: full audit)
         let procmon = ProcMon::new_with_rb(&rb_handle)
             .context("failed to create procmon")?;
 
         // Optionally create filewatch - it reuses both the traced_processes map and ring buffer
         let filewatch = if enable_filewatch {
-            let fw = FileWatch::new_with_maps(&map_handle, &rb_handle)
-                .context("failed to create filewatch")?;
+            let fw = FileWatch::new_with_full_maps(
+                &map_handle,
+                &rb_handle,
+                cgroup_filter_ref,
+                cgroup_filter_enabled,
+            )
+            .context("failed to create filewatch")?;
             Some(fw)
         } else {
             log::info!("FileWatch probe disabled");
@@ -100,8 +160,13 @@ impl Probes {
         };
 
         // Create filewrite - it reuses both the traced_processes map and ring buffer (always enabled)
-        let filewrite = FileWriteProbe::new_with_maps(&map_handle, &rb_handle)
-            .context("failed to create filewrite")?;
+        let filewrite = FileWriteProbe::new_with_full_maps(
+            &map_handle,
+            &rb_handle,
+            cgroup_filter_ref,
+            cgroup_filter_enabled,
+        )
+        .context("failed to create filewrite")?;
 
         // Optionally create udpdns - it reuses traced_processes map and ring buffer
         // Skips already-traced processes to avoid redundant discovery events
@@ -339,6 +404,24 @@ impl Probes {
     /// Get a handle to the traced_processes map
     pub fn traced_processes_handle(&self) -> Result<MapHandle> {
         self.proctrace.traced_processes_handle()
+    }
+
+    /// Add a cgroup inode id to the shared cgroup_filter map at runtime.
+    ///
+    /// Has no observable effect unless probes were created with
+    /// `cgroup_filter_enabled = true`; in that case, only events from
+    /// processes whose cgroup id is registered here will be emitted by
+    /// proctrace / filewatch / filewrite. sslsniff, udpdns, and procmon are
+    /// unaffected.
+    pub fn add_traced_cgroup(&mut self, cgroup_id: u64) -> Result<()> {
+        self.proctrace.add_traced_cgroup(cgroup_id)
+            .context("failed to add traced cgroup")
+    }
+
+    /// Remove a cgroup inode id from the shared cgroup_filter map at runtime.
+    pub fn remove_traced_cgroup(&mut self, cgroup_id: u64) -> Result<()> {
+        self.proctrace.remove_traced_cgroup(cgroup_id)
+            .context("failed to remove traced cgroup")
     }
 }
 

@@ -9,6 +9,7 @@
 #include <bpf/bpf_tracing.h>
 #include "procmon.h"
 #define NO_TRACED_PROCESSES_MAP
+#define NO_CGROUP_FILTER
 #include "common.h"
 
 // Tracepoint for execve exit - captures process execution after it completes

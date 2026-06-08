@@ -118,5 +118,30 @@ static __always_inline u32 is_pid_traced(u32 host_pid)
 }
 #endif
 
+/* ========== cgroup filter ==========
+ *
+ * Optional cgroup-level filter shared across all probes that include common.h.
+ * When `filter_cgroup_enabled` is false (default), the cgroup filter logic in
+ * each probe short-circuits to true and behavior is identical to before.
+ * When enabled, only cgroups registered in the cgroup_filter map pass.
+ *
+ * Probes that act as full-system audit (e.g. procmon) should define
+ * NO_CGROUP_FILTER before including common.h to opt out entirely.
+ */
+#ifndef NO_CGROUP_FILTER
+#ifndef MAX_CGROUP_FILTER_ENTRIES
+#define MAX_CGROUP_FILTER_ENTRIES 512
+#endif
+
+const volatile bool filter_cgroup_enabled = false;
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_CGROUP_FILTER_ENTRIES);
+    __type(key, u64);    /* cgroup inode id from get_cgroup_id_compat() */
+    __type(value, u8);   /* 1 = tracked */
+} cgroup_filter SEC(".maps");
+#endif
 
 #endif

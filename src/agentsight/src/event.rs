@@ -142,6 +142,7 @@ mod tests {
             write_size: 10,
             comm: "writer".to_string(),
             filename: "test.jsonl".to_string(),
+            cgroup_id: 0,
             buf: b"content".to_vec(),
         }
     }
@@ -155,6 +156,7 @@ mod tests {
             flags: 0,
             comm: "watcher".to_string(),
             filename: "data.jsonl".to_string(),
+            cgroup_id: 0,
         }
     }
 
