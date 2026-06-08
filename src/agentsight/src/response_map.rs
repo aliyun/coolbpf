@@ -229,6 +229,7 @@ mod tests {
             write_size: 0,
             comm: "agent".to_string(),
             filename: "550e8400-e29b-41d4-a716-446655440000.jsonl".to_string(),
+            cgroup_id: 0,
             buf: br#"{"responseId":"chatcmpl-abc123","content":"hello"}
 {"responseId":"chatcmpl-def456","content":"world"}
 "#
@@ -259,6 +260,7 @@ mod tests {
             write_size: 0,
             comm: "node".to_string(),
             filename: "a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl".to_string(),
+            cgroup_id: 0,
             buf: br#"{"type":"system","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"event.name":"api_response","response_id":"chatcmpl-f2748a8e-85d0-9058-b28f-c70e6f5fd590","model":"qwen-plus"}}}
 "#
             .to_vec(),
@@ -301,6 +303,7 @@ mod tests {
             write_size: 0,
             comm: "claude".to_string(),
             filename: "002b93c6-fbc3-4c66-9a8e-4a157715c049.jsonl".to_string(),
+            cgroup_id: 0,
             buf: br#"{"message":{"model":"glm-5.1","id":"msg_72b84528-120a-4857-8c20-a3d1747c062b","role":"assistant","content":[]},"type":"assistant","sessionId":"002b93c6-fbc3-4c66-9a8e-4a157715c049"}
 "#
             .to_vec(),

@@ -35,6 +35,7 @@ pub struct FileWatchEvent {
     pub flags: i32,
     pub comm: String,
     pub filename: String,
+    pub cgroup_id: u64,
 }
 
 impl FileWatchEvent {
@@ -72,6 +73,7 @@ impl FileWatchEvent {
             flags: raw.flags,
             comm,
             filename,
+            cgroup_id: raw.cgroup_id,
         })
     }
 }
@@ -90,11 +92,28 @@ impl FileWatch {
     /// * `traced_processes` - External MapHandle for process filtering
     /// * `rb` - External ring buffer MapHandle
     pub fn new_with_maps(traced_processes: &MapHandle, rb: &MapHandle) -> Result<Self> {
+        Self::new_with_full_maps(traced_processes, rb, None, false)
+    }
+
+    /// Create a new FileWatch with optional cgroup_filter map sharing.
+    pub fn new_with_full_maps(
+        traced_processes: &MapHandle,
+        rb: &MapHandle,
+        cgroup_filter: Option<&MapHandle>,
+        cgroup_filter_enabled: bool,
+    ) -> Result<Self> {
         let mut builder = FilewatchSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open filewatch BPF object")?;
+
+        // Mirror the cgroup-filter rodata flag.
+        open_skel.rodata_mut().filter_cgroup_enabled = cgroup_filter_enabled;
+
+        // Detect cgroup v2 and pass to BPF via rodata.
+        open_skel.rodata_mut().cgroup_v2_mode =
+            std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
 
         // Reuse external traced_processes map
         open_skel
@@ -109,6 +128,15 @@ impl FileWatch {
             .rb()
             .reuse_fd(rb.as_fd())
             .context("failed to reuse external rb map for filewatch")?;
+
+        // Reuse external cgroup_filter map (if provided)
+        if let Some(map) = cgroup_filter {
+            open_skel
+                .maps_mut()
+                .cgroup_filter()
+                .reuse_fd(map.as_fd())
+                .context("failed to reuse external cgroup_filter map for filewatch")?;
+        }
 
         let skel = open_skel.load().context("failed to load filewatch BPF object")?;
 

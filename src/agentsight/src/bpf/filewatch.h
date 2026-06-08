@@ -28,6 +28,7 @@ struct filewatch_event {
     s32 flags;                       // openat flags (O_RDONLY, O_WRONLY, etc.)
     char comm[TASK_COMM_LEN];
     char filename[MAX_FILENAME_LEN]; // captured file path
+    u64 cgroup_id;                   // unified cgroup inode from get_cgroup_id_compat()
 };
 
 #endif /* __FILEWATCH_H */

@@ -35,6 +35,7 @@ pub struct FileWriteEvent {
     pub write_size: u32,
     pub comm: String,
     pub filename: String,
+    pub cgroup_id: u64,
     pub buf: Vec<u8>,
 }
 
@@ -78,6 +79,7 @@ impl FileWriteEvent {
             write_size: raw.write_size,
             comm,
             filename,
+            cgroup_id: raw.cgroup_id,
             buf,
         })
     }
@@ -97,11 +99,28 @@ impl FileWrite {
     /// * `traced_processes` - External MapHandle for process filtering
     /// * `rb` - External ring buffer MapHandle
     pub fn new_with_maps(traced_processes: &MapHandle, rb: &MapHandle) -> Result<Self> {
+        Self::new_with_full_maps(traced_processes, rb, None, false)
+    }
+
+    /// Create a new FileWrite with optional cgroup_filter map sharing.
+    pub fn new_with_full_maps(
+        traced_processes: &MapHandle,
+        rb: &MapHandle,
+        cgroup_filter: Option<&MapHandle>,
+        cgroup_filter_enabled: bool,
+    ) -> Result<Self> {
         let mut builder = FilewriteSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open filewrite BPF object")?;
+
+        // Cgroup filter flag
+        open_skel.rodata_mut().filter_cgroup_enabled = cgroup_filter_enabled;
+
+        // Detect cgroup v2 and pass to BPF via rodata.
+        open_skel.rodata_mut().cgroup_v2_mode =
+            std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
 
         // Reuse external traced_processes map
         open_skel
@@ -116,6 +135,15 @@ impl FileWrite {
             .rb()
             .reuse_fd(rb.as_fd())
             .context("failed to reuse external rb map for filewrite")?;
+
+        // Reuse external cgroup_filter map (if provided)
+        if let Some(map) = cgroup_filter {
+            open_skel
+                .maps_mut()
+                .cgroup_filter()
+                .reuse_fd(map.as_fd())
+                .context("failed to reuse external cgroup_filter map for filewrite")?;
+        }
 
         let skel = open_skel.load().context("failed to load filewrite BPF object")?;
 

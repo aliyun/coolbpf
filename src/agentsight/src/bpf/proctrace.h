@@ -44,6 +44,7 @@ struct proc_event_header {
     u32 event_type;         // enum proctrace_event_type
     u32 data_len;           // Length of variable data following this header
     char comm[TASK_COMM_LEN];
+    u64 cgroup_id;          // unified cgroup inode from get_cgroup_id_compat()
 };
 
 // Exec event specific data (variable length, follows header)
@@ -85,6 +86,7 @@ struct proc_event_t {
     char filename[ARGSIZE]; // Executable path from execve
     char args_buf[TOTAL_MAX_ARGS * ARGSIZE]; // Argv strings packed end-to-end
     u8  buf[MAX_BUF_SIZE];  // stdout data or other payload
+    u64 cgroup_id;          // unified cgroup inode from get_cgroup_id_compat()
 };
 
 #endif /* __PROCTRACE_H */

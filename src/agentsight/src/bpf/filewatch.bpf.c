@@ -1,3 +1,11 @@
+/*
+ * @Descripttion: 
+ * @version: 
+ * @Author: Jietao Xiao
+ * @Date: 2026-06-08 10:48:08
+ * @LastEditors: Jietao Xiao
+ * @LastEditTime: 2026-06-08 11:52:29
+ */
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 // Copyright (c) 2025 AgentSight Project
 //
@@ -9,6 +17,7 @@
 #include <bpf/bpf_tracing.h>
 #include "filewatch.h"
 #include "common.h"
+#include "cgroup_helper.h"
 
 // Tracepoint for openat - captures file open events
 // Filters for .jsonl suffix at BPF layer to minimize user-space overhead
@@ -22,6 +31,12 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     u32 ns_pid = is_pid_traced(pid);
     if (!ns_pid)
         return 0;
+    u64 cg_id = get_cgroup_id_compat();
+#ifndef NO_CGROUP_FILTER
+    if (filter_cgroup_enabled &&
+        !bpf_map_lookup_elem(&cgroup_filter, &cg_id))
+        return 0;
+#endif
 
     // Reserve space in ring buffer
     struct filewatch_event *event = bpf_ringbuf_reserve(&rb, sizeof(*event), 0);
@@ -30,17 +45,24 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
 
     // Read filename from user-space
     const char *filename_ptr = (const char *)ctx->args[1];
-    int len = bpf_probe_read_user_str(event->filename, MAX_FILENAME_LEN, filename_ptr);
-
-    // len includes null terminator; need at least 7 chars: x.jsonl\0
-    if (len < 8) {
+    /* Use long like the helper's return type; narrow checks in two steps so the
+     * verifier proves len >= 0 before filename[off + k] pointer arithmetic.
+     */
+    long len = bpf_probe_read_user_str(event->filename, MAX_FILENAME_LEN, filename_ptr);
+    if (len < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+    /* len includes null terminator; need at least 8 chars ('x'.jsonl\0) */
+    if (len < 8 || len > MAX_FILENAME_LEN) {
         bpf_ringbuf_discard(event, 0);
         return 0;
     }
 
-    // Check .jsonl suffix (len includes null terminator, so last char is at len-2)
-    // suffix starts at offset len-7: '.', 'j', 's', 'o', 'n', 'l', '\0'
-    int off = len - 7;
+    /* Check .jsonl suffix (len includes null terminator, so last char is at len-2)
+     * suffix starts at offset len-7: '.', 'j', 's', 'o', 'n', 'l', '\0'
+     */
+    long off = len - 7;
     if (event->filename[off]     != '.' ||
         event->filename[off + 1] != 'j' ||
         event->filename[off + 2] != 's' ||
@@ -59,6 +81,7 @@ int trace_openat_enter(struct trace_event_raw_sys_enter *ctx)
     event->uid = bpf_get_current_uid_gid();
     event->flags = (s32)ctx->args[2];
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    event->cgroup_id = cg_id;
 
     bpf_ringbuf_submit(event, 0);
     return 0;

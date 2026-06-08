@@ -30,6 +30,7 @@ struct filewrite_event {
     u32 buf_size;                       // actual bytes copied (min(count, MAX_FILEWRITE_BUF))
     char comm[TASK_COMM_LEN];           // process name (16 bytes)
     char filename[MAX_FILENAME_LEN];    // basename from dentry (256 bytes)
+    u64 cgroup_id;                      // cgroup inode from get_cgroup_id_compat()
     u8  buf[MAX_FILEWRITE_BUF];         // write content (up to 16KB)
 };
 
