@@ -20,6 +20,19 @@ const SYSTEM_SKILLS_DIR: &str = "/usr/share/anolisa/skills";
 /// Used to trigger filesystem-based skill discovery.
 const COSH_AGENT_PATTERNS: &[&str] = &["cosh", "copilot", "copilot-shell"];
 
+/// Agent name patterns that indicate a QwenCode agent.
+/// QwenCode does not embed `<available_skills>` in system prompts and has no
+/// dedicated `skill` tool, so download discovery uses filesystem scanning of
+/// per-user home directories.
+const QWENCODE_AGENT_PATTERNS: &[&str] = &["qwencode", "qwen-code", "qwen_code", "qwen"];
+
+/// Relative paths under each user home where QwenCode skills live.
+const QWEN_USER_SKILL_RELDIRS: &[&str] = &[".qwen/skills", ".qwenpaw/skill_pool"];
+
+/// Home directory roots scanned for QwenCode user-installed skills.
+/// `/root` is the root user's home; entries in `/home` are individual users.
+const QWEN_HOME_ROOTS: &[&str] = &["/root", "/home"];
+
 // ─── Regex patterns (compiled once) ─────────────────────────────────────────
 
 static RE_AVAILABLE_SKILLS: LazyLock<Regex> =
@@ -58,22 +71,28 @@ pub fn extract_skill_downloads(event: &TraceEventDetail) -> Vec<SkillDownloadRec
         .unwrap_or_default();
     let timestamp_ns = event.start_timestamp_ns;
 
-    // For cosh agents, read from filesystem directly
-    let is_cosh = event
-        .agent_name
+    // For cosh / QwenCode agents, read from filesystem directly
+    let agent_lower = event.agent_name.as_deref().map(|name| name.to_lowercase());
+
+    let is_cosh = agent_lower
         .as_deref()
-        .map(|name| {
-            let lower = name.to_lowercase();
-            COSH_AGENT_PATTERNS
-                .iter()
-                .any(|&pat| lower.contains(pat))
-        })
+        .map(|lower| COSH_AGENT_PATTERNS.iter().any(|&pat| lower.contains(pat)))
         .unwrap_or(false);
 
-    // Also check process_name as fallback (cosh runs as "node")
-    // but prefer agent_name match first
+    let is_qwencode = !is_cosh
+        && agent_lower
+            .as_deref()
+            .map(|lower| {
+                QWENCODE_AGENT_PATTERNS
+                    .iter()
+                    .any(|&pat| lower.contains(pat))
+            })
+            .unwrap_or(false);
+
     let skill_names = if is_cosh {
         scan_system_skills_dir()
+    } else if is_qwencode {
+        scan_qwen_user_skills_dirs()
     } else {
         let system_text = extract_system_text(event);
         if system_text.is_empty() {
@@ -288,6 +307,60 @@ fn scan_skills_dir_recursive(dir: &str, depth: u32) -> Vec<String> {
             names.extend(scan_skills_dir_recursive(&sub, depth - 1));
         }
     }
+    names
+}
+
+/// Scan QwenCode skill directories under all known user homes.
+///
+/// QwenCode stores skills per-user, e.g.
+/// `/root/.qwen/skills/<name>/SKILL.md` or
+/// `/home/<user>/.qwenpaw/skill_pool/<name>/SKILL.md`. AgentSight runs as root
+/// and can read all user homes.
+fn scan_qwen_user_skills_dirs() -> Vec<String> {
+    scan_qwen_user_skills_dirs_in(QWEN_HOME_ROOTS)
+}
+
+/// Testable variant: scan home roots provided by caller.
+///
+/// Each entry in `home_roots` is treated as either:
+/// - a literal home directory if it directly contains one of the relative
+///   skill paths (e.g. `/root` containing `/root/.qwen/skills`), or
+/// - a parent directory of multiple homes (e.g. `/home` containing
+///   `/home/alice`, `/home/bob`).
+/// Both interpretations are tried; missing paths are silently skipped.
+fn scan_qwen_user_skills_dirs_in(home_roots: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut homes_to_scan: Vec<std::path::PathBuf> = Vec::new();
+
+    for root in home_roots {
+        let root_path = std::path::Path::new(root);
+        // Treat root itself as a home (e.g. /root)
+        homes_to_scan.push(root_path.to_path_buf());
+        // Also treat its immediate children as homes (e.g. /home/alice)
+        if let Ok(entries) = std::fs::read_dir(root_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    homes_to_scan.push(p);
+                }
+            }
+        }
+    }
+
+    for home in &homes_to_scan {
+        for reldir in QWEN_USER_SKILL_RELDIRS {
+            let target = home.join(reldir);
+            if !target.is_dir() {
+                continue;
+            }
+            for found in scan_skills_dir_recursive(&target.to_string_lossy(), 2) {
+                if !names.contains(&found) {
+                    names.push(found);
+                }
+            }
+        }
+    }
+
     names
 }
 
@@ -531,7 +604,7 @@ Some text after"#;
             total_tokens: 0,
             input_messages: None,
             output_messages: None,
-            system_instructions: None,  // cosh doesn't put skills in system message
+            system_instructions: None, // cosh doesn't put skills in system message
             agent_name: Some("Cosh".into()),
             process_name: Some("node".into()),
             pid: Some(9999),
@@ -569,13 +642,29 @@ Some text after"#;
         let tmp = std::env::temp_dir().join(format!("agentsight_test_{}", std::process::id()));
         // Create: tmp/ai/install-copaw/SKILL.md  and  tmp/network/SKILL.md
         fs::create_dir_all(tmp.join("ai").join("install-copaw")).unwrap();
-        fs::write(tmp.join("ai").join("install-copaw").join("SKILL.md"), "---\nname: install-copaw\n---").unwrap();
+        fs::write(
+            tmp.join("ai").join("install-copaw").join("SKILL.md"),
+            "---\nname: install-copaw\n---",
+        )
+        .unwrap();
         fs::create_dir_all(tmp.join("network")).unwrap();
-        fs::write(tmp.join("network").join("SKILL.md"), "---\nname: network\n---").unwrap();
+        fs::write(
+            tmp.join("network").join("SKILL.md"),
+            "---\nname: network\n---",
+        )
+        .unwrap();
 
         let names = scan_skills_dir_recursive(&tmp.to_string_lossy(), 2);
-        assert!(names.contains(&"install-copaw".to_string()), "expected install-copaw in {:?}", names);
-        assert!(names.contains(&"network".to_string()), "expected network in {:?}", names);
+        assert!(
+            names.contains(&"install-copaw".to_string()),
+            "expected install-copaw in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"network".to_string()),
+            "expected network in {:?}",
+            names
+        );
 
         // cleanup
         let _ = fs::remove_dir_all(&tmp);
@@ -633,5 +722,122 @@ Some text after"#;
         assert_eq!(loads[0].skill_name, "install-copaw");
         assert_eq!(loads[0].function_name, "Read");
         assert_eq!(loads[0].agent_name, Some("Cosh".into()));
+    }
+
+    /// Verify QwenCode agent_name patterns are detected (case-insensitive substring).
+    #[test]
+    fn test_qwencode_agent_pattern_detected() {
+        for name in ["QwenCode", "qwen-code", "qwen_code", "qwencode-cli", "Qwen"] {
+            let lower = name.to_lowercase();
+            let matched = QWENCODE_AGENT_PATTERNS.iter().any(|&p| lower.contains(p));
+            assert!(matched, "expected '{}' to match QwenCode pattern", name);
+        }
+    }
+
+    /// Verify scan_qwen_user_skills_dirs_in returns empty Vec on missing roots.
+    #[test]
+    fn test_scan_qwen_user_skills_dirs_in_missing_roots() {
+        let result = scan_qwen_user_skills_dirs_in(&[
+            "/definitely/does/not/exist",
+            "/another/missing/place",
+        ]);
+        assert!(result.is_empty());
+    }
+
+    /// Verify scan_qwen_user_skills_dirs_in finds skills under both .qwen/skills
+    /// and .qwenpaw/skill_pool, in both literal-home and parent-of-homes layouts.
+    #[test]
+    fn test_scan_qwen_user_skills_dirs_in_tempdir() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "agentsight_qwen_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        // Layout 1: literal home (mimics /root)
+        let root_home = base.join("root");
+        let qwen_skill_a = root_home.join(".qwen").join("skills").join("skill-a");
+        let qwenpaw_b = root_home
+            .join(".qwenpaw")
+            .join("skill_pool")
+            .join("skill-b");
+        fs::create_dir_all(&qwen_skill_a).unwrap();
+        fs::write(qwen_skill_a.join("SKILL.md"), "---\nname: skill-a\n---").unwrap();
+        fs::create_dir_all(&qwenpaw_b).unwrap();
+        fs::write(qwenpaw_b.join("SKILL.md"), "---\nname: skill-b\n---").unwrap();
+
+        // Layout 2: parent-of-homes (mimics /home/<user>)
+        let homes_root = base.join("home");
+        let user_alice = homes_root.join("alice");
+        let qwen_skill_c = user_alice.join(".qwen").join("skills").join("skill-c");
+        fs::create_dir_all(&qwen_skill_c).unwrap();
+        fs::write(qwen_skill_c.join("SKILL.md"), "---\nname: skill-c\n---").unwrap();
+
+        let root_str = root_home.to_string_lossy().into_owned();
+        let homes_str = homes_root.to_string_lossy().into_owned();
+        let names = scan_qwen_user_skills_dirs_in(&[&root_str, &homes_str]);
+
+        assert!(
+            names.contains(&"skill-a".to_string()),
+            "missing skill-a in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"skill-b".to_string()),
+            "missing skill-b in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"skill-c".to_string()),
+            "missing skill-c in {:?}",
+            names
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Verify QwenCode branch in extract_skill_downloads uses filesystem scan and
+    /// session_id / timestamp_ns are propagated from the event.
+    /// (Real QWEN_HOME_ROOTS may or may not have skills in test env; we only
+    /// assert the records' session_id/timestamp invariants.)
+    #[test]
+    fn test_extract_skill_downloads_qwencode_branch_no_panic() {
+        let event = TraceEventDetail {
+            id: 20,
+            call_id: Some("c-qwen-1".into()),
+            start_timestamp_ns: 9000,
+            end_timestamp_ns: Some(10_000),
+            model: Some("qwen3-max".into()),
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_messages: None,
+            output_messages: None,
+            // QwenCode does not embed available_skills in system prompt.
+            system_instructions: None,
+            agent_name: Some("QwenCode".into()),
+            process_name: Some("node".into()),
+            pid: Some(8888),
+            user_query: None,
+            event_json: None,
+            trace_id: Some("qwen-session-1".into()),
+            conversation_id: Some("qwen-conv-1".into()),
+            cache_read_tokens: None,
+            status: Some("complete".into()),
+            interruption_type: None,
+        };
+
+        // Must not panic regardless of whether real QWEN_HOME_ROOTS exist.
+        let downloads = extract_skill_downloads(&event);
+        for d in &downloads {
+            assert_eq!(d.session_id, "qwen-session-1");
+            assert_eq!(d.timestamp_ns, 9000);
+            assert!(!d.skill_name.is_empty());
+        }
     }
 }
