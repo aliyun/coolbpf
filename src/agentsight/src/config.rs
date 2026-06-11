@@ -424,8 +424,19 @@ pub struct AgentsightConfig {
     pub purge_interval: u64,
 
     // --- Trace Control ---
-    /// Whether trace collection is enabled (false = service alive but idle)
-    /// JSON field name: "traceEnabled"
+    /// Controls whether SLS-uploaded `LLMCall` records carry conversation
+    /// content fields (`gen_ai.input.messages`, `gen_ai.output.messages`,
+    /// `gen_ai.system_instructions`).
+    ///
+    /// * `false` (default): only token / model / provider / timing metadata
+    ///   is uploaded; conversation bodies are dropped at the SLS layer.
+    /// * `true`: full conversation content is uploaded.
+    ///
+    /// This flag does **not** stop the agent itself; eBPF probes, local
+    /// SQLite persistence and token metering keep running regardless.
+    /// Local SQLite always stores full content; this only controls SLS.
+    ///
+    /// JSON field name: `traceEnabled`.
     pub trace_enabled: bool,
 
     // --- Probe Configuration ---
@@ -517,7 +528,10 @@ impl Default for AgentsightConfig {
             purge_interval: DEFAULT_PURGE_INTERVAL,
 
             // Trace control defaults
-            trace_enabled: true,
+            // Default = false (privacy-safe): SLS uploads carry only token /
+            // model / timing metadata. Conversation content is opt-in via
+            // explicit `"traceEnabled": true` in the config file.
+            trace_enabled: false,
 
             // Probe defaults
             target_uid: None,
@@ -775,12 +789,19 @@ impl AgentsightConfig {
     }
 }
 
-/// Parse `runtime.sls_logtail_path` from a JSON config string.
+/// Parse `runtime.sls_logtail_path` from a JSON config string (tri-state).
 ///
-/// Returns `Some(path)` if the runtime section has a non-empty `sls_logtail_path`;
-/// returns `None` otherwise or on parse failure. Used by the config watcher to
-/// detect runtime changes without a full config reload.
-pub fn parse_runtime_sls_path(json: &str) -> Option<String> {
+/// Returns:
+/// * `None`               — field is absent or JSON parse failed (no signal).
+/// * `Some(None)`         — field is present but empty / whitespace-only
+///                          → **deactivation** signal (pause SLS uploads).
+/// * `Some(Some(path))`   — field is present and non-empty (after trim)
+///                          → **activation / re-activation** signal.
+///
+/// Used by the config watcher to react to runtime hot-reload changes
+/// (delete `/etc/anolisa/enable_token_collector` → empty string → pause;
+/// re-create the trigger with a non-empty `SLS_LOG_PATH` → resume).
+pub fn parse_runtime_sls_path(json: &str) -> Option<Option<String>> {
     #[derive(serde::Deserialize)]
     struct Partial {
         #[serde(default)]
@@ -791,9 +812,9 @@ pub fn parse_runtime_sls_path(json: &str) -> Option<String> {
     let path = rt.sls_logtail_path?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        None
+        Some(None)
     } else {
-        Some(trimmed.to_string())
+        Some(Some(trimmed.to_string()))
     }
 }
 
@@ -974,6 +995,37 @@ mod tests {
         assert!(!config.cgroup_filter_enabled);
         assert_eq!(config.retention_days, 30);
         assert_eq!(config.purge_interval, 1000);
+    }
+
+    /// `traceEnabled` is **off** by default (privacy-safe). Conversation
+    /// content fields are dropped from SLS uploads unless the config file
+    /// explicitly sets `"traceEnabled": true`. This test locks that default
+    /// so it cannot silently regress.
+    #[test]
+    fn test_trace_enabled_default_is_false() {
+        let config = AgentsightConfig::new();
+        assert!(
+            !config.trace_enabled,
+            "AgentsightConfig::new() must default trace_enabled=false to keep \
+             SLS uploads free of conversation content unless explicitly opted in"
+        );
+    }
+
+    /// Loading a config that omits `traceEnabled` must NOT flip the default
+    /// (the field is `Option<bool>` and only overrides when `Some`).
+    #[test]
+    fn test_load_from_json_missing_trace_enabled_keeps_default_false() {
+        let mut config = AgentsightConfig::new();
+        config.load_from_json("{}").unwrap();
+        assert!(!config.trace_enabled);
+    }
+
+    /// Explicit `"traceEnabled": true` opts into uploading conversation content.
+    #[test]
+    fn test_load_from_json_explicit_trace_enabled_true() {
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(r#"{"traceEnabled": true}"#).unwrap();
+        assert!(config.trace_enabled);
     }
 
     #[test]
@@ -1158,25 +1210,28 @@ mod tests {
         let json = r#"{"runtime": {"sls_logtail_path": "/var/log/sls/agentsight.log"}}"#;
         assert_eq!(
             parse_runtime_sls_path(json),
-            Some("/var/log/sls/agentsight.log".to_string())
+            Some(Some("/var/log/sls/agentsight.log".to_string()))
         );
     }
 
     #[test]
     fn test_parse_runtime_sls_path_empty() {
         let json = r#"{"runtime": {"sls_logtail_path": ""}}"#;
-        assert_eq!(parse_runtime_sls_path(json), None);
+        // Empty string is now a deactivation signal (Some(None)), not absence (None).
+        assert_eq!(parse_runtime_sls_path(json), Some(None));
     }
 
     #[test]
     fn test_parse_runtime_sls_path_whitespace_only() {
         let json = r#"{"runtime": {"sls_logtail_path": "   "}}"#;
-        assert_eq!(parse_runtime_sls_path(json), None);
+        // Whitespace-only is treated as empty → deactivation signal.
+        assert_eq!(parse_runtime_sls_path(json), Some(None));
     }
 
     #[test]
     fn test_parse_runtime_sls_path_missing_section() {
         let json = r#"{"cmdline": {"allow": []}}"#;
+        // Field absent → no signal at all.
         assert_eq!(parse_runtime_sls_path(json), None);
     }
 
