@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.1
+
+- Add real-time agent_crash detection in trace mode.
+- Add OOM crash detection.
+- Add cgroup-level event filtering with v1/v2 compatibility.
+- Support QwenCode skill discovery via per-user home scanning.
+- Support SLS Logtail activation reversible via dynamic path.
+- Support bridging ilogtail `SLS_LOG_PATH` into config via token-collector switch.
+- Default `traceEnabled` to false to drop conversation content from SLS by default.
+- Drop `gen_ai.system_instructions` from SLS uploads when `traceEnabled=false`.
+- Refactor session_id and conversation_id derivation from response_id instead of message content.
+- Fix CJK deadloop detection, `kill()` error check, and SIGKILL escalation.
+- Fix SQLite read/write contention via VACUUM optimization.
+- Fix rpm-build.sh agentsight build failures.
+- Fix allow log path re-init on repeated new+start.
+
 ## 0.6.0
 
 - Add deadloop detection and auto-kill mechanism for runaway agent processes.
