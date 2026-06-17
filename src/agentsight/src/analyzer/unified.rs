@@ -445,7 +445,7 @@ impl Analyzer {
             return results;
         }
 
-        // 2. Token analysis - extract from SSE events
+        // 2. Token analysis - extract from SSE events or non-streaming JSON body
         let mut token_result = match result {
             AggregatedResult::SseComplete(pair) => {
                 let pid = pair.request.source_event.pid;
@@ -456,6 +456,20 @@ impl Analyzer {
                 let pid = response.pid();
                 let comm = response.parsed.source_event.comm_str();
                 self.extract_token_from_sse(&response.sse_events, pid, &comm)
+            }
+            AggregatedResult::HttpComplete(pair) => {
+                let pid = pair.request.source_event.pid;
+                let comm = pair.request.source_event.comm_str();
+                self.extract_token_from_json_body(
+                    pair.response.parsed.json_body().as_ref(),
+                    pid,
+                    &comm,
+                )
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let pid = stream.pid();
+                let comm = stream.comm();
+                self.extract_token_from_json_body(stream.response_json_body().as_ref(), pid, &comm)
             }
             _ => None,
         };
@@ -609,22 +623,72 @@ impl Analyzer {
         Some(record)
     }
 
+    fn extract_token_from_json_body(
+        &self,
+        json: Option<&serde_json::Value>,
+        pid: u32,
+        comm: &str,
+    ) -> Option<TokenRecord> {
+        let json = json?;
+        let usage = self.token.parse_json(json)?;
+        let record = TokenRecord::new(
+            pid,
+            comm.to_string(),
+            usage.provider.to_string(),
+            usage.input_tokens,
+            usage.output_tokens,
+        )
+        .with_model(usage.model.unwrap_or_default())
+        .with_cache_tokens(
+            usage.cache_creation_input_tokens.unwrap_or(0),
+            usage.cache_read_input_tokens.unwrap_or(0),
+        );
+        if record.total_tokens() > 0 {
+            Some(record)
+        } else {
+            None
+        }
+    }
+
     /// Manually compute token counts using get_global_tokenizer
     ///
     /// This method is called when token extraction from SSE events fails.
     /// It uses the global tokenizer to compute input and output tokens
     /// from the request messages and response content.
     fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
-        // Extract context from the aggregated result (only SseComplete has request info)
-        let (pid, comm, request_json, sse_events, path) = match result {
-            AggregatedResult::SseComplete(pair) => (
-                pair.request.source_event.pid,
-                pair.request.source_event.comm_str(),
-                pair.request.json_body(),
-                &pair.response.sse_events,
-                pair.request.path.as_str(),
-            ),
-            // ResponseOnly doesn't have request info, cannot compute tokens
+        // Extract context from the aggregated result.
+        // Both SseComplete and Http2StreamComplete are unified into
+        // Vec<serde_json::Value> chunks to avoid a method-local enum
+        // (which cbindgen 0.27 cannot parse).
+        let (pid, comm, request_json, sse_chunks, path) = match result {
+            AggregatedResult::SseComplete(pair) => {
+                let chunks: Vec<serde_json::Value> = pair
+                    .response
+                    .sse_events
+                    .iter()
+                    .filter_map(|e| e.json_body())
+                    .collect();
+                (
+                    pair.request.source_event.pid,
+                    pair.request.source_event.comm_str(),
+                    pair.request.json_body(),
+                    chunks,
+                    pair.request.path.clone(),
+                )
+            }
+            AggregatedResult::Http2StreamComplete(stream) => {
+                let chunks = stream
+                    .response_sse_json_array()
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                (
+                    stream.pid(),
+                    stream.comm(),
+                    stream.request_json_body(),
+                    chunks,
+                    stream.path(),
+                )
+            }
             _ => return None,
         };
 
@@ -718,23 +782,21 @@ impl Analyzer {
             let mut all_reasoning = String::new();
             let mut all_tool_calls = Vec::new();
 
-            for event in sse_events {
-                if let Some(chunk) = event.json_body() {
-                    if let Some((content, reasoning, tool_calls)) =
-                        extract_response_content(Some(&chunk))
-                    {
-                        if !content.is_empty() {
-                            all_content.push_str(&content);
+            for chunk in &sse_chunks {
+                if let Some((content, reasoning, tool_calls)) =
+                    extract_response_content(Some(chunk))
+                {
+                    if !content.is_empty() {
+                        all_content.push_str(&content);
+                    }
+                    if let Some(r) = reasoning {
+                        if !r.is_empty() {
+                            all_reasoning.push_str(&r);
                         }
-                        if let Some(r) = reasoning {
-                            if !r.is_empty() {
-                                all_reasoning.push_str(&r);
-                            }
-                        }
-                        for tc in tool_calls {
-                            if !tc.is_empty() {
-                                all_tool_calls.push(tc);
-                            }
+                    }
+                    for tc in tool_calls {
+                        if !tc.is_empty() {
+                            all_tool_calls.push(tc);
                         }
                     }
                 }
@@ -1127,5 +1189,181 @@ impl Analyzer {
             output_by_type: response_count.by_type,
             output_per_block: response_count.per_block,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_token_from_json_body_openai() {
+        let analyzer = Analyzer::new();
+        let json = serde_json::json!({
+            "id": "chatcmpl-test",
+            "model": "gpt-4o",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        let result = analyzer.extract_token_from_json_body(Some(&json), 1234, "test");
+        assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(record.input_tokens, 10);
+        assert_eq!(record.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_extract_token_from_json_body_none() {
+        let analyzer = Analyzer::new();
+        assert!(
+            analyzer
+                .extract_token_from_json_body(None, 1234, "test")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_token_from_json_body_no_usage() {
+        let analyzer = Analyzer::new();
+        let json = serde_json::json!({"id": "test", "choices": []});
+        assert!(
+            analyzer
+                .extract_token_from_json_body(Some(&json), 1234, "test")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_analyze_http2_stream_complete_extracts_tokens() {
+        use crate::aggregator::{Http2Stream, StreamId};
+        use crate::parser::{Http2FrameType, ParsedHttp2Frame};
+        use crate::probes::sslsniff::SslEvent;
+        use std::rc::Rc;
+
+        let analyzer = Analyzer::new();
+
+        let response_body = serde_json::json!({
+            "id": "chatcmpl-h2-test",
+            "model": "gpt-4o",
+            "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}
+        });
+        let body_bytes = serde_json::to_vec(&response_body).unwrap();
+
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1_000_000_000,
+            delta_ns: 0,
+            pid: 2000,
+            tid: 2000,
+            uid: 0,
+            len: body_bytes.len() as u32,
+            rw: 0,
+            comm: "python3".to_string(),
+            buf: body_bytes.clone(),
+            is_handshake: false,
+            ssl_ptr: 0x5000,
+        });
+
+        let request_body =
+            b"{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let req_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 900_000_000,
+            delta_ns: 0,
+            pid: 2000,
+            tid: 2000,
+            uid: 0,
+            len: request_body.len() as u32,
+            rw: 1,
+            comm: "python3".to_string(),
+            buf: request_body.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x5000,
+        });
+
+        use crate::aggregator::ConnectionId;
+        let mut stream = Http2Stream::new(
+            StreamId {
+                connection_id: ConnectionId {
+                    pid: 2000,
+                    ssl_ptr: 0x5000,
+                },
+                stream_id: 1,
+            },
+            900_000_000,
+        );
+        stream.request_headers = Some(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Headers,
+            flags: 0x4,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: 0,
+            source_event: Rc::clone(&req_event),
+        });
+        stream.decoded_request_headers = Some(vec![
+            (":method".to_string(), "POST".to_string()),
+            (":path".to_string(), "/v1/chat/completions".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+        stream.request_data_frames.push(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0x1,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: request_body.len(),
+            source_event: req_event,
+        });
+        stream.response_headers = Some(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Headers,
+            flags: 0x4,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: 0,
+            source_event: Rc::clone(&ssl_event),
+        });
+        stream.decoded_response_headers = Some(vec![
+            (":status".to_string(), "200".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+        stream.response_data_frames.push(ParsedHttp2Frame {
+            frame_type: Http2FrameType::Data,
+            flags: 0x1,
+            stream_id: 1,
+            payload_offset: 0,
+            payload_len: body_bytes.len(),
+            source_event: ssl_event,
+        });
+        stream.request_complete = true;
+        stream.response_complete = true;
+        stream.end_timestamp_ns = 1_100_000_000;
+
+        let agg = AggregatedResult::Http2StreamComplete(stream);
+        let results = analyzer.analyze_aggregated(&agg);
+
+        let token_result = results
+            .iter()
+            .find(|r| matches!(r, AnalysisResult::Token(_)));
+        assert!(
+            token_result.is_some(),
+            "Http2StreamComplete with usage should produce a TokenRecord"
+        );
+        if let Some(AnalysisResult::Token(record)) = token_result {
+            assert_eq!(record.input_tokens, 20);
+            assert_eq!(record.output_tokens, 8);
+        }
+    }
+
+    #[test]
+    fn test_extract_token_from_json_body_zero_tokens() {
+        let analyzer = Analyzer::new();
+        let json = serde_json::json!({
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        });
+        assert!(
+            analyzer
+                .extract_token_from_json_body(Some(&json), 1234, "test")
+                .is_none()
+        );
     }
 }
