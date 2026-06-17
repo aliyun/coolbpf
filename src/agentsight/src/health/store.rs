@@ -27,6 +27,18 @@ pub enum AgentHealthState {
     Offline,
 }
 
+/// Role of an agent process in the process group
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// Service process with listening TCP ports (e.g. OpenClaw Gateway on 18789)
+    Gateway,
+    /// Client process without ports (e.g. TUI main process)
+    Client,
+    /// Worker sub-process forked from a Client (parent_pid is also same agent)
+    Worker,
+}
+
 /// Health status of a single agent process
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentHealthStatus {
@@ -46,6 +58,14 @@ pub struct AgentHealthStatus {
     /// 用于重启的完整命令行（exe + args），None 表示不支持重启
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_cmd: Option<Vec<String>>,
+    /// 进入 Offline 状态的时刻（Unix ms）。仅 Offline 项有值，用于 TTL 自动清理。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offline_since: Option<u64>,
+    /// 进程角色：Gateway（有端口）/ Client（无端口）/ Worker（子进程）
+    pub role: AgentRole,
+    /// 父进程 PID（用于折叠展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
 }
 
 /// Stores the latest health check results for all tracked agents
@@ -53,6 +73,12 @@ pub struct HealthStore {
     agents: HashMap<u32, AgentHealthStatus>,
     /// Unix timestamp in milliseconds of the last full scan
     pub last_scan_time: u64,
+}
+
+impl Default for HealthStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HealthStore {
@@ -78,10 +104,29 @@ impl HealthStore {
                 entry.last_check_time = now_ms();
                 entry.latency_ms = None;
                 entry.error_message = Some("进程已退出".to_string());
+                entry.offline_since = Some(now_ms());
                 newly_offline.push(entry.clone());
             }
         }
         newly_offline
+    }
+
+    /// 自动清理超过 TTL 的 Offline 条目（避免历史进程长期残留 UI）。
+    /// `ttl_ms`: Offline 状态保留时长，超过则从 store 移除。
+    /// 返回被移除的 PID 数量。
+    pub fn cleanup_stale_offline(&mut self, ttl_ms: u64) -> usize {
+        let now = now_ms();
+        let before = self.agents.len();
+        self.agents.retain(|_, entry| {
+            if entry.status != AgentHealthState::Offline {
+                return true;
+            }
+            match entry.offline_since {
+                Some(since) => now.saturating_sub(since) < ttl_ms,
+                None => true, // 兼容老数据：没有时间戳的暂不清理
+            }
+        });
+        before - self.agents.len()
     }
 
     /// Remove a specific PID (user-acknowledged deletion)

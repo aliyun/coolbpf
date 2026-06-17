@@ -12,7 +12,7 @@ use crate::event::Event;
 use crate::parser::http::{HttpParser, ParsedHttpMessage};
 use crate::parser::http2::Http2Parser;
 use crate::parser::proctrace::ProcTraceParser;
-use crate::parser::sse::{SseParser, ParsedSseEvent};
+use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::proctrace::VariableEvent;
 use crate::probes::sslsniff::SslEvent;
 use std::rc::Rc;
@@ -88,9 +88,9 @@ impl Parser {
             let buf = &ssl_event.buf[..buf_size];
             if buf == b"0\r\n\r\n" {
                 return ParseResult {
-                    messages: vec![ParsedMessage::SseEvent(
-                        ParsedSseEvent::new_done_marker(Rc::clone(&ssl_event))
-                    )],
+                    messages: vec![ParsedMessage::SseEvent(ParsedSseEvent::new_done_marker(
+                        Rc::clone(&ssl_event),
+                    ))],
                 };
             }
         }
@@ -109,6 +109,17 @@ impl Parser {
 
         // 4. Fallback: SSE data (read-direction only)
         let sse_events = self.sse_parser.parse(ssl_event.clone());
+        if sse_events.is_empty() {
+            // No SSE events could be parsed from this read-direction chunk.
+            // This happens when the SSE stream is compressed (gzip/zstd/br):
+            // the bytes are not text and yield no `data:`/`event:` lines.
+            // Forward the raw event so the aggregator — which knows the
+            // connection's Content-Encoding — can buffer and later decompress
+            // it. For non-SSE connections the aggregator simply ignores it.
+            return ParseResult {
+                messages: vec![ParsedMessage::RawData(ssl_event)],
+            };
+        }
         let messages = sse_events
             .into_iter()
             .map(ParsedMessage::SseEvent)
@@ -137,10 +148,18 @@ impl Parser {
         match event {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
-            Event::ProcMon(_) => ParseResult { messages: Vec::new() },
-            Event::FileWatch(_) => ParseResult { messages: Vec::new() },
-            Event::FileWrite(_) => ParseResult { messages: Vec::new() },
-            Event::UdpDns(_) => ParseResult { messages: Vec::new() },
+            Event::ProcMon(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::FileWatch(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::FileWrite(_) => ParseResult {
+                messages: Vec::new(),
+            },
+            Event::UdpDns(_) => ParseResult {
+                messages: Vec::new(),
+            },
         }
     }
 

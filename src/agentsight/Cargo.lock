@@ -208,7 +208,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsight"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -217,6 +217,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bindgen",
+ "brotli",
  "byteorder",
  "cached",
  "capstone",
@@ -269,6 +270,8 @@ dependencies = [
  "typed-arena",
  "uname",
  "ureq 2.12.1",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]

@@ -7,9 +7,9 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use crate::analyzer::HttpRecord;
 use crate::config::AgentsightConfig;
@@ -27,6 +27,12 @@ use crate::unified::AgentSight;
 pub(crate) enum FfiEvent {
     Https(HttpRecord),
     Llm(LLMCall),
+}
+
+/// Commands sent from the FFI caller thread to the background pipeline thread.
+enum ProbeCommand {
+    AddCgroup(u64),
+    RemoveCgroup(u64),
 }
 
 /// Wraps an `mpsc::Sender<FfiEvent>` together with the `eventfd` descriptor
@@ -174,6 +180,9 @@ pub struct AgentsightHandle {
     thread: Option<std::thread::JoinHandle<()>>,
     /// Config stored until `agentsight_start()` moves it into the thread.
     config: Option<AgentsightConfig>,
+    /// Channel for runtime probe control commands (e.g. dynamic cgroup filter updates).
+    /// Created in `agentsight_start()`; the receiver end is moved into the background thread.
+    probe_cmd_tx: Option<mpsc::Sender<ProbeCommand>>,
 }
 
 // ===========================================================================
@@ -256,18 +265,29 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
 
 fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let response_id = call.metadata.get("response_id").map(|s| safe_cstring(s));
-    let conversation_id = call.metadata.get("conversation_id").map(|s| safe_cstring(s));
+    let conversation_id = call
+        .metadata
+        .get("conversation_id")
+        .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
     let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
 
     // Construct request_url from metadata
-    let server_addr = call.metadata.get("server.address").cloned().unwrap_or_default();
-    let server_port = call.metadata.get("server.port").cloned().unwrap_or_default();
+    let server_addr = call
+        .metadata
+        .get("server.address")
+        .cloned()
+        .unwrap_or_default();
+    let server_port = call
+        .metadata
+        .get("server.port")
+        .cloned()
+        .unwrap_or_default();
     let path = call.metadata.get("path").cloned().unwrap_or_default();
     let url = if server_port.is_empty() {
-        format!("https://{}{}", server_addr, path)
+        format!("https://{server_addr}{path}")
     } else {
-        format!("https://{}:{}{}", server_addr, server_port, path)
+        format!("https://{server_addr}:{server_port}{path}")
     };
     let request_url = safe_cstring(&url);
 
@@ -279,10 +299,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("status_code")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let is_sse: bool = call
-        .metadata
-        .get("is_sse")
-        .map_or(false, |s| s == "true");
+    let is_sse: bool = call.metadata.get("is_sse").is_some_and(|s| s == "true");
 
     let finish_reason = call
         .response
@@ -304,20 +321,16 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
             None => (false, 0, 0, 0, 0, 0),
         };
 
-    let req_messages_json =
-        serde_json::to_string(&call.request.messages).unwrap_or_default();
-    let resp_messages_json =
-        serde_json::to_string(&call.response.messages).unwrap_or_default();
+    let req_messages_json = serde_json::to_string(&call.request.messages).unwrap_or_default();
+    let resp_messages_json = serde_json::to_string(&call.response.messages).unwrap_or_default();
     let req_messages = safe_cstring(&req_messages_json);
     let resp_messages = safe_cstring(&resp_messages_json);
 
     // Incremental (latest-round) input messages: the same per-round increment
     // stored in SQLite (`genai_events.input_messages`). Drops system messages
     // and keeps everything from the last `user` message onward.
-    let input_delta =
-        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
-    let input_message_delta_json =
-        serde_json::to_string(&input_delta).unwrap_or_default();
+    let input_delta = crate::genai::semantic::latest_round_input_messages(&call.request.messages);
+    let input_message_delta_json = serde_json::to_string(&input_delta).unwrap_or_default();
     let input_message_delta = safe_cstring(&input_message_delta_json);
 
     let tools_json = call
@@ -414,9 +427,7 @@ unsafe fn dispatch_event(
 /// The pointer is valid until the next API call on the same thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn agentsight_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr())
-    })
+    LAST_ERROR.with(|e| e.borrow().as_ref().map_or(ptr::null(), |s| s.as_ptr()))
 }
 
 // ---- Configuration ----
@@ -428,6 +439,11 @@ pub extern "C" fn agentsight_config_new() -> *mut AgentsightConfigHandle {
 }
 
 /// Set the verbose flag (0 = off, 1 = on).
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_set_verbose(
     cfg: *mut AgentsightConfigHandle,
@@ -439,6 +455,11 @@ pub unsafe extern "C" fn agentsight_config_set_verbose(
 }
 
 /// Set the log file path (NULL → stderr).
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_set_log_path(
     cfg: *mut AgentsightConfigHandle,
@@ -460,6 +481,11 @@ pub unsafe extern "C" fn agentsight_config_set_log_path(
 /// * `rule` — NULL-terminated array of C strings (glob patterns).
 /// * `agent_name` — agent name for allow=1; ignored for allow=0 (may be NULL).
 /// * `allow` — 1 = whitelist (attach), 0 = blacklist (don't attach).
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_add_cmdline_rule(
     cfg: *mut AgentsightConfigHandle,
@@ -506,6 +532,11 @@ pub unsafe extern "C" fn agentsight_config_add_cmdline_rule(
 
 /// Add an HTTPS rule (domain glob pattern for SSL/TLS probe attachment).
 /// * `rule` — domain glob pattern (e.g. "*.openai.com").
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_add_https(
     cfg: *mut AgentsightConfigHandle,
@@ -530,6 +561,11 @@ pub unsafe extern "C" fn agentsight_config_add_https(
 ///   - `"model-svc.default.svc"` → domain (DNS-resolved at runtime)
 ///
 /// Returns 0 on success, <0 on error (call `agentsight_last_error()`).
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_add_http(
     cfg: *mut AgentsightConfigHandle,
@@ -554,6 +590,11 @@ pub unsafe extern "C" fn agentsight_config_add_http(
 
 /// Load configuration from a JSON string. Rules are appended to existing ones.
 /// Returns 0 on success, <0 on parse error.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_load_config(
     cfg: *mut AgentsightConfigHandle,
@@ -575,6 +616,11 @@ pub unsafe extern "C" fn agentsight_config_load_config(
 }
 
 /// Free the configuration handle.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_config_free(cfg: *mut AgentsightConfigHandle) {
     if !cfg.is_null() {
@@ -586,10 +632,13 @@ pub unsafe extern "C" fn agentsight_config_free(cfg: *mut AgentsightConfigHandle
 
 /// Create a new AgentSight handle.  Does NOT start the pipeline yet.
 /// Returns NULL on failure (call `agentsight_last_error()` for details).
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn agentsight_new(
-    cfg: *mut AgentsightConfigHandle,
-) -> *mut AgentsightHandle {
+pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mut AgentsightHandle {
     // Create eventfd
     let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     if efd < 0 {
@@ -613,10 +662,16 @@ pub unsafe extern "C" fn agentsight_new(
         running,
         thread: None,
         config: Some(config),
+        probe_cmd_tx: None,
     }))
 }
 
 /// Start the background pipeline thread.  Returns 0 on success, <0 on error.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
     if h.is_null() {
@@ -645,8 +700,12 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
     running.store(true, Ordering::SeqCst);
     let eventfd = handle.eventfd;
 
+    // Probe control channel: caller thread sends commands; background thread drains them.
+    let (probe_cmd_tx, probe_cmd_rx) = mpsc::channel::<ProbeCommand>();
+    handle.probe_cmd_tx = Some(probe_cmd_tx);
+
     handle.thread = Some(std::thread::spawn(move || {
-        ffi_background_thread(config, tx, eventfd, running);
+        ffi_background_thread(config, tx, eventfd, running, probe_cmd_rx);
     }));
 
     0
@@ -661,13 +720,14 @@ fn ffi_background_thread(
     tx: mpsc::Sender<FfiEvent>,
     eventfd: i32,
     running: Arc<AtomicBool>,
+    probe_cmd_rx: mpsc::Receiver<ProbeCommand>,
 ) {
     let sender = FfiEventSender { tx, eventfd };
 
     let mut sight = match AgentSight::new(config) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("agentsight background thread: AgentSight::new failed: {}", e);
+            log::error!("agentsight background thread: AgentSight::new failed: {e}");
             return;
         }
     };
@@ -677,6 +737,25 @@ fn ffi_background_thread(
 
     // Event loop controlled by the external running flag.
     while running.load(Ordering::SeqCst) {
+        // Drain probe commands (non-blocking)
+        while let Ok(cmd) = probe_cmd_rx.try_recv() {
+            match cmd {
+                ProbeCommand::AddCgroup(id) => {
+                    if let Err(e) = sight.add_traced_cgroup(id) {
+                        log::warn!("add_traced_cgroup({}) failed: {}", id, e);
+                    } else {
+                        log::info!("Added cgroup_id {} to BPF filter", id);
+                    }
+                }
+                ProbeCommand::RemoveCgroup(id) => {
+                    if let Err(e) = sight.remove_traced_cgroup(id) {
+                        log::warn!("remove_traced_cgroup({}) failed: {}", id, e);
+                    } else {
+                        log::info!("Removed cgroup_id {} from BPF filter", id);
+                    }
+                }
+            }
+        }
         if sight.try_process().is_none() {
             // No event available — flush any timed-out pending GenAI events
             sight.flush_expired_pending_genai();
@@ -689,6 +768,11 @@ fn ffi_background_thread(
 }
 
 /// Stop the background pipeline thread.  Returns 0 on success.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_stop(h: *mut AgentsightHandle) -> c_int {
     if h.is_null() {
@@ -707,6 +791,11 @@ pub unsafe extern "C" fn agentsight_stop(h: *mut AgentsightHandle) -> c_int {
 
 /// Free the handle.  Must be called after `agentsight_stop()`.
 /// The eventfd is closed automatically via the `Drop` impl.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_free(h: *mut AgentsightHandle) {
     if !h.is_null() {
@@ -743,6 +832,11 @@ pub extern "C" fn agentsight_version() -> *const c_char {
 /// Return the eventfd descriptor.  The caller may register it with
 /// epoll/select.  Returns <0 if eventfd is not supported.
 /// The fd is managed internally — the caller must NOT close it.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_get_eventfd(h: *mut AgentsightHandle) -> c_int {
     if h.is_null() {
@@ -759,6 +853,11 @@ pub unsafe extern "C" fn agentsight_get_eventfd(h: *mut AgentsightHandle) -> c_i
 /// * `flags`: 0 = non-blocking, `AGENTSIGHT_READ_BLOCK` = block until ≥1 event.
 ///
 /// Returns the number of events processed, 0 if none, <0 on error.
+///
+/// # Safety
+///
+/// `cfg` / `h` must be a valid pointer returned by the corresponding
+/// `_new()` function, or null (which is handled gracefully).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_read(
     h: *mut AgentsightHandle,
@@ -797,6 +896,65 @@ pub unsafe extern "C" fn agentsight_read(
     count
 }
 
+// ---- Dynamic cgroup filter control ----
+
+/// Add a cgroup inode ID to the BPF cgroup_filter map at runtime.
+/// Returns 0 on success, -1 on failure (check agentsight_last_error()).
+/// Requires agentsight_start() to have been called first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_add_traced_cgroup(
+    h: *mut AgentsightHandle,
+    cgroup_id: u64,
+) -> c_int {
+    if h.is_null() {
+        set_last_error("null handle");
+        return -1;
+    }
+    let handle = unsafe { &*h };
+    match &handle.probe_cmd_tx {
+        Some(tx) => {
+            if tx.send(ProbeCommand::AddCgroup(cgroup_id)).is_err() {
+                set_last_error("probe command channel closed");
+                -1
+            } else {
+                0
+            }
+        }
+        None => {
+            set_last_error("handle not started or probe_cmd_tx not initialized");
+            -1
+        }
+    }
+}
+
+/// Remove a cgroup inode ID from the BPF cgroup_filter map at runtime.
+/// Returns 0 on success, -1 on failure (check agentsight_last_error()).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_remove_traced_cgroup(
+    h: *mut AgentsightHandle,
+    cgroup_id: u64,
+) -> c_int {
+    if h.is_null() {
+        set_last_error("null handle");
+        return -1;
+    }
+    let handle = unsafe { &*h };
+    match &handle.probe_cmd_tx {
+        Some(tx) => {
+            if tx.send(ProbeCommand::RemoveCgroup(cgroup_id)).is_err() {
+                set_last_error("probe command channel closed");
+                -1
+            } else {
+                0
+            }
+        }
+        None => {
+            set_last_error("handle not started or probe_cmd_tx not initialized");
+            -1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,7 +971,7 @@ mod tests {
         let mut cfg = new_cfg();
         let json = r#"{"verbose":1,"log_path":"/tmp/test.log"}"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.log_path, Some("/tmp/test.log".to_string()));
     }
 
@@ -833,7 +991,10 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert!(cfg.cmdline_rules[0].allow);
-        assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Claude Code".to_string()));
+        assert_eq!(
+            cfg.cmdline_rules[0].agent_name,
+            Some("Claude Code".to_string())
+        );
         assert!(!cfg.cmdline_rules[1].allow);
         assert!(cfg.cmdline_rules[1].agent_name.is_none());
     }
@@ -898,6 +1059,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_copy_process_name_truncate() {
         let name = "very_long_process_name_that_exceeds_16";
         let buf = copy_process_name(name);
@@ -922,7 +1084,7 @@ mod tests {
         assert!(cfg.load_from_json(json).is_ok());
         assert_eq!(cfg.cmdline_rules.len(), 2);
         assert_eq!(cfg.cmdline_rules[0].agent_name, Some("Hermes".to_string()));
-        assert_eq!(cfg.cmdline_rules[0].allow, true);
+        assert!(cfg.cmdline_rules[0].allow);
         assert_eq!(cfg.cmdline_rules[1].agent_name, Some("Cosh".to_string()));
     }
 
@@ -952,7 +1114,7 @@ mod tests {
             "https": [{"rule": ["*.openai.com"]}]
         }"#;
         assert!(cfg.load_from_json(json).is_ok());
-        assert_eq!(cfg.verbose, true);
+        assert!(cfg.verbose);
         assert_eq!(cfg.cmdline_rules.len(), 1);
         assert_eq!(cfg.https_rules.len(), 1);
     }

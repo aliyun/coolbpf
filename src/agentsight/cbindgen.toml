@@ -76,6 +76,10 @@ int agentsight_read(AgentsightHandle *h,
                     agentsight_https_callback_fn http_cb, void *http_ud,
                     agentsight_llm_callback_fn   llm_cb,  void *llm_ud,
                     int flags);
+
+/* ---- Dynamic cgroup tracing ---- */
+int agentsight_add_traced_cgroup(AgentsightHandle *h, uint64_t cgroup_id);
+int agentsight_remove_traced_cgroup(AgentsightHandle *h, uint64_t cgroup_id);
 """
 
 [parse]

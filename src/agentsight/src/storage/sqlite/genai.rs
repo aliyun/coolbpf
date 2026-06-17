@@ -493,9 +493,8 @@ impl GenAISqliteStore {
                     }
                 };
                 let input_messages: Option<String> = {
-                    let latest = crate::genai::semantic::latest_round_input_messages(
-                        &call.request.messages,
-                    );
+                    let latest =
+                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
                     if latest.is_empty() {
                         None
                     } else {
@@ -664,10 +663,7 @@ impl GenAISqliteStore {
             params![cutoff_ns],
         )?;
         if updated > 0 {
-            log::info!(
-                "[GenAI] Marked {} stale pending call(s) as interrupted",
-                updated
-            );
+            log::info!("[GenAI] Marked {updated} stale pending call(s) as interrupted");
         }
         Ok(updated)
     }
@@ -805,11 +801,7 @@ impl GenAISqliteStore {
             params![itype, pid],
         )?;
         if updated > 0 {
-            log::info!(
-                "Marked {} pending call(s) as interrupted for pid={}",
-                updated,
-                pid
-            );
+            log::info!("Marked {updated} pending call(s) as interrupted for pid={pid}");
         }
         Ok(updated)
     }
@@ -837,8 +829,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND status = 'pending'
-               AND pid IN ({})",
-            placeholders
+               AND pid IN ({placeholders})"
         );
         let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = pids
             .iter()
@@ -1080,7 +1071,8 @@ impl GenAISqliteStore {
     pub fn get_tool_call_turn_indices(
         &self,
         session_ids: &[&str],
-    ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>> {
+    ) -> Result<std::collections::HashMap<String, ToolCallTurnInfo>, Box<dyn std::error::Error>>
+    {
         let conn = self.conn.lock().unwrap();
         let mut result = std::collections::HashMap::new();
 
@@ -1102,19 +1094,25 @@ impl GenAISqliteStore {
 
                 // Also map the call_id itself (for backward compat with
                 // stats.db that may still store call_id as tool_use_id)
-                result.insert(call_id.clone(), ToolCallTurnInfo {
-                    turn_index: turn,
-                    session_id: session_id.clone(),
-                });
+                result.insert(
+                    call_id.clone(),
+                    ToolCallTurnInfo {
+                        turn_index: turn,
+                        session_id: session_id.clone(),
+                    },
+                );
 
                 // Expand each tool_call_id in the JSON array
                 if let Some(json_str) = tool_call_ids_json {
                     if let Ok(ids) = serde_json::from_str::<Vec<String>>(&json_str) {
                         for tc_id in ids {
-                            result.insert(tc_id, ToolCallTurnInfo {
-                                turn_index: turn,
-                                session_id: session_id.clone(),
-                            });
+                            result.insert(
+                                tc_id,
+                                ToolCallTurnInfo {
+                                    turn_index: turn,
+                                    session_id: session_id.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -1138,8 +1136,7 @@ impl GenAISqliteStore {
 
         // When both start_ns and end_ns are present, rewrite with BETWEEN
         let sql = if start_ns.is_some() && end_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1154,10 +1151,9 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns BETWEEN ?2 AND ?3
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else if start_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1172,10 +1168,9 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns >= ?2
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else if end_ns.is_some() {
-            format!(
-                "SELECT conversation_id,
+            "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -1190,7 +1185,7 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns <= ?2
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
-            )
+                .to_string()
         } else {
             String::from(
                 "SELECT conversation_id,
@@ -1206,7 +1201,7 @@ impl GenAISqliteStore {
                    AND session_id = ?1
                    AND conversation_id IS NOT NULL
                  GROUP BY conversation_id
-                 ORDER BY start_ns DESC"
+                 ORDER BY start_ns DESC",
             )
         };
 
@@ -1695,9 +1690,7 @@ impl GenAISqliteStore {
                         if err.extended_code == 13 && retries < MAX_PRUNE_RETRIES {
                             retries += 1;
                             log::warn!(
-                                "Database full (SQLITE_FULL), pruning old records (attempt {}/{})",
-                                retries,
-                                MAX_PRUNE_RETRIES
+                                "Database full (SQLITE_FULL), pruning old records (attempt {retries}/{MAX_PRUNE_RETRIES})"
                             );
                             self.prune_old_records()?;
                             self.checkpoint()?;
@@ -1757,9 +1750,8 @@ impl GenAISqliteStore {
 
                 // Extract input messages (incremental: latest round only)
                 let input_messages: Option<String> = {
-                    let latest = crate::genai::semantic::latest_round_input_messages(
-                        &call.request.messages,
-                    );
+                    let latest =
+                        crate::genai::semantic::latest_round_input_messages(&call.request.messages);
                     if latest.is_empty() {
                         None
                     } else {
@@ -2031,7 +2023,7 @@ impl GenAISqliteStore {
             params![delete_count],
         )?;
 
-        log::info!("Deleted {} records", deleted);
+        log::info!("Deleted {deleted} records");
 
         Ok(())
     }
@@ -2078,7 +2070,7 @@ impl GenAIExporter for GenAISqliteStore {
     fn export(&self, events: &[GenAISemanticEvent]) {
         for event in events {
             if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event to SQLite: {}", e);
+                log::warn!("Failed to store GenAI event to SQLite: {e}");
             }
         }
     }
@@ -2189,7 +2181,11 @@ mod tests {
         // session_id IS NOT NULL) won't find it — use a raw count instead.
         let conn = store.conn.lock().unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM genai_events WHERE call_id = 'test-call-001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM genai_events WHERE call_id = 'test-call-001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "store_event must persist the row");
 
@@ -2267,7 +2263,7 @@ mod tests {
     #[test]
     fn test_parse_output_multiple_text_parts() {
         let json = r#"[{"role":"assistant","parts":[{"type":"text","content":"Part 1"},{"type":"text","content":"Part 2"}]}]"#;
-        let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
+        let (_tools, text) = parse_output_messages_for_loop_detection(Some(json));
         assert_eq!(text, "Part 1 Part 2");
     }
 
@@ -2275,8 +2271,7 @@ mod tests {
     fn test_parse_output_text_truncated_at_200_chars() {
         let long_content = "a".repeat(300);
         let json = format!(
-            r#"[{{"role":"assistant","parts":[{{"type":"text","content":"{}"}}]}}]"#,
-            long_content
+            r#"[{{"role":"assistant","parts":[{{"type":"text","content":"{long_content}"}}]}}]"#
         );
         let (_, text) = parse_output_messages_for_loop_detection(Some(&json));
         assert_eq!(text.len(), 200);

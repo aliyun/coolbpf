@@ -42,12 +42,12 @@ pub fn recover_oom_events(
 ) {
     // Use the latest OOM event timestamp already in DB as the dedup cutoff
     let since_ns = interruption_store.latest_oom_event_ns();
-    log::info!("OOM recovery: scanning dmesg, since_ns={}", since_ns);
+    log::info!("OOM recovery: scanning dmesg, since_ns={since_ns}");
 
     let events = match parse_dmesg_oom_events() {
         Ok(e) => e,
         Err(err) => {
-            log::warn!("OOM recovery: failed to read dmesg: {}", err);
+            log::warn!("OOM recovery: failed to read dmesg: {err}");
             return;
         }
     };
@@ -168,7 +168,7 @@ fn parse_dmesg_oom_events() -> Result<Vec<OomKillEvent>, Box<dyn std::error::Err
     let output = Command::new("dmesg")
         .arg("-T")
         .output()
-        .map_err(|e| format!("failed to run dmesg: {}", e))?;
+        .map_err(|e| format!("failed to run dmesg: {e}"))?;
 
     if !output.status.success() {
         // Some systems require privileges; fall back to dmesg without -T
@@ -287,10 +287,7 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 ///
 /// Returns `true` if the PID appears in a "Killed process" OOM line in dmesg.
 pub fn was_pid_oom_killed(pid: i32) -> bool {
-    let output = match Command::new("dmesg")
-        .arg("-T")
-        .output()
-    {
+    let output = match Command::new("dmesg").arg("-T").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => {
             // Fallback without -T
