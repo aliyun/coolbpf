@@ -24,7 +24,6 @@ use super::procmon::{ProcMon, ProcMonEvent};
 use super::proctrace::{ProcEventHeader, ProcTrace, VariableEvent};
 use super::shared_maps::SharedMaps;
 use super::sslsniff::SslSniff;
-use super::sslsniff::bpf::probe_SSL_data_t as RawSslEvent;
 use super::tcpsniff::TcpSniff;
 use super::udpdns::{RawUdpDnsEvent, UdpDns};
 use crate::config::TcpTarget;
@@ -248,7 +247,6 @@ impl Probes {
     /// events as unified Event type to the channel.
     pub fn run(&self) -> Result<ProbesPoller> {
         let proc_min_sz = mem::size_of::<ProcEventHeader>();
-        let ssl_event_size = mem::size_of::<RawSslEvent>();
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();
         let filewrite_event_size = mem::size_of::<RawFileWriteEvent>();
@@ -277,15 +275,9 @@ impl Probes {
                         }
                     }
                     EVENT_SOURCE_SSL => {
-                        // SSL event - convert raw BPF data to user-space SslEvent
-                        if data.len() >= ssl_event_size {
-                            // SAFETY: BPF guarantees layout and alignment
-                            let raw = unsafe { &*(data.as_ptr() as *const RawSslEvent) };
-                            let ssl_event = crate::probes::sslsniff::SslEvent::from_bpf(raw);
-                            Some(Event::Ssl(ssl_event))
-                        } else {
-                            None
-                        }
+                        // SSL records are variable-length (tiered reservation):
+                        // decode by header prefix + buf_size, not a full-struct cast.
+                        crate::probes::sslsniff::SslEvent::from_bytes(data).map(Event::Ssl)
                     }
                     EVENT_SOURCE_PROCMON => {
                         // Process monitor event
