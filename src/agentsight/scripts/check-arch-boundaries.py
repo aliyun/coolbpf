@@ -25,6 +25,7 @@ LAYER_MAP = {
     "genai":       5,   # L5: Semantic
     "atif":        5,   # L5: Semantic
     "storage":     6,   # L6: Persist
+    "agent_sec":   7,   # L7: Serve
     "server":      7,   # L7: Serve
     "health":      7,   # L7: Serve
     "bin":         8,   # L8: Entry
@@ -44,7 +45,8 @@ ALLOWED_DEPS = {
     "genai":       {"analyzer", "aggregator", "parser"},
     "atif":        {"genai", "storage"},
     "storage":     {"analyzer", "genai"},
-    "server":      {"storage", "health", "atif"},
+    "server":      {"storage", "health", "atif", "agent_sec"},
+    "agent_sec":   set(),
     "health":      {"storage"},
     "unified":     "*",
     "config":      set(),
