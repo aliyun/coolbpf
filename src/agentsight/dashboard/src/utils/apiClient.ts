@@ -537,6 +537,388 @@ export async function restartAgentHealth(pid: number): Promise<{ ok: boolean; ne
   return body;
 }
 
+// ─── Security Observability API ──────────────────────────────────────────────
+
+export type SecurityApiState =
+  | 'daemon_reachable'
+  | 'disabled'
+  | 'daemon_unreachable'
+  | 'store_unavailable'
+  | 'schema_mismatch'
+  | 'ok'
+  | 'empty'
+  | 'partial'
+  | 'found'
+  | 'not_found'
+  | 'redacted'
+  | 'truncated'
+  | 'no_correlation'
+  | 'low_confidence'
+  | 'bad_request'
+  | 'payload_too_large'
+  | 'timeout'
+  | 'busy'
+  | 'unavailable'
+  | 'error'
+  | string;
+
+export interface SecurityApiResponse<T> {
+  state: SecurityApiState;
+  data: T;
+  message?: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface SecurityRestError {
+  code: string;
+  message: string;
+  retryable?: boolean;
+  daemon_code?: string;
+}
+
+export class SecurityApiClientError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly daemonCode?: string;
+
+  constructor(status: number, error: SecurityRestError) {
+    super(error.message);
+    this.name = 'SecurityApiClientError';
+    this.status = status;
+    this.code = error.code;
+    this.retryable = Boolean(error.retryable);
+    this.daemonCode = error.daemon_code;
+  }
+}
+
+export interface SecurityStoreStatus {
+  path?: string;
+  exists?: boolean;
+  ready?: boolean;
+  schema_version?: number | null;
+  expected_schema_version?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SecurityStatusData {
+  daemon?: Record<string, unknown>;
+  stores?: {
+    available?: boolean;
+    security_db?: SecurityStoreStatus;
+    observability_db?: SecurityStoreStatus;
+    [key: string]: unknown;
+  };
+  socket_path?: string | null;
+  [key: string]: unknown;
+}
+
+export interface SecurityEventRecord {
+  event_id: string;
+  event_type?: string | null;
+  category?: string | null;
+  result?: string | null;
+  timestamp?: string | null;
+  timestamp_ns?: number | null;
+  timestamp_epoch?: number | null;
+  trace_id?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  call_id?: string | null;
+  tool_call_id?: string | null;
+  pid?: number | null;
+  uid?: number | null;
+  details?: unknown;
+  details_preview?: unknown;
+  truncated?: boolean;
+  redacted?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SecuritySummary {
+  total: number;
+  by_category: Record<string, number>;
+  by_event_type: Record<string, number>;
+  by_result: Record<string, number>;
+  affected_sessions: number;
+  affected_runs: number;
+  latest_events: SecurityEventRecord[];
+  [key: string]: unknown;
+}
+
+export interface SecurityCountItem {
+  value: string | number;
+  count: number;
+}
+
+export interface SecurityCountByResponse {
+  group_by: string;
+  items: SecurityCountItem[];
+  [key: string]: unknown;
+}
+
+export interface SecurityPaginated<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  next_offset?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SecurityEventDetailResponse {
+  found: boolean;
+  event: SecurityEventRecord | null;
+  [key: string]: unknown;
+}
+
+export interface SecuritySessionSummary {
+  session_id: string;
+  first_seen_ns?: number | null;
+  last_seen_ns?: number | null;
+  first_seen_epoch?: number | null;
+  last_seen_epoch?: number | null;
+  turn_count?: number | null;
+  observability_event_count?: number | null;
+  security_event_count?: number | null;
+  highest_severity?: string | null;
+  [key: string]: unknown;
+}
+
+export interface SecurityRunSummary {
+  run_id: string;
+  started_at_ns?: number | null;
+  ended_at_ns?: number | null;
+  started_at_epoch?: number | null;
+  ended_at_epoch?: number | null;
+  user_input_preview?: string | null;
+  observability_event_count?: number | null;
+  security_event_count?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SecurityTimelineObservabilityContext {
+  id?: string | number;
+  hook?: string | null;
+  timestamp?: string | null;
+  timestamp_epoch?: number | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  call_id?: string | null;
+  tool_call_id?: string | null;
+  metadata?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SecurityTimelineItem {
+  kind: string;
+  id?: string | number;
+  hook?: string | null;
+  timestamp?: string | null;
+  timestamp_ns?: number | null;
+  timestamp_epoch?: number | null;
+  title?: string | null;
+  summary?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  call_id?: string | null;
+  tool_call_id?: string | null;
+  metadata?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  observability_event_id?: string | number | null;
+  observability?: SecurityTimelineObservabilityContext;
+  event?: SecurityEventRecord;
+  match?: Record<string, unknown>;
+  correlated_security_events?: unknown[];
+  truncated?: boolean;
+  redacted?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SecurityTimelineResponse {
+  session_id: string;
+  run_id: string;
+  items: SecurityTimelineItem[];
+  [key: string]: unknown;
+}
+
+export type SecurityQueryValue = string | number | boolean | null | undefined;
+
+export interface SecurityTimeRangeParams {
+  start_ns?: number;
+  end_ns?: number;
+}
+
+export interface SecurityEventListParams extends SecurityTimeRangeParams {
+  event_type?: string;
+  category?: string;
+  result?: string;
+  verdict?: string;
+  trace_id?: string;
+  session_id?: string;
+  run_id?: string;
+  call_id?: string;
+  tool_call_id?: string;
+  limit?: number;
+  offset?: number;
+  include_details?: boolean;
+}
+
+export interface SecuritySessionListParams extends SecurityTimeRangeParams {
+  workspace_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SecurityRunListParams extends SecurityTimeRangeParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface SecurityCountByParams extends SecurityTimeRangeParams {
+  event_type?: string;
+  category?: string;
+  result?: string;
+  verdict?: string;
+  trace_id?: string;
+  session_id?: string;
+  run_id?: string;
+  call_id?: string;
+  tool_call_id?: string;
+}
+
+export interface SecurityTimelineParams extends SecurityTimeRangeParams {
+  session_id: string;
+  run_id: string;
+  limit?: number;
+  include_security?: boolean;
+}
+
+function buildQuery(params?: object): string {
+  if (!params) return '';
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params) as [string, SecurityQueryValue][]) {
+    if (value === undefined || value === null || value === '') continue;
+    query.set(key, String(value));
+  }
+  const qs = query.toString();
+  return qs ? `?${qs}` : '';
+}
+
+async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+  const res = await fetch(url);
+  const text = await res.text().catch(() => '');
+  let body: unknown = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+
+  if (body && typeof body === 'object' && 'state' in body) {
+    const envelope = body as Record<string, unknown>;
+    if (typeof envelope.state !== 'string' || !isObjectRecord(envelope.data)) {
+      throw new SecurityApiClientError(res.status, {
+        code: 'malformed_security_response',
+        message: 'Security API returned a malformed state response',
+        retryable: false,
+      });
+    }
+    return body as SecurityApiResponse<T>;
+  }
+
+  if (!res.ok) {
+    const errorBody = body && typeof body === 'object' && 'error' in body
+      ? (body as { error: SecurityRestError }).error
+      : {
+          code: 'security_api_error',
+          message: typeof body === 'string' && body ? body : res.statusText,
+          retryable: false,
+        };
+    throw new SecurityApiClientError(res.status, errorBody);
+  }
+
+  return {
+    state: 'ok',
+    data: body as T,
+    meta: { source: 'agentsight' },
+  };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export async function fetchSecurityStatus(): Promise<SecurityApiResponse<SecurityStatusData>> {
+  return securityFetch<SecurityStatusData>(`${API_BASE}/api/security/status`);
+}
+
+export async function fetchSecuritySummary(
+  params?: SecurityTimeRangeParams & { latest_limit?: number },
+): Promise<SecurityApiResponse<SecuritySummary>> {
+  return securityFetch<SecuritySummary>(
+    `${API_BASE}/api/security/summary${buildQuery(params)}`
+  );
+}
+
+export async function fetchSecurityEvents(
+  params?: SecurityEventListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>> {
+  return securityFetch<SecurityPaginated<SecurityEventRecord>>(
+    `${API_BASE}/api/security/events${buildQuery(params)}`
+  );
+}
+
+export async function fetchSecurityEvent(
+  eventId: string,
+): Promise<SecurityApiResponse<SecurityEventDetailResponse>> {
+  return securityFetch<SecurityEventDetailResponse>(
+    `${API_BASE}/api/security/events/${encodeURIComponent(eventId)}`
+  );
+}
+
+export async function fetchSecurityCountBy(
+  groupBy: string,
+  params?: SecurityCountByParams,
+): Promise<SecurityApiResponse<SecurityCountByResponse>> {
+  return securityFetch<SecurityCountByResponse>(
+    `${API_BASE}/api/security/events/count-by${buildQuery({ ...params, group_by: groupBy })}`
+  );
+}
+
+export async function fetchSecuritySessions(
+  params?: SecuritySessionListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>> {
+  return securityFetch<SecurityPaginated<SecuritySessionSummary>>(
+    `${API_BASE}/api/security/observability/sessions${buildQuery(params)}`
+  );
+}
+
+export async function fetchSecurityRuns(
+  sessionId: string,
+  params?: SecurityRunListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityRunSummary>>> {
+  return securityFetch<SecurityPaginated<SecurityRunSummary>>(
+    `${API_BASE}/api/security/observability/sessions/${encodeURIComponent(sessionId)}/runs${buildQuery(params)}`
+  );
+}
+
+export async function fetchSecurityTimeline(
+  params: SecurityTimelineParams,
+): Promise<SecurityApiResponse<SecurityTimelineResponse>> {
+  const { session_id, run_id, ...queryParams } = params;
+  return securityFetch<SecurityTimelineResponse>(
+    `${API_BASE}/api/security/observability/timeline${buildQuery({
+      ...queryParams,
+      session_id,
+      run_id,
+    })}`
+  );
+}
+
 // ─── Skill Metrics types ──────────────────────────────────────────────────────
 
 export interface SkillFirstSeen {

@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -13,11 +13,18 @@ vi.mock('../pages/TokenSavingsPage', () => ({
 vi.mock('../pages/AtifViewerPage', () => ({
   AtifViewerPage: () => <div data-testid="page-atif">AtifViewerPage</div>,
 }));
+vi.mock('../pages/SecurityObservabilityPage', () => ({
+  SecurityObservabilityPage: () => <div data-testid="page-security">SecurityObservabilityPage</div>,
+}));
 vi.mock('../components/AgentHealthSidebar', () => ({
   AgentHealthSidebar: () => <div data-testid="sidebar">Sidebar</div>,
 }));
 
 import App from '../App';
+
+afterEach(() => {
+  window.location.hash = '';
+});
 
 describe('App', () => {
   it('should render NavBar with brand', () => {
@@ -35,5 +42,11 @@ describe('App', () => {
   it('should render AgentHealthSidebar', () => {
     render(<App />);
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+  });
+
+  it('should render SecurityObservabilityPage on security path', () => {
+    window.location.hash = '#/security';
+    render(<App />);
+    expect(screen.getByTestId('page-security')).toBeInTheDocument();
   });
 });

@@ -6,6 +6,7 @@ import { ConversationList } from './pages/ConversationList';
 import { AtifViewerPage } from './pages/AtifViewerPage';
 import { TokenSavingsPage } from './pages/TokenSavingsPage';
 import { SkillMetricsPage } from './pages/SkillMetricsPage';
+import { SecurityObservabilityPage } from './pages/SecurityObservabilityPage';
 
 const App: React.FC = () => {
   return (
@@ -18,6 +19,7 @@ const App: React.FC = () => {
               <Route path="/" element={<ConversationList />} />
               <Route path="/savings" element={<TokenSavingsPage />} />
               <Route path="/skills" element={<SkillMetricsPage />} />
+              <Route path="/security" element={<SecurityObservabilityPage />} />
               <Route path="/atif" element={<AtifViewerPage />} />
             </Routes>
           </main>

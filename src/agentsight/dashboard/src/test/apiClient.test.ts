@@ -22,6 +22,14 @@ import {
   restartAgentHealth,
   INTERRUPTION_TYPE_CN,
   fetchSkillMetrics,
+  fetchSecurityStatus,
+  fetchSecuritySummary,
+  fetchSecurityEvents,
+  fetchSecurityEvent,
+  fetchSecurityCountBy,
+  fetchSecuritySessions,
+  fetchSecurityRuns,
+  fetchSecurityTimeline,
 } from '../utils/apiClient';
 
 // Mock global fetch
@@ -305,6 +313,104 @@ describe('apiClient', () => {
         json: () => Promise.resolve({ error: 'process not found' }),
       });
       await expect(restartAgentHealth(999)).rejects.toThrow('process not found');
+    });
+  });
+
+  describe('Security Observability APIs', () => {
+    it('fetchSecurityStatus returns state envelopes even on non-2xx status', async () => {
+      const body = {
+        state: 'daemon_unreachable',
+        data: { socket_path: '/tmp/agent-sec.sock' },
+        message: 'agent-sec daemon is unavailable',
+      };
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(body, 503));
+
+      const result = await fetchSecurityStatus();
+
+      expect(result).toEqual(body);
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/security/status');
+    });
+
+    it('rejects malformed security state envelopes', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'daemon_reachable' }))
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'ok', data: null }));
+
+      await expect(fetchSecurityStatus()).rejects.toMatchObject({
+        status: 200,
+        code: 'malformed_security_response',
+        retryable: false,
+      });
+      await expect(fetchSecuritySummary()).rejects.toMatchObject({
+        status: 200,
+        code: 'malformed_security_response',
+        retryable: false,
+      });
+    });
+
+    it('fetchSecurityEvents builds query params', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        state: 'ok',
+        data: { items: [], total: 0, limit: 25, offset: 0, next_offset: null },
+      }));
+
+      await fetchSecurityEvents({
+        start_ns: 100,
+        end_ns: 200,
+        category: 'code_scan',
+        limit: 25,
+        include_details: false,
+      });
+
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('/api/security/events');
+      expect(url).toContain('start_ns=100');
+      expect(url).toContain('end_ns=200');
+      expect(url).toContain('category=code_scan');
+      expect(url).toContain('include_details=false');
+    });
+
+    it('fetchSecuritySummary throws structured REST errors', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        error: { code: 'daemon_timeout', message: 'request timed out', retryable: true },
+      }, 504));
+
+      await expect(fetchSecuritySummary()).rejects.toMatchObject({
+        status: 504,
+        code: 'daemon_timeout',
+        retryable: true,
+      });
+    });
+
+    it('fetches detail, count, sessions, runs, and timeline endpoints', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'found', data: { found: true, event: null } }))
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'ok', data: { group_by: 'category', items: [] } }))
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'ok', data: { items: [], total: 0, limit: 100, offset: 0 } }))
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'ok', data: { items: [], total: 0, limit: 100, offset: 0 } }))
+        .mockResolvedValueOnce(mockJsonResponse({ state: 'ok', data: { session_id: 's1', run_id: 'r1', items: [] } }));
+
+      await fetchSecurityEvent('event-1');
+      await fetchSecurityCountBy('category', { start_ns: 1 });
+      await fetchSecuritySessions({ limit: 100 });
+      await fetchSecurityRuns('session-1', { limit: 100 });
+      await fetchSecurityTimeline({
+        session_id: 'session-1',
+        run_id: 'run-1',
+        start_ns: 1,
+        end_ns: 2,
+        include_security: true,
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/security/events/event-1');
+      expect(mockFetch.mock.calls[1][0]).toContain('/api/security/events/count-by');
+      expect(mockFetch.mock.calls[1][0]).toContain('group_by=category');
+      expect(mockFetch.mock.calls[2][0]).toContain('/api/security/observability/sessions');
+      expect(mockFetch.mock.calls[3][0]).toContain('/api/security/observability/sessions/session-1/runs');
+      expect(mockFetch.mock.calls[4][0]).toContain('/api/security/observability/timeline');
+      expect(mockFetch.mock.calls[4][0]).toContain('start_ns=1');
+      expect(mockFetch.mock.calls[4][0]).toContain('end_ns=2');
+      expect(mockFetch.mock.calls[4][0]).toContain('include_security=true');
     });
   });
 
