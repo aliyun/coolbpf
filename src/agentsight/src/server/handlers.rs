@@ -1,9 +1,14 @@
 //! API request handlers
 
+use std::collections::HashMap;
+
+use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use super::AppState;
+use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
@@ -249,6 +254,595 @@ fn now_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64
+}
+
+// ─── agent-sec Security Observability endpoints ─────────────────────────────
+
+/// GET /api/security/status
+///
+/// Reports only whether the agent-sec daemon is reachable. Data-plane failures
+/// are surfaced by the individual security query endpoints.
+#[get("/api/security/status")]
+pub async fn security_status(data: web::Data<AppState>) -> impl Responder {
+    let client = match agent_sec_client(&data) {
+        Ok(client) => client,
+        Err(err) => {
+            return security_state_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_unreachable",
+                json!({ "error": err.to_string() }),
+                Some("agent-sec daemon is unavailable"),
+            );
+        }
+    };
+
+    let daemon_health = match call_daemon(client, "daemon.health", json!({})).await {
+        Ok(response) if response.ok => response,
+        Ok(response) => return daemon_error_response(response),
+        Err(err) => {
+            return security_state_response(
+                client_error_status(&err),
+                "daemon_unreachable",
+                json!({ "error": err.to_string() }),
+                Some("agent-sec daemon is unavailable"),
+            );
+        }
+    };
+
+    security_state_response(
+        StatusCode::OK,
+        "daemon_reachable",
+        json!({
+            "daemon": daemon_health.data,
+            "socket_path": client_socket_path(&data),
+        }),
+        None,
+    )
+}
+
+/// GET /api/security/summary
+#[get("/api/security/summary")]
+pub async fn security_summary(
+    data: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    proxy_security_query(data, "sec.summary", query_to_params(&query)).await
+}
+
+/// GET /api/security/events/count-by
+#[get("/api/security/events/count-by")]
+pub async fn security_events_count_by(
+    data: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    proxy_security_query(data, "sec.events.count_by", query_to_params(&query)).await
+}
+
+/// GET /api/security/events
+#[get("/api/security/events")]
+pub async fn security_events_list(
+    data: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    proxy_security_query(data, "sec.events.list", query_to_params(&query)).await
+}
+
+/// GET /api/security/events/{event_id}
+#[get("/api/security/events/{event_id}")]
+pub async fn security_event_detail(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let params = query_to_params(&query).map(|mut params| {
+        params["event_id"] = Value::String(path.into_inner());
+        params
+    });
+    proxy_security_query(data, "sec.events.get", params).await
+}
+
+/// GET /api/security/observability/sessions
+#[get("/api/security/observability/sessions")]
+pub async fn security_observability_sessions(
+    data: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    proxy_security_query(data, "obs.sessions.list", query_to_params(&query)).await
+}
+
+/// GET /api/security/observability/sessions/{session_id}/runs
+#[get("/api/security/observability/sessions/{session_id}/runs")]
+pub async fn security_observability_runs(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    let params = query_to_params(&query).map(|mut params| {
+        params["session_id"] = Value::String(path.into_inner());
+        params
+    });
+    proxy_security_query(data, "obs.runs.list", params).await
+}
+
+/// GET /api/security/observability/timeline
+#[get("/api/security/observability/timeline")]
+pub async fn security_observability_timeline(
+    data: web::Data<AppState>,
+    query: web::Query<HashMap<String, String>>,
+) -> impl Responder {
+    proxy_security_query(data, "obs.timeline.get", query_to_params(&query)).await
+}
+
+async fn proxy_security_query(
+    data: web::Data<AppState>,
+    method: &'static str,
+    params: Result<Value, HttpResponse>,
+) -> HttpResponse {
+    let params = match params {
+        Ok(params) => params,
+        Err(response) => return response,
+    };
+
+    let client = match agent_sec_client(&data) {
+        Ok(client) => client,
+        Err(err) => return client_error_response(err),
+    };
+
+    match call_daemon(client, method, params).await {
+        Ok(response) if response.ok => {
+            let state = derive_security_query_state(method, &response.data);
+            security_state_response(StatusCode::OK, state, response.data, None)
+        }
+        Ok(response) => daemon_error_response(response),
+        Err(err) => client_error_response(err),
+    }
+}
+
+async fn call_daemon(
+    client: AgentSecClient,
+    method: &'static str,
+    params: Value,
+) -> Result<DaemonResponse, AgentSecClientError> {
+    let method = method.to_string();
+    match web::block(move || client.call(&method, params)).await {
+        Ok(result) => result,
+        Err(err) => Err(AgentSecClientError::Transport(format!(
+            "daemon client task failed: {err}"
+        ))),
+    }
+}
+
+fn agent_sec_client(data: &web::Data<AppState>) -> Result<AgentSecClient, AgentSecClientError> {
+    AgentSecClient::with_timeout(None, data.security_observability.timeout_ms)
+}
+
+fn client_socket_path(data: &web::Data<AppState>) -> Option<String> {
+    agent_sec_client(data)
+        .ok()
+        .map(|client| client.socket_path().display().to_string())
+}
+
+fn query_to_params(query: &web::Query<HashMap<String, String>>) -> Result<Value, HttpResponse> {
+    let mut params = serde_json::Map::new();
+    for (key, raw_value) in query.iter() {
+        let value = parse_security_query_value(key, raw_value)?;
+        params.insert(key.clone(), value);
+    }
+    Ok(Value::Object(params))
+}
+
+fn parse_security_query_value(key: &str, raw_value: &str) -> Result<Value, HttpResponse> {
+    match key {
+        "start_ns" | "end_ns" | "limit" | "offset" | "latest_limit" => {
+            let value = raw_value
+                .parse::<i64>()
+                .map_err(|_| bad_request_response(format!("{key} must be an integer")))?;
+            Ok(Value::Number(value.into()))
+        }
+        "include_details" | "include_security" => parse_bool(raw_value)
+            .map(Value::Bool)
+            .ok_or_else(|| bad_request_response(format!("{key} must be a boolean"))),
+        _ => Ok(Value::String(raw_value.to_string())),
+    }
+}
+
+fn parse_bool(raw_value: &str) -> Option<bool> {
+    match raw_value {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn derive_security_query_state(method: &str, data: &Value) -> &'static str {
+    match method {
+        "sec.summary" if data.get("total").and_then(Value::as_i64).unwrap_or(0) == 0 => "empty",
+        "sec.events.list" | "obs.sessions.list" | "obs.runs.list"
+            if data.get("total").and_then(Value::as_i64).unwrap_or(0) == 0 =>
+        {
+            "empty"
+        }
+        "sec.events.count_by"
+            if data
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| items.is_empty())
+                .unwrap_or(true) =>
+        {
+            "empty"
+        }
+        "sec.events.get" if !data.get("found").and_then(Value::as_bool).unwrap_or(false) => {
+            "not_found"
+        }
+        "sec.events.get" => "found",
+        "obs.timeline.get"
+            if data
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| items.is_empty())
+                .unwrap_or(true) =>
+        {
+            "empty"
+        }
+        _ => "ok",
+    }
+}
+
+fn security_state_response(
+    status: StatusCode,
+    state: &str,
+    data: Value,
+    message: Option<&str>,
+) -> HttpResponse {
+    let mut body = json!({
+        "state": state,
+        "data": data,
+        "meta": {
+            "source": "agent-sec-daemon",
+        },
+    });
+    if let Some(message) = message {
+        body["message"] = Value::String(message.to_string());
+    }
+    HttpResponse::build(status).json(body)
+}
+
+fn bad_request_response(message: String) -> HttpResponse {
+    HttpResponse::BadRequest().json(json!({
+        "error": {
+            "code": "bad_request",
+            "message": message,
+            "retryable": false,
+        }
+    }))
+}
+
+fn client_error_response(err: AgentSecClientError) -> HttpResponse {
+    let status = client_error_status(&err);
+    let (code, retryable) = match &err {
+        AgentSecClientError::SocketPath(_) | AgentSecClientError::Transport(_) => {
+            ("daemon_unavailable", true)
+        }
+        AgentSecClientError::Timeout(_) => ("daemon_timeout", true),
+        AgentSecClientError::ResponseTooLarge(_) => ("payload_too_large", false),
+        AgentSecClientError::Protocol(_) => ("daemon_protocol_mismatch", false),
+    };
+
+    HttpResponse::build(status).json(json!({
+        "error": {
+            "code": code,
+            "message": err.to_string(),
+            "retryable": retryable,
+        }
+    }))
+}
+
+fn client_error_status(err: &AgentSecClientError) -> StatusCode {
+    match err {
+        AgentSecClientError::SocketPath(_) | AgentSecClientError::Transport(_) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        AgentSecClientError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+        AgentSecClientError::ResponseTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        AgentSecClientError::Protocol(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn daemon_error_response(response: DaemonResponse) -> HttpResponse {
+    let daemon_error = response.error.clone();
+    let daemon_code = daemon_error
+        .as_ref()
+        .map(|error| error.code.as_str())
+        .unwrap_or("internal_error");
+    let message = daemon_error
+        .as_ref()
+        .map(|error| error.message.clone())
+        .unwrap_or_else(|| response.stderr.clone());
+
+    let (status, code, retryable) = match daemon_code {
+        "bad_request" => (StatusCode::BAD_REQUEST, "bad_request", false),
+        "unknown_method" => (StatusCode::BAD_GATEWAY, "daemon_protocol_mismatch", false),
+        "payload_too_large" => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", false),
+        "timeout" => (StatusCode::GATEWAY_TIMEOUT, "daemon_timeout", true),
+        "busy" => (StatusCode::SERVICE_UNAVAILABLE, "daemon_busy", true),
+        "unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "daemon_capability_unavailable",
+            true,
+        ),
+        "shutdown" => (StatusCode::SERVICE_UNAVAILABLE, "daemon_shutdown", true),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "daemon_internal_error",
+            false,
+        ),
+    };
+
+    HttpResponse::build(status).json(json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "daemon_code": daemon_code,
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+    use std::time::Instant;
+
+    use actix_web::App;
+    use actix_web::body::to_bytes;
+    use actix_web::test as awtest;
+
+    use crate::agent_sec::DaemonErrorPayload;
+    use crate::health::HealthStore;
+
+    use super::*;
+
+    #[test]
+    fn query_to_params_parses_security_query_types() {
+        let query = web::Query(HashMap::from([
+            ("start_ns".to_string(), "100".to_string()),
+            ("limit".to_string(), "25".to_string()),
+            ("include_details".to_string(), "true".to_string()),
+            ("agent_name".to_string(), "codex".to_string()),
+        ]));
+
+        let params = query_to_params(&query).expect("valid query should parse");
+
+        assert_eq!(
+            params,
+            json!({
+                "start_ns": 100,
+                "limit": 25,
+                "include_details": true,
+                "agent_name": "codex",
+            })
+        );
+    }
+
+    #[actix_web::test]
+    async fn query_to_params_rejects_invalid_security_query_types() {
+        let query = web::Query(HashMap::from([(
+            "include_security".to_string(),
+            "sometimes".to_string(),
+        )]));
+
+        let response = query_to_params(&query).expect_err("invalid boolean should fail");
+        let body = response_json(response).await;
+
+        assert_eq!(body["error"]["code"], "bad_request");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("include_security"))
+        );
+    }
+
+    #[test]
+    fn derive_security_query_state_maps_empty_and_found_states() {
+        assert_eq!(
+            derive_security_query_state("sec.summary", &json!({})),
+            "empty"
+        );
+        assert_eq!(
+            derive_security_query_state("sec.events.list", &json!({ "total": 0 })),
+            "empty"
+        );
+        assert_eq!(
+            derive_security_query_state("sec.events.get", &json!({ "found": false })),
+            "not_found"
+        );
+        assert_eq!(
+            derive_security_query_state("sec.events.get", &json!({ "found": true })),
+            "found"
+        );
+        assert_eq!(
+            derive_security_query_state("obs.timeline.get", &json!({ "items": [] })),
+            "empty"
+        );
+        assert_eq!(
+            derive_security_query_state("obs.timeline.get", &json!({ "items": [{}] })),
+            "ok"
+        );
+    }
+
+    #[actix_web::test]
+    async fn daemon_error_response_maps_daemon_codes_to_http_errors() {
+        for (daemon_code, status, code, retryable) in [
+            ("bad_request", StatusCode::BAD_REQUEST, "bad_request", false),
+            (
+                "unknown_method",
+                StatusCode::BAD_GATEWAY,
+                "daemon_protocol_mismatch",
+                false,
+            ),
+            (
+                "payload_too_large",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                false,
+            ),
+            (
+                "timeout",
+                StatusCode::GATEWAY_TIMEOUT,
+                "daemon_timeout",
+                true,
+            ),
+            ("busy", StatusCode::SERVICE_UNAVAILABLE, "daemon_busy", true),
+            (
+                "unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_capability_unavailable",
+                true,
+            ),
+            (
+                "shutdown",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_shutdown",
+                true,
+            ),
+            (
+                "internal_error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "daemon_internal_error",
+                false,
+            ),
+        ] {
+            let response = daemon_error_response(daemon_response_with_error(daemon_code));
+            assert_eq!(response.status(), status);
+
+            let body = response_json(response).await;
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["daemon_code"], daemon_code);
+            assert_eq!(body["error"]["retryable"], retryable);
+        }
+    }
+
+    #[actix_web::test]
+    async fn client_error_response_maps_protocol_errors_to_bad_gateway() {
+        for (err, status, code, retryable) in [
+            (
+                AgentSecClientError::SocketPath("missing runtime dir".to_string()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_unavailable",
+                true,
+            ),
+            (
+                AgentSecClientError::Transport("connect refused".to_string()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "daemon_unavailable",
+                true,
+            ),
+            (
+                AgentSecClientError::Timeout("read response".to_string()),
+                StatusCode::GATEWAY_TIMEOUT,
+                "daemon_timeout",
+                true,
+            ),
+            (
+                AgentSecClientError::ResponseTooLarge(128),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                false,
+            ),
+            (
+                AgentSecClientError::Protocol("unexpected response".to_string()),
+                StatusCode::BAD_GATEWAY,
+                "daemon_protocol_mismatch",
+                false,
+            ),
+        ] {
+            let response = client_error_response(err);
+            assert_eq!(response.status(), status);
+
+            let body = response_json(response).await;
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["retryable"], retryable);
+        }
+    }
+
+    #[actix_web::test]
+    async fn security_endpoints_report_client_errors_when_daemon_config_is_invalid() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .service(security_status)
+                .service(security_summary)
+                .service(security_events_count_by)
+                .service(security_events_list)
+                .service(security_event_detail)
+                .service(security_observability_sessions)
+                .service(security_observability_runs)
+                .service(security_observability_timeline),
+        )
+        .await;
+
+        for (uri, status) in [
+            ("/api/security/status", StatusCode::SERVICE_UNAVAILABLE),
+            ("/api/security/summary?limit=1", StatusCode::BAD_GATEWAY),
+            (
+                "/api/security/events/count-by?include_security=true",
+                StatusCode::BAD_GATEWAY,
+            ),
+            ("/api/security/events?offset=1", StatusCode::BAD_GATEWAY),
+            ("/api/security/events/event-1", StatusCode::BAD_GATEWAY),
+            (
+                "/api/security/observability/sessions?latest_limit=1",
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                "/api/security/observability/sessions/session-1/runs",
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                "/api/security/observability/timeline?end_ns=2",
+                StatusCode::BAD_GATEWAY,
+            ),
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+
+            assert_eq!(response.status(), status);
+        }
+    }
+
+    async fn response_json(response: HttpResponse) -> Value {
+        let body = to_bytes(response.into_body())
+            .await
+            .expect("response body should be readable");
+        serde_json::from_slice(&body).expect("response body should be JSON")
+    }
+
+    fn daemon_response_with_error(code: &str) -> DaemonResponse {
+        DaemonResponse {
+            request_id: "req-1".to_string(),
+            ok: false,
+            data: Value::Null,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+            error: Some(DaemonErrorPayload {
+                code: code.to_string(),
+                message: format!("{code} message"),
+            }),
+        }
+    }
+
+    fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
+        })
+    }
 }
 
 // ─── Prometheus metrics endpoint ─────────────────────────────────────────────
