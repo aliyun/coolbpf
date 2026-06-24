@@ -6,6 +6,7 @@
 //! 2. **Skill Loads**: Tool calls that read SKILL.md files (Read/ReadFile/read_file).
 
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::genai::semantic::{InputMessage, MessagePart, OutputMessage};
@@ -115,6 +116,62 @@ pub fn extract_skill_downloads(event: &TraceEventDetail) -> Vec<SkillDownloadRec
         .collect()
 }
 
+/// Extract per-skill load counts from a slice of output messages.
+///
+/// Looks for tool calls where function_name matches a skill invocation or a
+/// file read of `/SKILL.md`. Returns a map of skill_name -> load count within
+/// these messages.
+pub fn extract_skill_load_counts_from_messages(messages: &[OutputMessage]) -> HashMap<String, u64> {
+    let mut counts: HashMap<String, u64> = HashMap::new();
+
+    for msg in messages {
+        for part in &msg.parts {
+            if let MessagePart::ToolCall {
+                name, arguments, ..
+            } = part
+            {
+                if let Some(skill_name) = detect_skill_load(name, arguments) {
+                    *counts.entry(skill_name).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    counts
+}
+
+/// Detect whether a single tool call represents a skill load.
+///
+/// Returns the skill name if the tool_call is a skill invocation (cosh/Hermes)
+/// or a read of a `SKILL.md` file (Qoder); otherwise returns `None`.
+fn detect_skill_load(name: &str, arguments: &Option<serde_json::Value>) -> Option<String> {
+    // Pattern 1: Skill tool_call (cosh/copilot-shell)
+    // e.g. {"name": "Skill", "arguments": {"skill": "pdf"}}
+    if SKILL_FUNCTION_NAMES
+        .iter()
+        .any(|&fn_name| name.eq_ignore_ascii_case(fn_name))
+    {
+        return arguments.as_ref().and_then(extract_skill_name_from_args);
+    }
+
+    // Pattern 2: ReadFile tool_call reading SKILL.md (Qoder)
+    // e.g. {"name": "Read", "arguments": {"file_path": "/path/to/skill/SKILL.md"}}
+    if !READ_FUNCTION_NAMES
+        .iter()
+        .any(|&fn_name| name.eq_ignore_ascii_case(fn_name))
+    {
+        return None;
+    }
+
+    let file_path = arguments.as_ref().and_then(extract_file_path)?;
+
+    if !file_path.ends_with("/SKILL.md") {
+        return None;
+    }
+
+    extract_skill_name_from_path(&file_path)
+}
+
 /// Extract skill load events from tool_calls in output messages.
 ///
 /// Looks for tool calls where function_name matches Read/ReadFile/read_file
@@ -129,90 +186,36 @@ pub fn extract_skill_loads(event: &TraceEventDetail) -> Vec<SkillLoadRecord> {
     let timestamp_ns = event.start_timestamp_ns;
     let agent_name = event.agent_name.clone();
 
-    let mut records = Vec::new();
-
     // Parse output_messages JSON
     let output_messages = match &event.output_messages {
         Some(json_str) => match serde_json::from_str::<Vec<OutputMessage>>(json_str) {
             Ok(msgs) => msgs,
-            Err(_) => return records,
+            Err(_) => return Vec::new(),
         },
-        None => return records,
+        None => return Vec::new(),
     };
 
-    for msg in &output_messages {
-        for part in &msg.parts {
+    output_messages
+        .iter()
+        .flat_map(|msg| msg.parts.iter())
+        .filter_map(|part| {
             if let MessagePart::ToolCall {
                 name, arguments, ..
             } = part
             {
-                // Pattern 1: Skill tool_call (cosh/copilot-shell)
-                // e.g. {"name": "Skill", "arguments": {"skill": "pdf"}}
-                if SKILL_FUNCTION_NAMES
-                    .iter()
-                    .any(|&fn_name| name.eq_ignore_ascii_case(fn_name))
-                {
-                    let skill_name = match arguments {
-                        Some(args) => extract_skill_name_from_args(args),
-                        None => None,
-                    };
-                    if let Some(skill_name) = skill_name {
-                        records.push(SkillLoadRecord {
-                            skill_name,
-                            session_id: session_id.clone(),
-                            call_id: call_id.clone(),
-                            timestamp_ns,
-                            agent_name: agent_name.clone(),
-                            function_name: name.clone(),
-                        });
-                    }
-                    continue;
-                }
-
-                // Pattern 2: ReadFile tool_call reading SKILL.md (Qoder)
-                // e.g. {"name": "Read", "arguments": {"file_path": "/path/to/skill/SKILL.md"}}
-                if !READ_FUNCTION_NAMES
-                    .iter()
-                    .any(|&fn_name| name.eq_ignore_ascii_case(fn_name))
-                {
-                    continue;
-                }
-
-                // Extract file_path from arguments
-                let file_path = match arguments {
-                    Some(args) => extract_file_path(args),
-                    None => continue,
-                };
-
-                let file_path = match file_path {
-                    Some(p) => p,
-                    None => continue,
-                };
-
-                // Check if path ends with /SKILL.md
-                if !file_path.ends_with("/SKILL.md") {
-                    continue;
-                }
-
-                // Extract skill name from parent directory
-                let skill_name = match extract_skill_name_from_path(&file_path) {
-                    Some(name) => name,
-                    None => continue,
-                };
-
-                records.push(SkillLoadRecord {
+                detect_skill_load(name, arguments).map(|skill_name| SkillLoadRecord {
                     skill_name,
                     session_id: session_id.clone(),
                     call_id: call_id.clone(),
                     timestamp_ns,
                     agent_name: agent_name.clone(),
                     function_name: name.clone(),
-                });
+                })
+            } else {
+                None
             }
-        }
-    }
-
-    records
+        })
+        .collect()
 }
 
 /// Extract all unique tool call function names from an event's output messages.
@@ -834,5 +837,98 @@ Some text after"#;
             assert_eq!(d.timestamp_ns, 9000);
             assert!(!d.skill_name.is_empty());
         }
+    }
+
+    #[test]
+    fn test_extract_skill_load_counts_from_messages() {
+        let messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![
+                MessagePart::ToolCall {
+                    id: None,
+                    name: "Skill".to_string(),
+                    arguments: Some(json!({"skill": "pdf"})),
+                },
+                MessagePart::ToolCall {
+                    id: None,
+                    name: "skill".to_string(),
+                    arguments: Some(json!({"skill": "pdf"})),
+                },
+                MessagePart::ToolCall {
+                    id: None,
+                    name: "read_file".to_string(),
+                    arguments: Some(json!({"file_path": "/skills/read/SKILL.md"})),
+                },
+            ],
+            name: None,
+            finish_reason: None,
+        }];
+        let counts = extract_skill_load_counts_from_messages(&messages);
+        assert_eq!(counts.get("pdf"), Some(&2));
+        assert_eq!(counts.get("read"), Some(&1));
+    }
+
+    #[test]
+    fn test_detect_skill_load_ignores_unrelated_tools() {
+        // A tool that is neither a skill function nor a read function is ignored.
+        let name = "shell";
+        let arguments = Some(json!({"command": "ls"}));
+        assert!(detect_skill_load(name, &arguments).is_none());
+    }
+
+    #[test]
+    fn test_extract_skill_loads_returns_empty_for_invalid_json() {
+        let event = TraceEventDetail {
+            id: 30,
+            call_id: Some("c-invalid".into()),
+            start_timestamp_ns: 1000,
+            end_timestamp_ns: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_messages: None,
+            output_messages: Some("not valid json".into()),
+            system_instructions: None,
+            agent_name: None,
+            process_name: None,
+            pid: None,
+            user_query: None,
+            event_json: None,
+            trace_id: None,
+            conversation_id: None,
+            cache_read_tokens: None,
+            status: None,
+            interruption_type: None,
+        };
+        assert!(extract_skill_loads(&event).is_empty());
+    }
+
+    #[test]
+    fn test_extract_skill_loads_returns_empty_when_no_output_messages() {
+        let event = TraceEventDetail {
+            id: 31,
+            call_id: Some("c-none".into()),
+            start_timestamp_ns: 1000,
+            end_timestamp_ns: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_messages: None,
+            output_messages: None,
+            system_instructions: None,
+            agent_name: None,
+            process_name: None,
+            pid: None,
+            user_query: None,
+            event_json: None,
+            trace_id: None,
+            conversation_id: None,
+            cache_read_tokens: None,
+            status: None,
+            interruption_type: None,
+        };
+        assert!(extract_skill_loads(&event).is_empty());
     }
 }

@@ -1162,8 +1162,8 @@ mod tests {
         let (cmdline_rules, https_rules, http_targets) =
             parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
-        // https rules: dashscope.aliyuncs.com configured by default
-        assert_eq!(https_rules.len(), 1);
+        // https rules: dashscope.aliyuncs.com + api.openai.com configured by default
+        assert_eq!(https_rules.len(), 2);
         assert!(http_targets.is_empty());
     }
 
