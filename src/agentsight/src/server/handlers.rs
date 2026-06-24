@@ -12,7 +12,6 @@ use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
-use crate::storage::sqlite::tokenless::{self, TokenlessStatsStore};
 
 // ─── Prometheus helpers ───────────────────────────────────────────────────────
 
@@ -1017,7 +1016,6 @@ pub async fn restart_agent_health(
 ) -> impl Responder {
     let pid = path.into_inner();
 
-    // 从 store 中取出 restart_cmd
     let restart_cmd = {
         let store = data.health_store.read().unwrap();
         store
@@ -1044,17 +1042,16 @@ pub async fn restart_agent_health(
             .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
     }
 
-    // Step 2: 短暂等待进程退出
+    // Step 2: short wait for process to exit
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Step 3: re-exec（后台启动，不等待）
+    // Step 3: re-exec (background, don't wait)
     let exe = &cmd[0];
     let args = &cmd[1..];
     match Command::new(exe).args(args).spawn() {
         Ok(child) => {
             let new_pid = child.id();
             log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
-            // 从 store 中删除旧 PID 条目，下次扫描时新 PID 会自动加入
             data.health_store.write().unwrap().remove_by_pid(pid);
             HttpResponse::Ok().json(serde_json::json!({
                 "ok": true,
@@ -1317,8 +1314,6 @@ pub async fn interruption_stats(
 /// GET /api/interruptions/session-counts?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns unresolved interruption breakdown per session_id, grouped by severity and type.
-/// Response: [ { session_id, total, by_severity: { critical, high, medium, low },
-///              types: [ { interruption_type, severity, count }, ... ] }, ... ]
 #[get("/api/interruptions/session-counts")]
 pub async fn interruption_session_counts(
     data: web::Data<AppState>,
@@ -1336,7 +1331,6 @@ pub async fn interruption_session_counts(
 
     match istore.count_unresolved_by_session_detailed(start_ns, end_ns) {
         Ok(rows) => {
-            // Group by session_id
             let mut map: std::collections::HashMap<
                 String,
                 (
@@ -1384,8 +1378,6 @@ pub async fn interruption_session_counts(
 /// GET /api/interruptions/conversation-counts?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns unresolved interruption breakdown per conversation_id, grouped by severity and type.
-/// Response: [ { conversation_id, total, by_severity: { critical, high, medium, low },
-///              types: [ { interruption_type, severity, count }, ... ] }, ... ]
 #[get("/api/interruptions/conversation-counts")]
 pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
@@ -1539,306 +1531,6 @@ pub async fn get_interruption(
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
-}
-
-// ─── Token Savings endpoint ─────────────────────────────────────────────────
-
-/// Query parameters for /api/token-savings
-#[derive(Debug, Deserialize)]
-pub struct TokenSavingsQuery {
-    pub start_ns: Option<i64>,
-    pub end_ns: Option<i64>,
-    pub agent_name: Option<String>,
-}
-
-/// Overall savings summary
-#[derive(Debug, Serialize)]
-pub struct SavingsSummary {
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_tokens: i64,
-    pub total_saved_tokens: i64,
-    pub total_compounded_saved: i64,
-    pub savings_rate: f64,
-    pub compounded_savings_rate: f64,
-    pub total_tool_saved: i64,
-    pub total_mcp_saved: i64,
-    pub total_compounded_tool_saved: i64,
-    pub total_compounded_mcp_saved: i64,
-}
-
-/// A single optimization item within a session
-#[derive(Debug, Serialize)]
-pub struct OptimizationItemDto {
-    pub id: String,
-    pub category: String,
-    pub title: String,
-    pub before_tokens: i64,
-    pub after_tokens: i64,
-    pub saved_tokens: i64,
-    pub compounded_saved: i64,
-    pub compounding_turns: i64,
-    pub before_summary: String,
-    pub after_summary: String,
-    pub before_text: Option<String>,
-    pub after_text: Option<String>,
-    pub diff_lines: Vec<DiffLineDto>,
-}
-
-/// A single diff line
-#[derive(Debug, Serialize)]
-pub struct DiffLineDto {
-    #[serde(rename = "type")]
-    pub line_type: String,
-    pub content: String,
-}
-
-/// Per-session savings data
-#[derive(Debug, Serialize)]
-pub struct SessionSavingsDto {
-    pub session_id: String,
-    pub agent_name: String,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_tokens: i64,
-    pub saved_tokens: i64,
-    pub compounded_saved: i64,
-    pub savings_rate: f64,
-    pub compounded_savings_rate: f64,
-    pub request_count: i64,
-    pub tool_saved: i64,
-    pub mcp_saved: i64,
-    pub optimization_items: Vec<OptimizationItemDto>,
-}
-
-/// Full response for /api/token-savings
-#[derive(Debug, Serialize)]
-pub struct TokenSavingsResponse {
-    pub stats_available: bool,
-    pub summary: SavingsSummary,
-    pub sessions: Vec<SessionSavingsDto>,
-}
-
-/// Map stats.db operation field to frontend category.
-fn map_operation_to_category(operation: &str) -> &str {
-    match operation {
-        "compress-response" => "mcp_response",
-        "rewrite-command" => "tool_output",
-        _ => "tool_output",
-    }
-}
-
-/// Map operation to a human-readable title.
-fn map_operation_to_title(operation: &str) -> &str {
-    match operation {
-        "compress-response" => "MCP\u{54cd}\u{5e94}\u{538b}\u{7f29}",
-        "rewrite-command" => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
-        _ => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
-    }
-}
-
-/// GET /api/token-savings?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
-///
-/// Returns token savings data by cross-referencing genai_events.db
-/// with the external ~/.tokenless/stats.db.
-#[get("/api/token-savings")]
-pub async fn get_token_savings(
-    data: web::Data<AppState>,
-    query: web::Query<TokenSavingsQuery>,
-) -> impl Responder {
-    let db_path = &data.storage_path;
-    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
-    let agent_name = query.agent_name.as_deref();
-
-    // Step 1: Query sessions from genai_events.db
-    let sessions = match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => match store.list_sessions_for_savings(start_ns, end_ns, agent_name) {
-            Ok(s) => s,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
-        },
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()}));
-        }
-    };
-
-    // Step 2: Open stats.db (read-only, graceful if absent)
-    let stats_path = tokenless::default_stats_path();
-    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
-    let stats_available = stats_store.is_some();
-
-    // Step 3: Build tool_call_id → (turn_index, session_id) map from genai_events.
-    // This gives us all known tool_use_ids and their session membership.
-    let session_ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-    let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => store
-            .get_tool_call_turn_indices(&session_ids)
-            .unwrap_or_default(),
-        Err(_) => std::collections::HashMap::new(),
-    };
-
-    // Step 4: Query stats.db by tool_use_ids (instead of session_ids)
-    let stats_by_session = if let Some(ref store) = stats_store {
-        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
-        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
-        // Group by session: use turn_indices to determine session, fallback to row.session_id
-        let mut map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
-        for row in rows {
-            let sid = turn_indices
-                .get(&row.tool_use_id)
-                .map(|info| info.session_id.clone())
-                .unwrap_or_else(|| row.session_id.clone());
-            map.entry(sid).or_default().push(row);
-        }
-        map
-    } else {
-        std::collections::HashMap::new()
-    };
-
-    // Step 5: Build response
-    let mut resp_sessions = Vec::with_capacity(sessions.len());
-    let mut grand_input: i64 = 0;
-    let mut grand_output: i64 = 0;
-    let mut grand_saved: i64 = 0;
-    let mut grand_compounded_saved: i64 = 0;
-    let mut grand_tool_saved: i64 = 0;
-    let mut grand_mcp_saved: i64 = 0;
-    let mut grand_compounded_tool_saved: i64 = 0;
-    let mut grand_compounded_mcp_saved: i64 = 0;
-
-    for session in &sessions {
-        let total_tokens = session.total_input_tokens + session.total_output_tokens;
-        let request_count = session.request_count;
-        let mut session_saved: i64 = 0;
-        let mut session_compounded_saved: i64 = 0;
-        let mut session_tool_saved: i64 = 0;
-        let mut session_mcp_saved: i64 = 0;
-        let mut session_compounded_tool_saved: i64 = 0;
-        let mut session_compounded_mcp_saved: i64 = 0;
-        let mut items = Vec::new();
-
-        if let Some(stat_rows) = stats_by_session.get(&session.session_id) {
-            for row in stat_rows {
-                let saved = row.before_tokens - row.after_tokens;
-                let category = map_operation_to_category(&row.operation);
-                let title = map_operation_to_title(&row.operation);
-
-                // Compounding: the shortened tool output appears in the
-                // context of all LLM calls AFTER the one that triggered the
-                // tool use. If the tool was invoked at turn N (1-based) out
-                // of M total turns, the savings persist for (M - N) turns.
-                let turn_index = turn_indices
-                    .get(&row.tool_use_id)
-                    .map(|info| info.turn_index)
-                    .unwrap_or(1) as i64;
-                let compounding_turns = (request_count - turn_index).max(1);
-                let compounded = saved * compounding_turns;
-
-                if category == "mcp_response" {
-                    session_mcp_saved += saved;
-                    session_compounded_mcp_saved += compounded;
-                } else {
-                    session_tool_saved += saved;
-                    session_compounded_tool_saved += compounded;
-                }
-                session_saved += saved;
-                session_compounded_saved += compounded;
-
-                let diff_lines: Vec<DiffLineDto> = Vec::new();
-
-                items.push(OptimizationItemDto {
-                    id: row.tool_use_id.clone(),
-                    category: category.to_string(),
-                    title: title.to_string(),
-                    before_tokens: row.before_tokens,
-                    after_tokens: row.after_tokens,
-                    saved_tokens: saved,
-                    compounded_saved: compounded,
-                    compounding_turns,
-                    before_summary: format!(
-                        "\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens",
-                        row.before_tokens
-                    ),
-                    after_summary: format!("\u{4f18}\u{5316}\u{540e} {} tokens", row.after_tokens),
-                    before_text: row.before_text.clone(),
-                    after_text: row.after_text.clone(),
-                    diff_lines,
-                });
-            }
-        }
-
-        let savings_rate = if total_tokens > 0 {
-            session_saved as f64 / total_tokens as f64 * 100.0
-        } else {
-            0.0
-        };
-        let compounded_savings_rate = if total_tokens > 0 {
-            session_compounded_saved as f64 / total_tokens as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        grand_input += session.total_input_tokens;
-        grand_output += session.total_output_tokens;
-        grand_saved += session_saved;
-        grand_compounded_saved += session_compounded_saved;
-        grand_tool_saved += session_tool_saved;
-        grand_mcp_saved += session_mcp_saved;
-        grand_compounded_tool_saved += session_compounded_tool_saved;
-        grand_compounded_mcp_saved += session_compounded_mcp_saved;
-
-        resp_sessions.push(SessionSavingsDto {
-            session_id: session.session_id.clone(),
-            agent_name: session.agent_name.clone().unwrap_or_default(),
-            total_input_tokens: session.total_input_tokens,
-            total_output_tokens: session.total_output_tokens,
-            total_tokens,
-            saved_tokens: session_saved,
-            compounded_saved: session_compounded_saved,
-            savings_rate,
-            compounded_savings_rate,
-            request_count,
-            tool_saved: session_tool_saved,
-            mcp_saved: session_mcp_saved,
-            optimization_items: items,
-        });
-    }
-
-    let grand_total = grand_input + grand_output;
-    let grand_rate = if grand_total > 0 {
-        grand_saved as f64 / grand_total as f64 * 100.0
-    } else {
-        0.0
-    };
-    let grand_compounded_rate = if grand_total > 0 {
-        grand_compounded_saved as f64 / grand_total as f64 * 100.0
-    } else {
-        0.0
-    };
-
-    HttpResponse::Ok().json(TokenSavingsResponse {
-        stats_available,
-        summary: SavingsSummary {
-            total_input_tokens: grand_input,
-            total_output_tokens: grand_output,
-            total_tokens: grand_total,
-            total_saved_tokens: grand_saved,
-            total_compounded_saved: grand_compounded_saved,
-            savings_rate: grand_rate,
-            compounded_savings_rate: grand_compounded_rate,
-            total_tool_saved: grand_tool_saved,
-            total_mcp_saved: grand_mcp_saved,
-            total_compounded_tool_saved: grand_compounded_tool_saved,
-            total_compounded_mcp_saved: grand_compounded_mcp_saved,
-        },
-        sessions: resp_sessions,
-    })
 }
 
 // ─── Skill Metrics endpoints ─────────────────────────────────────────────────
