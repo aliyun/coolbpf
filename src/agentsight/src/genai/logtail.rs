@@ -113,6 +113,10 @@ pub struct LogtailExporter {
     /// 路径为空（被清空）则丢弃本批次，实现可逆的"暂停 / 恢复"语义；
     /// 为 `false` 时（环境变量启动模式）始终写入构造时锁定的 `path`。
     dynamic: bool,
+    /// 写入前是否要求目标路径已存在。
+    /// 用于默认 SLS 路径：若 `/var/log/anolisa/sls/ops/agentsight.jsonl`
+    /// 不存在（iLogtail 未部署或目录未挂载），则跳过写入，避免自动创建文件。
+    require_path_exists: bool,
 }
 
 impl LogtailExporter {
@@ -147,6 +151,7 @@ impl LogtailExporter {
             encryptor,
             trace_enabled,
             dynamic: false,
+            require_path_exists: false,
         })
     }
 
@@ -175,6 +180,7 @@ impl LogtailExporter {
             encryptor,
             trace_enabled,
             dynamic: false,
+            require_path_exists: true,
         }
     }
 
@@ -231,6 +237,7 @@ impl LogtailExporter {
             encryptor,
             trace_enabled,
             dynamic,
+            require_path_exists: false,
         }
     }
 
@@ -259,6 +266,10 @@ impl LogtailExporter {
         } else {
             self.path.clone()
         };
+
+        if self.require_path_exists && !target_path.exists() {
+            return;
+        }
 
         let records = events_to_flat_records(events, self.encryptor.as_ref(), self.trace_enabled);
         if records.is_empty() {
@@ -550,8 +561,12 @@ pub fn events_to_flat_records(
                 }
 
                 // ── AgentSkill extensions: skill names and counts as JSON arrays ──
+                // Default to null when no skills are detected; write arrays when present.
                 let skill_counts = extract_skill_load_counts_from_messages(&call.response.messages);
-                if !skill_counts.is_empty() {
+                if skill_counts.is_empty() {
+                    m.insert("agent.skill.name".to_string(), "null".to_string());
+                    m.insert("agent.skill.load_count".to_string(), "null".to_string());
+                } else {
                     let mut skill_pairs: Vec<(String, u64)> = skill_counts.into_iter().collect();
                     skill_pairs.sort_by(|a, b| a.0.cmp(&b.0));
                     let names: Vec<String> = skill_pairs.iter().map(|(k, _)| k.clone()).collect();
@@ -1023,6 +1038,59 @@ mod tests {
     }
 
     #[test]
+    fn test_default_exporter_skips_when_path_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+
+        // Use a path under a temp directory that does not exist.
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_default_missing_{}", std::process::id()));
+        let exporter = LogtailExporter {
+            path: tmp.join("agentsight.jsonl"),
+            encryptor: None,
+            trace_enabled: true,
+            dynamic: false,
+            require_path_exists: true,
+        };
+
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        exporter.export(&[event]);
+
+        assert!(!tmp.exists());
+        reset_logtail_state();
+    }
+
+    #[test]
+    fn test_default_exporter_writes_when_path_exists() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_default_exists_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("agentsight.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let exporter = LogtailExporter {
+            path: path.clone(),
+            encryptor: None,
+            trace_enabled: true,
+            dynamic: false,
+            require_path_exists: true,
+        };
+
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        exporter.export(&[event]);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.is_empty());
+        assert!(content.contains("\"gen_ai.operation.name\""));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    #[test]
     fn test_logtail_exporter_new_with_fixed_path() {
         let _guard = ENV_LOCK.lock().unwrap();
         reset_logtail_state();
@@ -1066,6 +1134,20 @@ mod tests {
         assert_eq!(
             r.get("agent.skill.load_count").map(String::as_str),
             Some("[1,1]")
+        );
+    }
+
+    #[test]
+    fn test_skill_fields_default_null_when_no_skills() {
+        // When no skill tool calls are present, fields should default to null.
+        let event = GenAISemanticEvent::LLMCall(make_full_llm_call());
+        let records = events_to_flat_records(&[event], None, false);
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.get("agent.skill.name").map(String::as_str), Some("null"));
+        assert_eq!(
+            r.get("agent.skill.load_count").map(String::as_str),
+            Some("null")
         );
     }
 
