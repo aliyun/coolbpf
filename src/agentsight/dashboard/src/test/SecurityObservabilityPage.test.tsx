@@ -325,4 +325,36 @@ describe('SecurityObservabilityPage', () => {
     await waitFor(() => expect(mockFetchSecurityTimeline).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(sessionEventRequestCount()).toBe(2));
   });
+
+  it('displays error when status fetch fails', async () => {
+    mockFetchSecurityStatus.mockRejectedValueOnce(new Error('Network error'));
+
+    render(<SecurityObservabilityPage />);
+
+    await waitFor(() => expect(screen.getByText('Network error')).toBeInTheDocument());
+    expect(mockFetchSecuritySummary).not.toHaveBeenCalled();
+  });
+
+  it('shows partial error when some overview requests fail', async () => {
+    mockFetchSecuritySummary.mockRejectedValueOnce(new Error('summary timeout'));
+    mockFetchSecurityCountBy.mockRejectedValue(new Error('count-by failed'));
+
+    render(<SecurityObservabilityPage />);
+
+    await waitFor(() => expect(mockFetchSecuritySessions).toHaveBeenCalled());
+    const errorElements = await screen.findAllByText(/summary timeout|count-by failed/);
+    expect(errorElements.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('displays error when timeline runs fetch fails', async () => {
+    mockFetchSecurityRuns.mockRejectedValueOnce(new Error('runs endpoint unavailable'));
+
+    render(<SecurityObservabilityPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '全链路事件' }));
+
+    await waitFor(() => expect(mockFetchSecurityRuns).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('runs endpoint unavailable')).toBeInTheDocument();
+    expect(mockFetchSecurityTimeline).not.toHaveBeenCalled();
+  });
 });

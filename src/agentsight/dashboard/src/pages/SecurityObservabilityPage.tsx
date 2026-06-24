@@ -279,29 +279,43 @@ export const SecurityObservabilityPage: React.FC = () => {
     if (!isAvailable || activeTab !== 'timeline' || !selectedSessionId) {
       return;
     }
+
+    let cancelled = false;
     setRunsLoading(true);
     setRunsError(null);
     setSecurityRuns(null);
     setTimeline(null);
     fetchSecurityRuns(selectedSessionId, { ...rangeParams, limit: 100, offset: 0 })
       .then((response) => {
-        setSecurityRuns(response);
-        const ids = new Set(response.data.items.map((run) => run.run_id));
-        setSelectedRunId((current) => current && ids.has(current)
-          ? current
-          : response.data.items[0]?.run_id ?? null);
+        if (!cancelled) {
+          setSecurityRuns(response);
+          const ids = new Set(response.data.items.map((run) => run.run_id));
+          setSelectedRunId((current) => current && ids.has(current)
+            ? current
+            : response.data.items[0]?.run_id ?? null);
+        }
       })
       .catch((error) => {
-        setRunsError(errorMessage(error));
-        setSelectedRunId(null);
+        if (!cancelled) {
+          setRunsError(errorMessage(error));
+          setSelectedRunId(null);
+        }
       })
-      .finally(() => setRunsLoading(false));
+      .finally(() => {
+        if (!cancelled) setRunsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeTab, isAvailable, rangeParams, selectedSessionId, timelineRefreshNonce]);
 
   useEffect(() => {
     if (!isAvailable || activeTab !== 'timeline' || !selectedSessionId || !selectedRunId) {
       return;
     }
+
+    let cancelled = false;
     setTimelineLoading(true);
     setTimelineError(null);
     fetchSecurityTimeline({
@@ -311,9 +325,19 @@ export const SecurityObservabilityPage: React.FC = () => {
       limit: 500,
       include_security: true,
     })
-      .then(setTimeline)
-      .catch((error) => setTimelineError(errorMessage(error)))
-      .finally(() => setTimelineLoading(false));
+      .then((response) => {
+        if (!cancelled) setTimeline(response);
+      })
+      .catch((error) => {
+        if (!cancelled) setTimelineError(errorMessage(error));
+      })
+      .finally(() => {
+        if (!cancelled) setTimelineLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeTab, isAvailable, rangeParams, selectedRunId, selectedSessionId, timelineRefreshNonce]);
 
   const handleRefresh = useCallback(async () => {

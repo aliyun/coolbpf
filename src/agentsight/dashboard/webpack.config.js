@@ -47,15 +47,8 @@ module.exports = {
     extensions: ['.ts', '.tsx', '.js', '.jsx']
   },
   devServer: {
-    host: '0.0.0.0',
     port: 3004,
     allowedHosts: ['all', '.alibaba-inc.com'],
-    proxy: {
-      '/api': {
-        target: 'http://localhost:7396',
-        changeOrigin: true,
-      },
-    },
     historyApiFallback: {
       index: '/index.html',
       rewrites: [
