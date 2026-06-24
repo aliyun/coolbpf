@@ -17,7 +17,7 @@ use super::types::{InterruptionEvent, InterruptionType};
 /// Configuration for the loop detector.
 #[derive(Debug, Clone)]
 pub struct LoopDetectorConfig {
-    /// Number of consecutive calls with the same tool sequence to trigger (default: 3)
+    /// Number of consecutive calls with the same tool sequence to trigger (default: 5)
     pub tool_sequence_repeat_threshold: usize,
     /// Sliding window of recent calls to inspect (default: 10)
     pub window_size: usize,
@@ -30,7 +30,7 @@ pub struct LoopDetectorConfig {
 impl Default for LoopDetectorConfig {
     fn default() -> Self {
         Self {
-            tool_sequence_repeat_threshold: 3,
+            tool_sequence_repeat_threshold: 5,
             window_size: 10,
             output_similarity_threshold: 0.85,
             similar_output_repeat_threshold: 3,
@@ -383,6 +383,8 @@ mod tests {
             make_call(vec!["read_file", "search"], "output a", 100),
             make_call(vec!["read_file", "search"], "output b", 200),
             make_call(vec!["read_file", "search"], "output c", 300),
+            make_call(vec!["read_file", "search"], "output d", 400),
+            make_call(vec!["read_file", "search"], "output e", 500),
         ];
         let result = detector.detect(
             "conv-1",
@@ -417,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_tool_sequence_loop_with_interleaved_text_calls() {
-        // Simulates OpenClaw architecture: tool_call → text → tool_call → text → tool_call → text
+        // Simulates OpenClaw architecture: tool_call → text → tool_call → text → ...
         let detector = LoopDetector::default();
         let calls = vec![
             make_call(vec!["read_file"], "reading file...", 100),
@@ -426,6 +428,10 @@ mod tests {
             make_call(vec![], "Here is the content again.", 400),
             make_call(vec!["read_file"], "reading file...", 500),
             make_call(vec![], "Here is the content yet again.", 600),
+            make_call(vec!["read_file"], "reading file...", 700),
+            make_call(vec![], "Here is the content once more.", 800),
+            make_call(vec!["read_file"], "reading file...", 900),
+            make_call(vec![], "Here is the content finally.", 1000),
         ];
         let result = detector.detect(
             "conv-1",
@@ -435,7 +441,7 @@ mod tests {
             1000,
             &calls,
         );
-        // Rule 1 should trigger: 3 tool-bearing calls all have ["read_file"]
+        // Rule 1 should trigger: 5 tool-bearing calls all have ["read_file"]
         assert!(result.is_some());
         let event = result.unwrap();
         let detail: serde_json::Value =

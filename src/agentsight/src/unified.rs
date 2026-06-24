@@ -32,7 +32,7 @@ use crate::discovery::AgentScanner;
 use crate::event::Event;
 use crate::ffi::{FfiEvent, FfiEventSender};
 use crate::genai::semantic::GenAISemanticEvent;
-use crate::genai::{GenAIBuilder, GenAIExporter, GenAIStore, LogtailExporter};
+use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{DetectorConfig, InterruptionDetector, recover_oom_events};
 use crate::parser::Parser;
 use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
@@ -290,25 +290,21 @@ impl AgentSight {
             crate::genai::logtail::set_dynamic_logtail_path(sls_path);
         }
 
-        let is_agentic_os = crate::genai::anolisa_release::is_anolisa();
-
         // Determine if Logtail is currently enabled (env var OR dynamic config)
         let logtail_currently_enabled = crate::genai::logtail::logtail_enabled();
 
-        if is_agentic_os {
-            // ── Anolisa OS: always register SQLite ──
-            match GenAISqliteStore::new() {
-                Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled (agentic os)");
-                    let store = Arc::new(store);
-                    genai_sqlite_store = Some(Arc::clone(&store));
-                    genai_exporters.push(Box::new(store));
-                }
-                Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
-                }
-            }
-            // If Logtail is enabled at startup, also register it (dual-write)
+        // Sysom production mode: when SLS_LOGTAIL_FILE points under /var/sysom/,
+        // use only the external Logtail path. Skip SQLite and the default SLS exporter.
+        let sysom_logtail_path = std::env::var(crate::genai::logtail::LOGTAIL_ENV_VAR)
+            .ok()
+            .filter(|p| p.starts_with("/var/sysom/"));
+
+        if let Some(ref path) = sysom_logtail_path {
+            log::info!(
+                "SLS sysom mode detected ({}={}), skipping SQLite and default SLS exporter",
+                crate::genai::logtail::LOGTAIL_ENV_VAR,
+                path
+            );
             if logtail_currently_enabled {
                 if let Some(exporter) = LogtailExporter::new(
                     config.encryption_public_key.as_deref(),
@@ -323,7 +319,7 @@ impl AgentSight {
                         );
                     }
                     log::info!(
-                        "Logtail file exporter enabled (agentic os, {}), uid={}",
+                        "Logtail file exporter enabled (sysom, {}), uid={}",
                         exporter.path().display(),
                         uid
                     );
@@ -332,7 +328,31 @@ impl AgentSight {
                 }
             }
         } else {
-            // ── Non-Anolisa OS: keep original mutual exclusion behavior ──
+            // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
+            match GenAISqliteStore::new() {
+                Ok(store) => {
+                    log::info!("SQLite GenAI exporter enabled");
+                    let store = Arc::new(store);
+                    genai_sqlite_store = Some(Arc::clone(&store));
+                    genai_exporters.push(Box::new(store));
+                }
+                Err(e) => {
+                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
+                }
+            }
+
+            // Default local SLS Logtail exporter
+            let default_exporter = LogtailExporter::new_default(
+                config.encryption_public_key.as_deref(),
+                config.trace_enabled,
+            );
+            log::info!(
+                "Default Logtail file exporter enabled ({})",
+                default_exporter.path().display()
+            );
+            genai_exporters.push(Box::new(default_exporter));
+
+            // Also honor explicit SLS_LOGTAIL_FILE if set to a non-sysom path
             if logtail_currently_enabled {
                 if let Some(exporter) = LogtailExporter::new(
                     config.encryption_public_key.as_deref(),
@@ -353,33 +373,6 @@ impl AgentSight {
                     );
                     genai_exporters.push(Box::new(exporter));
                     sls_activated.store(true, Ordering::SeqCst);
-                }
-                // Also initialize SQLite store for detection queries + lifecycle
-                match GenAISqliteStore::new() {
-                    Ok(store) => {
-                        log::info!("SQLite GenAI store initialized (detection + lifecycle)");
-                        let store = Arc::new(store);
-                        genai_sqlite_store = Some(Arc::clone(&store));
-                        genai_exporters.push(Box::new(store));
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to initialize SQLite GenAI store: {e}");
-                    }
-                }
-            } else {
-                // No Logtail: use local JSONL + SQLite
-                genai_exporters.push(Box::new(GenAIStore::new(&GenAIStore::default_path())));
-
-                match GenAISqliteStore::new() {
-                    Ok(store) => {
-                        log::info!("SQLite GenAI exporter enabled");
-                        let store = Arc::new(store);
-                        genai_sqlite_store = Some(Arc::clone(&store));
-                        genai_exporters.push(Box::new(store));
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
-                    }
                 }
             }
         }

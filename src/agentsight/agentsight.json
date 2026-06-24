@@ -6,7 +6,10 @@
     "enabled": false,
     "kill_after_count": 3
   },
-  "https": [{"rule": ["dashscope.aliyuncs.com"]}],
+  "https": [
+    {"rule": ["dashscope.aliyuncs.com"]},
+    {"rule": ["api.openai.com"]}
+  ],
   "http": [],
   "encryption": {
     "public_key": ""
