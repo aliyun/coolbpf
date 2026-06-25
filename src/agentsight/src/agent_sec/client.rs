@@ -190,18 +190,27 @@ fn resolve_socket_path(socket_path: Option<PathBuf>) -> Result<PathBuf, AgentSec
     }
 
     if let Some(path) = env::var_os(SOCKET_ENV) {
-        return Ok(PathBuf::from(path));
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
     }
 
-    let xdg_runtime_dir = env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
-        AgentSecClientError::SocketPath(
-            "XDG_RUNTIME_DIR is required when AGENT_SEC_DAEMON_SOCKET is not set".to_string(),
-        )
-    })?;
+    Ok(resolve_socket_path_with_runtime_dir(
+        env::var_os("XDG_RUNTIME_DIR"),
+        unsafe { libc::getuid() },
+    ))
+}
 
-    Ok(PathBuf::from(xdg_runtime_dir)
-        .join(RUNTIME_SUBDIR)
-        .join(SOCKET_FILENAME))
+fn resolve_socket_path_with_runtime_dir(
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    uid: libc::uid_t,
+) -> PathBuf {
+    let runtime_dir = xdg_runtime_dir
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/user").join(uid.to_string()));
+
+    runtime_dir.join(RUNTIME_SUBDIR).join(SOCKET_FILENAME)
 }
 
 fn classify_io_error(action: &str, err: std::io::Error) -> AgentSecClientError {
@@ -280,6 +289,29 @@ mod tests {
             .expect("explicit socket path should resolve");
 
         assert_eq!(path, std::path::PathBuf::from("/tmp/agent-sec-test.sock"));
+    }
+
+    #[test]
+    fn resolve_socket_path_falls_back_to_run_user_uid_when_xdg_runtime_dir_missing() {
+        let path = super::resolve_socket_path_with_runtime_dir(None, 1000);
+
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/run/user/1000/agent-sec-core/daemon.sock")
+        );
+    }
+
+    #[test]
+    fn resolve_socket_path_uses_xdg_runtime_dir_when_present() {
+        let path = super::resolve_socket_path_with_runtime_dir(
+            Some(std::ffi::OsString::from("/tmp/runtime")),
+            1000,
+        );
+
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/runtime/agent-sec-core/daemon.sock")
+        );
     }
 
     #[test]
