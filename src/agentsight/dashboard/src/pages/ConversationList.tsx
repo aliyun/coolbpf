@@ -781,7 +781,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
   const [sessionInterruptionCounts, setSessionInterruptionCounts] = useState<Map<string, SessionInterruptionCount>>(new Map());
   const [conversationInterruptionCounts, setConversationInterruptionCounts] = useState<Map<string, ConversationInterruptionCount>>(new Map());
 
-  // Token savings per session (session_id → saved_tokens)
+  // Token savings per session (session_id → compounded_saved with saved_tokens fallback)
   const [savingsMap, setSavingsMap] = useState<Map<string, number>>(new Map());
 
   // Which session row is expanded to show traces
@@ -911,7 +911,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     setInterruptionStats(iStats);
     setSessionInterruptionCounts(new Map(iSessionCounts.map((c) => [c.session_id, c])));
     setConversationInterruptionCounts(new Map(iConvCounts.map((c) => [c.conversation_id, c])));
-    setSavingsMap(new Map(savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved]) ?? []));
+    setSavingsMap(new Map(
+      savingsResp?.sessions.map((s) => [s.session_id, s.compounded_saved ?? s.saved_tokens]) ?? []
+    ));
   }, []);
 
   const handleQuery = useCallback(async () => {

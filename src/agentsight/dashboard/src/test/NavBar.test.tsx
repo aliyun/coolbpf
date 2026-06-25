@@ -27,6 +27,7 @@ describe('NavBar', () => {
     renderNavBar();
     expect(screen.getByText('Agent 可观测')).toBeInTheDocument();
     expect(screen.getByText('Token 节省')).toBeInTheDocument();
+    expect(screen.getByText('安全可观测')).toBeInTheDocument();
     expect(screen.getByText('ATIF 查看器')).toBeInTheDocument();
   });
 
@@ -46,5 +47,11 @@ describe('NavBar', () => {
     renderNavBar('/');
     const link = screen.getByText('Token 节省').closest('a');
     expect(link?.className).not.toContain('bg-blue-100');
+  });
+
+  it('should highlight active link for security path', () => {
+    renderNavBar('/security');
+    const link = screen.getByText('安全可观测').closest('a');
+    expect(link?.className).toContain('bg-blue-100');
   });
 });
