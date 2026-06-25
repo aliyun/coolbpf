@@ -37,6 +37,7 @@ pub struct SavingsSummary {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub total_tokens: i64,
+    pub baseline_tokens: i64,
     pub total_saved_tokens: i64,
     pub total_compounded_saved: i64,
     pub savings_rate: f64,
@@ -84,6 +85,7 @@ pub struct SessionSavingsDto {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub total_tokens: i64,
+    pub baseline_tokens: i64,
     pub saved_tokens: i64,
     pub compounded_saved: i64,
     pub savings_rate: f64,
@@ -175,7 +177,7 @@ fn now_ns() -> u64 {
 ///
 /// Returns token savings data by cross-referencing genai_events.db
 /// with the external ~/.tokenless/stats.db.
-#[get("/api/token-savings")]
+#[get("/token-savings")]
 pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
@@ -356,6 +358,7 @@ pub async fn get_token_savings(
             total_input_tokens: session.total_input_tokens,
             total_output_tokens: session.total_output_tokens,
             total_tokens,
+            baseline_tokens: total_tokens + session_compounded_saved,
             saved_tokens: session_saved,
             compounded_saved: session_compounded_saved,
             savings_rate,
@@ -399,6 +402,7 @@ pub async fn get_token_savings(
             total_input_tokens: grand_input,
             total_output_tokens: grand_output,
             total_tokens: grand_total,
+            baseline_tokens: grand_total + grand_compounded_saved,
             total_saved_tokens: grand_saved,
             total_compounded_saved: grand_compounded_saved,
             savings_rate: grand_rate,
@@ -418,7 +422,7 @@ pub async fn get_token_savings(
 /// GET /api/token-savings/session/{session_id}
 ///
 /// Returns token savings detail for a single session.
-#[get("/api/token-savings/session/{session_id}")]
+#[get("/token-savings/session/{session_id}")]
 pub async fn get_session_savings(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -689,7 +693,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -729,7 +733,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -773,7 +777,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings/session/nonexistent")
+            .uri("/token-savings/session/nonexistent")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -812,7 +816,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings/session/sess-1")
+            .uri("/token-savings/session/sess-1")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);

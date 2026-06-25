@@ -14,6 +14,31 @@ function fmtTokens(n: number): string {
   return n.toLocaleString();
 }
 
+/** Info tooltip: hover 显示解释文案，鼠标移到 tooltip 上也保持显示 */
+const InfoTooltip: React.FC<{ text: string }> = ({ text }) => {
+  const [show, setShow] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const open = () => { if (timer.current) clearTimeout(timer.current); setShow(true); };
+  const close = () => { timer.current = setTimeout(() => setShow(false), 120); };
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return (
+    <span
+      className="relative inline-flex items-center ml-1"
+      onMouseEnter={open}
+      onMouseLeave={close}
+    >
+      <span className="w-4 h-4 rounded-full bg-gray-200 text-gray-500 text-[10px] font-bold flex items-center justify-center cursor-default">
+        i
+      </span>
+      {show && (
+        <span className="absolute bottom-full left-0 mb-1 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg z-50 shadow-lg w-[300px] leading-relaxed">
+          {text}
+        </span>
+      )}
+    </span>
+  );
+};
+
 function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
 }
@@ -356,10 +381,12 @@ export const TokenSavingsPage: React.FC = () => {
   const totalInput = summary?.total_input_tokens ?? 0;
   const totalOutput = summary?.total_output_tokens ?? 0;
   const totalTokens = summary?.total_tokens ?? 0;
+  const baselineTokens = summary?.baseline_tokens ?? 0;
   const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
   const compoundedSavingsRate = summary?.compounded_savings_rate ?? 0;
+  const savingsRate = baselineTokens > 0 ? (totalCompoundedSaved / baselineTokens) * 100 : 0;
 
   return (
     <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
@@ -437,7 +464,10 @@ export const TokenSavingsPage: React.FC = () => {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* Card 1: Total consumption */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-          <p className="text-sm text-gray-500">总 Token 消耗</p>
+          <p className="text-sm text-gray-500 flex items-center">
+            实际 Token 消耗
+            <InfoTooltip text="即 LLM API 实际计费的 Token 量，已包含 Tokenless 优化效果" />
+          </p>
           <p className="text-3xl font-bold text-gray-900 mt-1">{fmtTokens(totalTokens)}</p>
           <div className="mt-3">
             <ResponsiveContainer width="100%" height={60}>
@@ -476,10 +506,14 @@ export const TokenSavingsPage: React.FC = () => {
 
         {/* Card 2: Saved tokens — strategy breakdown pie */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-          <p className="text-sm text-gray-500">已降低 Token</p>
+          <p className="text-sm text-gray-500 flex items-center">
+            已节省 Token
+            <InfoTooltip text="优化前预估 = 不开启 Tokenless 优化时本应消耗的 Token 总量。已节省 = 优化前预估 - 实际消耗" />
+          </p>
           <p className="text-3xl font-bold text-green-600 mt-1">
             {fmtTokens(totalCompoundedSaved)}
           </p>
+          <p className="text-xs text-gray-400 mt-0.5">优化前预估: {fmtTokens(baselineTokens)}</p>
           <div className="mt-3">
             {(() => {
               const breakdown = summary?.strategy_breakdown ?? [];
@@ -565,7 +599,7 @@ export const TokenSavingsPage: React.FC = () => {
 
         {/* Card 3: Savings rate */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-          <p className="text-sm text-gray-500">降低率</p>
+          <p className="text-sm text-gray-500">节省率</p>
           <div className="flex items-center gap-4 mt-1">
             <div className="relative w-20 h-20 flex-shrink-0">
               <svg viewBox="0 0 80 80" className="w-full h-full -rotate-90">
@@ -575,37 +609,67 @@ export const TokenSavingsPage: React.FC = () => {
                   cy="40"
                   r="34"
                   fill="none"
-                  stroke={compoundedSavingsRate >= 30 ? '#10b981' : compoundedSavingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
+                  stroke={savingsRate >= 30 ? '#10b981' : savingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
                   strokeWidth="6"
-                  strokeDasharray={`${(compoundedSavingsRate / 100) * 213.6} 213.6`}
+                  strokeDasharray={`${(Math.min(savingsRate, 100) / 100) * 213.6} 213.6`}
                   strokeLinecap="round"
                 />
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-lg font-bold text-gray-900">
-                  {compoundedSavingsRate.toFixed(1)}%
+                  {savingsRate.toFixed(1)}%
                 </span>
               </div>
             </div>
             <div>
               <span
                 className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  compoundedSavingsRate >= 30
+                  savingsRate >= 30
                     ? 'bg-green-100 text-green-700'
-                    : compoundedSavingsRate >= 15
+                    : savingsRate >= 15
                     ? 'bg-blue-100 text-blue-700'
                     : 'bg-orange-100 text-orange-700'
                 }`}
               >
-                {compoundedSavingsRate >= 30 ? '优秀' : compoundedSavingsRate >= 15 ? '良好' : '待优化'}
+                {savingsRate >= 30 ? '优秀' : savingsRate >= 15 ? '良好' : '待优化'}
               </span>
               <p className="text-xs text-gray-400 mt-1">
-                基于总消耗计算
+                = 已节省 / 优化前预估 × 100%
               </p>
             </div>
           </div>
         </div>
       </div>
+
+      {/* ── Baseline comparison bar ── */}
+      {baselineTokens > 0 && totalCompoundedSaved > 0 && (() => {
+        const usedPct = (totalTokens / baselineTokens) * 100;
+        const savedPct = (totalCompoundedSaved / baselineTokens) * 100;
+        return (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-5 py-4">
+            <div className="flex items-baseline gap-2 mb-3">
+              <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">优化前预估消耗</span>
+              <span className="text-sm font-semibold text-gray-700">{fmtTokens(baselineTokens)}</span>
+            </div>
+            <div className="flex h-3 rounded-full overflow-hidden bg-gray-100">
+              <div className="bg-blue-500 transition-all" style={{ width: `${usedPct}%` }} />
+              <div className="bg-emerald-400 transition-all" style={{ width: `${savedPct}%` }} />
+            </div>
+            <div className="flex items-center justify-between mt-2.5 text-xs text-gray-500">
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-sm bg-blue-500" />
+                实际消耗 {fmtTokens(totalTokens)}
+                <span className="text-gray-300">({usedPct.toFixed(1)}%)</span>
+              </span>
+              <span className="flex items-center gap-1.5 text-emerald-600 font-medium">
+                <span className="w-2 h-2 rounded-sm bg-emerald-400" />
+                已节省 {fmtTokens(totalCompoundedSaved)}
+                <span className="font-normal text-emerald-500">({savedPct.toFixed(1)}%)</span>
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Session table ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -629,10 +693,10 @@ export const TokenSavingsPage: React.FC = () => {
                   输出 Token
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  已降低
+                  <span className="inline-flex items-center gap-1" title="对比该会话优化前的预估消耗">已节省</span>
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  降低率
+                  节省率
                 </th>
               </tr>
             </thead>
