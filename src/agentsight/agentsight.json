@@ -19,6 +19,8 @@
       {"rule": ["hermes*"], "agent_name": "Hermes"},
       {"rule": ["*python*", "*hermes*"], "agent_name": "Hermes"},
       {"rule": ["*python*", "-m", "*hermes*"], "agent_name": "Hermes"},
+      {"rule": ["*codex*"], "agent_name": "Codex"},
+      {"rule": ["*node*", "*codex*"], "agent_name": "Codex"},
       {"rule": ["node*", "*/bin/co*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*/bin/cosh*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*/bin/copliot*"], "agent_name": "Cosh"},
@@ -32,6 +34,21 @@
       {"rule": ["*node*", "*openclaw*", "gatewa*"], "agent_name": "OpenClaw"},
       {"rule": ["openclaw"], "agent_name": "OpenClaw"},
       {"rule": ["claude*"], "agent_name": "Claude"}
+    ]
+  },
+  "codex_offsets": {
+    "schema_version": 1,
+    "entries": [
+      {
+        "codex_version": "0.141.0",
+        "fingerprint": { "file_size": 276579568, "head_64k_sha256": "f015ddd2a687c1fc0b3ce70d898c0a68eeab88ad0040e79b0fe49a8545ff52a9" },
+        "offsets": { "ssl_write": 210691872, "ssl_read": 210691280, "ssl_do_handshake": 210689600, "write_is_ex": true, "read_is_ex": true }
+      },
+      {
+        "codex_version": "0.137.0",
+        "fingerprint": { "file_size": 227758400, "head_64k_sha256": "49b0a1c3a831071e9766cd0db83537a5270a374f8ac11783264a5a354c3b544a" },
+        "offsets": { "ssl_write": 172964768, "ssl_read": 172964176, "ssl_do_handshake": 172962496, "write_is_ex": true, "read_is_ex": true }
+      }
     ]
   }
 }

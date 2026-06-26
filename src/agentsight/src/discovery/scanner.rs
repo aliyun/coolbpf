@@ -224,7 +224,7 @@ impl AgentScanner {
     }
 
     /// Attempt to match a process against known agents
-    fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
+    pub fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
         let proc_dir = format!("/proc/{pid}");
 
         // Read process name from /proc/[pid]/comm
@@ -379,5 +379,13 @@ mod tests {
         // Deny works
         assert!(scanner.is_denied(&["deny-me-process".to_string()]));
         assert!(!scanner.is_denied(&["node".to_string(), "/path/claude-code".to_string()]));
+    }
+
+    #[test]
+    fn test_try_match_process_current() {
+        let scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+        // The current test process should not match any agent rule.
+        let result = scanner.try_match_process(std::process::id());
+        assert!(result.is_none());
     }
 }

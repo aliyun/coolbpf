@@ -111,12 +111,17 @@ impl GenAIBuilder {
             };
 
             // Determine response_id from call metadata (may come from parsed_message
-            // or SSE body fallback), and check if mapper resolved it.
+            // or SSE body fallback), and check if mapper resolved it (either via
+            // response_id mapping, or via pid → session fallback for agents like
+            // Codex CLI whose rollout file does not embed a response_id).
             let response_id = llm_call.metadata.get("response_id").cloned();
             let mapper_hit = response_id
                 .as_deref()
                 .and_then(|rid| response_mapper.get_session_by_response_id(rid))
-                .is_some();
+                .is_some()
+                || response_mapper
+                    .get_session_by_pid(llm_call.pid as u32)
+                    .is_some();
 
             // If response_id exists but mapper didn't resolve session_id, queue
             // for deferred resolution so the next FileWrite event can fix it.
@@ -216,91 +221,60 @@ impl GenAIBuilder {
         // 重新计算并 UPDATE 正常 ID，只有 crash 路径才会保留这里写入的
         // peek/fallback 值。
         let (user_query, input_messages, system_instructions, first_user_text, last_user_text) =
-            if let Some(ref v) = body {
-                if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
-                    // Helper: extract text from "content" which can be either
-                    // a plain string or an array of content blocks:
-                    //   "content": "text"
-                    //   "content": [{"type":"text","text":"..."},...]
-                    let extract_text = |m: &serde_json::Value| -> Option<String> {
-                        let c = m.get("content")?;
-                        if let Some(s) = c.as_str() {
-                            if !s.is_empty() {
-                                return Some(s.to_string());
-                            }
-                        }
-                        if let Some(arr) = c.as_array() {
-                            let text: String = arr
-                                .iter()
-                                .filter_map(|item| {
-                                    // [{"type":"text","text":"..."}]
-                                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                        item.get("text").and_then(|t| t.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !text.is_empty() {
-                                return Some(text);
-                            }
-                        }
-                        None
-                    };
+            if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+                let (messages, instructions_text) = view;
 
-                    // First user message raw text — used as `session_key` material
-                    // for IdResolver peek / crash fallback.
-                    let first_user_text = messages
-                        .iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .find_map(&extract_text)
-                        .unwrap_or_default();
+                // First user message raw text — used as `session_key` material
+                // for IdResolver peek / crash fallback.
+                let first_user_text = messages
+                    .iter()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    .find_map(Self::extract_message_text)
+                    .unwrap_or_default();
 
-                    // Last user message raw text — used for user_query (display text)
-                    // 以及 conversation_key (peek / crash fallback)。
-                    let last_user_raw = messages
-                        .iter()
-                        .rev()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .find_map(extract_text);
-                    let last_user_text = last_user_raw.clone().unwrap_or_default();
+                // Last user message raw text — used for user_query (display text)
+                // 以及 conversation_key (peek / crash fallback)。
+                let last_user_raw = messages
+                    .iter()
+                    .rev()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                    .find_map(Self::extract_message_text);
+                let last_user_text = last_user_raw.clone().unwrap_or_default();
 
-                    // user_query: last user message text, stripped of metadata prefix
-                    let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
+                // user_query: last user message text, stripped of metadata prefix
+                let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
 
-                    // Serialise message subsets for the pending record
-                    let sys: Vec<_> = messages
-                        .iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                        .collect();
-                    let non_sys: Vec<_> = messages
-                        .iter()
-                        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-                        .collect();
+                // Serialise message subsets for the pending record
+                let sys: Vec<_> = messages
+                    .iter()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                    .collect();
+                let non_sys: Vec<_> = messages
+                    .iter()
+                    .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                    .collect();
 
-                    let input_messages = if non_sys.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&non_sys).ok()
-                    };
-                    let system_instructions = if sys.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&sys).ok()
-                    };
-
-                    (
-                        user_query,
-                        input_messages,
-                        system_instructions,
-                        first_user_text,
-                        last_user_text,
-                    )
+                let input_messages = if non_sys.is_empty() {
+                    None
                 } else {
-                    // messages key missing or not an array
-                    (None, None, None, String::new(), String::new())
-                }
+                    serde_json::to_string(&non_sys).ok()
+                };
+                let system_instructions = if sys.is_empty() {
+                    // Responses API carries the system prompt at the top level
+                    // via "instructions". Fall back to that when the messages
+                    // array has no system role.
+                    instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
+                } else {
+                    serde_json::to_string(&sys).ok()
+                };
+
+                (
+                    user_query,
+                    input_messages,
+                    system_instructions,
+                    first_user_text,
+                    last_user_text,
+                )
             } else {
                 (None, None, None, String::new(), String::new())
             };
@@ -496,6 +470,36 @@ impl GenAIBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probes::sslsniff::SslEvent;
+    use std::rc::Rc;
+
+    fn make_request(path: &str, body: &str) -> ParsedRequest {
+        let buf = body.as_bytes().to_vec();
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 1,
+            comm: "test".to_string(),
+            buf,
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        });
+        ParsedRequest {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            version: 11,
+            headers: std::collections::HashMap::new(),
+            body_offset: 0,
+            body_len: body.len(),
+            source_event: ssl_event,
+            reassembled_body: None,
+        }
+    }
 
     #[test]
     fn test_generate_id_unique() {
@@ -516,5 +520,65 @@ mod tests {
         let id2 = b2.generate_id();
         assert!(id1.contains('_'));
         assert!(id2.contains('_'));
+    }
+
+    #[test]
+    fn test_build_pending_from_request_chat_completions() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .unwrap();
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert_eq!(pending.provider.as_deref(), Some("openai"));
+        assert!(pending.system_instructions.is_some());
+        assert!(pending.user_query.as_deref() == Some("hello"));
+        assert_eq!(pending.call_kind, "main");
+    }
+
+    #[test]
+    fn test_build_pending_from_request_responses_api() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","input":[{"role":"user","content":"hello"}],"instructions":"sys prompt"}"#;
+        let req = make_request("/v1/responses", body);
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .unwrap();
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert_eq!(pending.provider.as_deref(), Some("openai"));
+        assert!(pending.system_instructions.is_some());
+        assert!(pending.user_query.as_deref() == Some("hello"));
+    }
+
+    #[test]
+    fn test_build_pending_from_request_non_llm_path() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[]}"#;
+        let req = make_request("/api/health", body);
+        let cache = std::collections::HashMap::new();
+        assert!(
+            builder
+                .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_build_pending_from_request_llm_path_no_messages_view() {
+        let builder = GenAIBuilder::new();
+        // LLM path but body lacks both "messages" and "input".
+        let body = r#"{"model":"gpt-4","stream":true}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+        let pending = builder
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .expect("LLM path should still create pending even without messages");
+        assert_eq!(pending.model.as_deref(), Some("gpt-4"));
+        assert!(pending.user_query.is_none());
+        assert!(pending.input_messages.is_none());
+        assert!(pending.system_instructions.is_none());
     }
 }

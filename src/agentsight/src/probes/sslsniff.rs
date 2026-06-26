@@ -326,44 +326,58 @@ impl SslSniff {
 
             log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
 
-            // uprobe attach requires host filesystem paths, not /proc/{pid}/root/... paths.
-            // canonicalize resolves /proc/{pid}/root symlink to the real host path,
-            // handling both container (overlay rootfs) and non-container (/ symlink) cases.
-            // Falls back to original path if the process has already exited.
-            let uprobe_path = std::fs::canonicalize(&path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.clone());
-
             let result = match kind {
                 // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
-                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &uprobe_path, -1),
-                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &uprobe_path, -1),
-                SslLibKind::Nss => attach_nss(&mut self.skel, &uprobe_path, -1),
-                SslLibKind::Boring => {
-                    match attach_boringssl_by_symbol(&mut self.skel, &uprobe_path, -1) {
-                        Ok(ls) => Ok(ls),
-                        Err(sym_err) => {
-                            log::debug!(
-                                "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                            );
-                            match find_boringssl_offsets(&path) {
-                                Some(off) => attach_boringssl_by_offset(
-                                    &mut self.skel,
-                                    &uprobe_path,
-                                    &off,
-                                    false,
-                                    -1,
-                                ),
-                                None => {
+                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
+                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
+                SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
+                SslLibKind::Boring => match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
+                    Ok(ls) => Ok(ls),
+                    Err(sym_err) => {
+                        log::debug!(
+                            "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                        );
+                        match find_boringssl_offsets(&path) {
+                            Some(off) => {
+                                attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
+                            }
+                            None => {
+                                // Tier 3: codex offset table lookup (for static-pie binaries
+                                // like Codex CLI that embed aws-lc/BoringSSL without symbols)
+                                if let Some(ref table) = *CODEX_OFFSET_TABLE {
+                                    if let Some(off) = table.lookup(&path) {
+                                        log::info!(
+                                            "[attach_process] pid={pid}: codex offset table matched for {path} \
+                                             (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                            off.ssl_write,
+                                            off.ssl_read,
+                                            off.ssl_do_handshake
+                                        );
+                                        attach_boringssl_by_offset(
+                                            &mut self.skel,
+                                            &path,
+                                            &off,
+                                            true,
+                                            -1,
+                                        )
+                                    } else {
+                                        log::warn!(
+                                            "[attach_process] pid={pid}: BoringSSL detection failed for {path} \
+                                             (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                        );
+                                        continue;
+                                    }
+                                } else {
                                     log::warn!(
-                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
+                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} \
+                                         (no SSL_* in .dynsym and no byte-pattern match), skipping"
                                     );
                                     continue;
                                 }
                             }
                         }
                     }
-                }
+                },
             };
 
             match result {
@@ -387,16 +401,31 @@ impl SslSniff {
         Ok(())
     }
 
-    /// Clean up per-pid bookkeeping when a traced process exits.
+    /// Detach SSL probes for a process and clean up traced inodes.
     ///
-    /// Inodes are intentionally kept in `traced_files` because uprobes are
-    /// attached globally (`pid=-1`). The existing Links remain valid for all
-    /// processes using the same library, so re-attaching would only create
-    /// duplicate fds.
+    /// When a process exits, its inodes are removed from `traced_files` **only
+    /// if no other traced pid still references the same inode**.  Uprobes are
+    /// attached globally (`pid=-1`), so the link remains valid for other
+    /// processes using the same library; removing the inode prematurely would
+    /// cause the scanner to re-attach on the next sweep, producing duplicate
+    /// uprobe fds.
     pub fn detach_process(&mut self, pid: u32) {
         if let Some(inodes) = self.pid_inodes.remove(&pid) {
+            let mut removed = 0;
+            for inode in &inodes {
+                // Check whether another pid still maps this inode.
+                let still_used = self
+                    .pid_inodes
+                    .values()
+                    .any(|other_inodes| other_inodes.contains(inode));
+                if !still_used {
+                    self.traced_files.remove(inode);
+                    removed += 1;
+                }
+            }
             log::debug!(
-                "[detach_process] pid={pid}: removed pid_inodes entry ({} inodes, kept in traced_files)",
+                "[detach_process] pid={pid}: removed {}/{} inodes from traced_files",
+                removed,
                 inodes.len()
             );
         }
@@ -500,10 +529,17 @@ impl Drop for SslPoller {
 
 // ─── BoringSSL pattern detection ─────────────────────────────────────────────
 
-struct BoringSslOffsets {
-    ssl_write: usize,
-    ssl_read: usize,
-    ssl_do_handshake: usize,
+#[derive(Debug, Clone)]
+pub(super) struct BoringSslOffsets {
+    pub ssl_write: usize,
+    pub ssl_read: usize,
+    pub ssl_do_handshake: usize,
+    /// True when `ssl_write` points to `SSL_write_ex` (returns 0/1 + *written),
+    /// rather than `SSL_write` (returns byte count). Required for aws-lc where
+    /// only the _ex variant is exported.
+    pub write_is_ex: bool,
+    /// True when `ssl_read` points to `SSL_read_ex` rather than `SSL_read`.
+    pub read_is_ex: bool,
 }
 
 fn find_pattern(haystack: &[u8], pattern: &[u8]) -> Option<usize> {
@@ -635,6 +671,8 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         ssl_write: wr_off,
         ssl_read: read_off,
         ssl_do_handshake: hs_off,
+        write_is_ex: false,
+        read_is_ex: false,
     })
 }
 
@@ -649,7 +687,7 @@ enum SslLibKind {
     GnuTls,
     /// libnspr4.so (NSS / Firefox)
     Nss,
-    /// BoringSSL embedded in binary (e.g. Node.js, Chrome)
+    /// BoringSSL / aws-lc embedded in binary (e.g. Node.js, Chrome, Codex CLI)
     Boring,
 }
 
@@ -682,6 +720,10 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
             | "google-chrome-stable"
             | "claude.exe"
     ) {
+        return Some(SslLibKind::Boring);
+    }
+    // Codex CLI statically links aws-lc (BoringSSL-compatible TLS library).
+    if name.starts_with("codex") && !name.contains('.') {
         return Some(SslLibKind::Boring);
     }
     // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
@@ -723,6 +765,15 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             // When the backing file has been unlinked (" (deleted)" in maps),
             // the filesystem path no longer exists.  Fall back to /proc/<pid>/exe
             // which the kernel keeps accessible as long as the process is alive.
+            //
+            // For normal paths we prefix with `/proc/<pid>/root` so that the
+            // uprobe target resolves through the process's own mount namespace.
+            // This is intentional: `canonicalize()` would resolve overlayfs
+            // paths to the host's lower/upper dirs, which libbpf cannot always
+            // map back to an inode for uprobe attachment.  The kernel's uprobe
+            // mechanism natively understands `/proc/<pid>/root/<path>` because
+            // it follows the process's mount namespace, making this safe for
+            // both host and container processes.
             let path_str = if path_str.ends_with(" (deleted)") {
                 format!("/proc/{pid}/exe")
             } else {
@@ -908,32 +959,66 @@ fn attach_boringssl_by_offset(
     handshake: bool,
     pid: i32,
 ) -> Result<Vec<Link>> {
-    let mut links = vec![
-        up_off!(
+    let mut links = Vec::new();
+
+    if off.write_is_ex {
+        // SSL_write_ex: returns 0/1, byte count in *written (4th arg).
+        // Use the _ex BPF programs which read from the output pointer.
+        links.push(up_off!(
+            skel.progs_mut().probe_SSL_write_ex_enter(),
+            pid,
+            lib,
+            off.ssl_write
+        )?);
+        links.push(ur_off!(
+            skel.progs_mut().probe_SSL_write_ex_exit(),
+            pid,
+            lib,
+            off.ssl_write
+        )?);
+    } else {
+        links.push(up_off!(
             skel.progs_mut().probe_SSL_rw_enter(),
             pid,
             lib,
             off.ssl_write
-        )?,
-        ur_off!(
+        )?);
+        links.push(ur_off!(
             skel.progs_mut().probe_SSL_write_exit(),
             pid,
             lib,
             off.ssl_write
-        )?,
-        up_off!(
+        )?);
+    }
+
+    if off.read_is_ex {
+        links.push(up_off!(
+            skel.progs_mut().probe_SSL_read_ex_enter(),
+            pid,
+            lib,
+            off.ssl_read
+        )?);
+        links.push(ur_off!(
+            skel.progs_mut().probe_SSL_read_ex_exit(),
+            pid,
+            lib,
+            off.ssl_read
+        )?);
+    } else {
+        links.push(up_off!(
             skel.progs_mut().probe_SSL_rw_enter(),
             pid,
             lib,
             off.ssl_read
-        )?,
-        ur_off!(
+        )?);
+        links.push(ur_off!(
             skel.progs_mut().probe_SSL_read_exit(),
             pid,
             lib,
             off.ssl_read
-        )?,
-    ];
+        )?);
+    }
+
     if handshake {
         links.push(up_off!(
             skel.progs_mut().probe_SSL_do_handshake_enter(),
@@ -950,6 +1035,16 @@ fn attach_boringssl_by_offset(
     }
     Ok(links)
 }
+
+// ─── Codex offset table (Tier 3) ────────────────────────────────────────────
+
+use super::codex_offsets::OffsetTable;
+
+static CODEX_OFFSET_TABLE: std::sync::LazyLock<Option<OffsetTable>> =
+    std::sync::LazyLock::new(|| {
+        let json = include_str!("../../agentsight.json");
+        OffsetTable::load(json)
+    });
 
 #[cfg(test)]
 mod tests {
@@ -1100,47 +1195,6 @@ mod tests {
             ev.buf.len(),
             payload.len(),
             "buf_size clamped to available bytes"
-        );
-    }
-
-    #[test]
-    fn uprobe_path_canonicalize_resolves_real_path() {
-        // Test canonicalize-based path resolution for uprobe attach.
-        // canonicalize follows symlinks, resolving /proc/{pid}/root/... to host paths.
-
-        // Case 1: Real path on host filesystem is resolved to itself
-        let host_path = "/usr/lib/x86_64-linux-gnu/libssl.so.3";
-        if std::path::Path::new(host_path).exists() {
-            let resolved = std::fs::canonicalize(host_path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| host_path.to_string());
-            // canonicalize of an existing absolute path returns the real path
-            assert!(
-                !resolved.contains("/proc/"),
-                "resolved path should not contain /proc/ prefix: {resolved}"
-            );
-        }
-
-        // Case 2: /proc/self/root/... resolves to host path (self is always valid)
-        let self_root_path = "/proc/self/root/etc/hosts";
-        if std::path::Path::new(self_root_path).exists() {
-            let resolved = std::fs::canonicalize(self_root_path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| self_root_path.to_string());
-            assert_eq!(
-                resolved, "/etc/hosts",
-                "/proc/self/root/etc/hosts should resolve to /etc/hosts"
-            );
-        }
-
-        // Case 3: Non-existent path falls back to original (simulates exited process)
-        let dead_proc_path = "/proc/999999999/root/usr/lib/libssl.so";
-        let resolved = std::fs::canonicalize(dead_proc_path)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| dead_proc_path.to_string());
-        assert_eq!(
-            resolved, dead_proc_path,
-            "non-existent path should fall back to original"
         );
     }
 }

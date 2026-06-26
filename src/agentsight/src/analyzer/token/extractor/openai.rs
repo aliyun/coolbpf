@@ -71,49 +71,50 @@ pub fn extract_response_content(
     response_json: Option<&Value>,
 ) -> Option<(String, Option<String>, Vec<String>)> {
     let resp = response_json?;
-    let choices = resp.get("choices").and_then(|c| c.as_array())?;
 
     let mut content = String::new();
     let mut reasoning = None;
     let mut tool_calls = Vec::new();
     let mut has_data = false;
 
-    for choice in choices {
-        // Support both "message" (standard response) and "delta" (SSE streaming) formats
-        let msg_or_delta = choice.get("message").or_else(|| choice.get("delta"));
+    if let Some(choices) = resp.get("choices").and_then(|c| c.as_array()) {
+        for choice in choices {
+            // Support both "message" (standard response) and "delta" (SSE streaming) formats
+            let msg_or_delta = choice.get("message").or_else(|| choice.get("delta"));
 
-        if let Some(msg) = msg_or_delta {
-            // Extract content
-            if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
-                if !c.is_empty() {
-                    content.push_str(c);
-                    has_data = true;
+            if let Some(msg) = msg_or_delta {
+                // Extract content
+                if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
+                    if !c.is_empty() {
+                        content.push_str(c);
+                        has_data = true;
+                    }
                 }
-            }
 
-            // Extract reasoning_content
-            if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str()) {
-                if !r.is_empty() {
-                    // For SSE chunks, accumulate reasoning content
-                    reasoning = match reasoning {
-                        Some(existing) => Some(existing + r),
-                        None => Some(r.to_string()),
-                    };
-                    has_data = true;
+                // Extract reasoning_content
+                if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str()) {
+                    if !r.is_empty() {
+                        // For SSE chunks, accumulate reasoning content
+                        reasoning = match reasoning {
+                            Some(existing) => Some(existing + r),
+                            None => Some(r.to_string()),
+                        };
+                        has_data = true;
+                    }
                 }
-            }
 
-            // Extract tool_calls - only extract function name and arguments
-            if let Some(calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
-                for tool_call in calls {
-                    if let Some(func) = tool_call.get("function") {
-                        let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        let arguments =
-                            func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-                        let tool_content = format!("{name}: {arguments}");
-                        if !tool_content.is_empty() {
-                            tool_calls.push(tool_content);
-                            has_data = true;
+                // Extract tool_calls - only extract function name and arguments
+                if let Some(calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                    for tool_call in calls {
+                        if let Some(func) = tool_call.get("function") {
+                            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let arguments =
+                                func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                            let tool_content = format!("{name}: {arguments}");
+                            if !tool_content.is_empty() {
+                                tool_calls.push(tool_content);
+                                has_data = true;
+                            }
                         }
                     }
                 }
@@ -122,10 +123,59 @@ pub fn extract_response_content(
     }
 
     if has_data {
-        Some((content, reasoning, tool_calls))
-    } else {
-        None
+        return Some((content, reasoning, tool_calls));
     }
+
+    // OpenAI Responses API SSE chunks have a different shape — top-level
+    // "type" tags such as `response.output_text.delta` carry text in
+    // `delta` / `text`, while `response.output_item.done` embeds the
+    // assistant message under `item.content[].text`. Extract text from
+    // the kinds that contribute to assistant output tokens.
+    if let Some(ty) = resp.get("type").and_then(|t| t.as_str()) {
+        match ty {
+            "response.output_text.delta" => {
+                if let Some(d) = resp.get("delta").and_then(|d| d.as_str()) {
+                    if !d.is_empty() {
+                        return Some((d.to_string(), None, Vec::new()));
+                    }
+                }
+            }
+            "response.output_text.done" => {
+                if let Some(t) = resp.get("text").and_then(|t| t.as_str()) {
+                    if !t.is_empty() {
+                        return Some((t.to_string(), None, Vec::new()));
+                    }
+                }
+            }
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                if let Some(d) = resp.get("delta").and_then(|d| d.as_str()) {
+                    if !d.is_empty() {
+                        return Some((String::new(), Some(d.to_string()), Vec::new()));
+                    }
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(item_content) = resp
+                    .get("item")
+                    .and_then(|i| i.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    let mut text = String::new();
+                    for part in item_content {
+                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                            text.push_str(t);
+                        }
+                    }
+                    if !text.is_empty() {
+                        return Some((text, None, Vec::new()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Extract role and content from OpenAI message JSON
@@ -284,5 +334,169 @@ mod tests {
         let request = serde_json::json!({"model": "gpt-4"});
         let result = extract_token_data(Some(&request), None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_responses_api_output_text_delta() {
+        let chunk = serde_json::json!({
+            "type": "response.output_text.delta",
+            "delta": "hello world",
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract delta text");
+        assert_eq!(content, "hello world");
+        assert!(reasoning.is_none());
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_responses_api_output_text_done() {
+        let chunk = serde_json::json!({
+            "type": "response.output_text.done",
+            "text": "complete output text",
+        });
+        let (content, _, _) =
+            extract_response_content(Some(&chunk)).expect("should extract final text");
+        assert_eq!(content, "complete output text");
+    }
+
+    #[test]
+    fn test_responses_api_output_item_done() {
+        let chunk = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "first"},
+                    {"type": "output_text", "text": " second"},
+                ],
+            },
+        });
+        let (content, _, _) =
+            extract_response_content(Some(&chunk)).expect("should extract item content");
+        assert_eq!(content, "first second");
+    }
+
+    #[test]
+    fn test_responses_api_unknown_type_returns_none() {
+        let chunk = serde_json::json!({
+            "type": "response.created",
+            "response": {"id": "abc"},
+        });
+        assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    #[test]
+    fn test_responses_api_reasoning_text_delta() {
+        let chunk = serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "delta": "thinking...",
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract reasoning");
+        assert!(content.is_empty());
+        assert_eq!(reasoning, Some("thinking...".to_string()));
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_responses_api_reasoning_summary_text_delta() {
+        let chunk = serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "summary...",
+        });
+        let (content, reasoning, tools) =
+            extract_response_content(Some(&chunk)).expect("should extract reasoning summary");
+        assert!(content.is_empty());
+        assert_eq!(reasoning, Some("summary...".to_string()));
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_responses_api_output_text_delta_empty() {
+        let chunk = serde_json::json!({
+            "type": "response.output_text.delta",
+            "delta": "",
+        });
+        assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    #[test]
+    fn test_responses_api_output_text_done_empty() {
+        let chunk = serde_json::json!({
+            "type": "response.output_text.done",
+            "text": "",
+        });
+        assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    #[test]
+    fn test_responses_api_output_item_done_empty() {
+        let chunk = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+            },
+        });
+        assert!(extract_response_content(Some(&chunk)).is_none());
+    }
+
+    #[test]
+    fn test_extract_response_with_tool_calls() {
+        let response = serde_json::json!({
+            "model": "gpt-4",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "tc_1",
+                        "function": {"name": "search", "arguments": "{\"q\":\"rust\"}"}
+                    }]
+                }
+            }]
+        });
+        let token_data = extract_token_data(None, Some(&response)).unwrap();
+        assert_eq!(token_data.tool_calls.len(), 1);
+        assert!(token_data.tool_calls[0].contains("search"));
+    }
+
+    #[test]
+    fn test_extract_sse_reasoning_content_accumulation() {
+        let chunk = serde_json::json!({
+            "model": "qwen",
+            "choices": [
+                {"delta": {"content": "a", "reasoning_content": "think1"}},
+                {"delta": {"content": "b", "reasoning_content": "think2"}}
+            ]
+        });
+        let (content, reasoning, _) =
+            extract_response_content(Some(&chunk)).expect("should extract");
+        assert_eq!(content, "ab");
+        assert_eq!(reasoning, Some("think1think2".to_string()));
+    }
+
+    #[test]
+    fn test_extract_tool_calls_skips_missing_function() {
+        let response = serde_json::json!({
+            "model": "gpt-4",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "tool_calls": [{"id": "tc_1"}]
+                }
+            }]
+        });
+        let (content, _, tool_calls) =
+            extract_response_content(Some(&response)).expect("should extract content");
+        assert_eq!(content, "answer");
+        assert!(
+            tool_calls.is_empty(),
+            "tool_call without function should be skipped"
+        );
     }
 }

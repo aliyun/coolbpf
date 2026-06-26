@@ -86,6 +86,10 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qwen3-14b-instruct", "Qwen/Qwen3-14B-Instruct");
     m.insert("qwen3-32b-instruct", "Qwen/Qwen3-32B-Instruct");
     m.insert("qwen3-72b-instruct", "Qwen/Qwen3-72B-Instruct");
+    // Qwen 3 coder family (used by codex 0.137+ via dashscope) — fall back
+    // to the same-vocabulary Qwen2.5-Coder tokenizer for offline counting.
+    m.insert("qwen3-coder-plus", "Qwen/Qwen2.5-Coder-32B-Instruct");
+    m.insert("qwen3-coder", "Qwen/Qwen2.5-Coder-32B-Instruct");
 
     // Common variations
     m.insert("qwen3.5-plus", "Qwen/Qwen3.5-397B-A17B");

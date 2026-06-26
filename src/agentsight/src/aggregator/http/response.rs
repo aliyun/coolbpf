@@ -15,6 +15,12 @@ pub struct AggregatedResponse {
     pub parsed: ParsedResponse,
     /// SSE events collected during streaming (if is_sse is true)
     pub sse_events: Vec<ParsedSseEvent>,
+    /// Raw bytes that arrived as RawData while in SseActive state. These are
+    /// continuation chunks of an oversized SSE event (e.g. OpenAI Responses
+    /// API's `response.completed` echoing the full system prompt + tools)
+    /// whose first chunk parsed as a (truncated) SseEvent. Used by downstream
+    /// extractors to recover token usage embedded past the truncation point.
+    pub sse_continuation_bytes: Option<Vec<u8>>,
 }
 
 impl AggregatedResponse {
@@ -23,6 +29,7 @@ impl AggregatedResponse {
         AggregatedResponse {
             parsed,
             sse_events: Vec::new(),
+            sse_continuation_bytes: None,
         }
     }
 
