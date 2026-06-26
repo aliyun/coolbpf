@@ -72,6 +72,26 @@ pub fn logtail_path() -> Option<String> {
     DYNAMIC_LOGTAIL_PATH.read().ok().and_then(|g| g.clone())
 }
 
+/// 返回指向 `/var/sysom/` 的 sysom Logtail 路径（如有）。
+///
+/// 同时检查环境变量 `SLS_LOGTAIL_FILE` 与动态配置路径，
+/// 用于 `unified.rs` 在启动时判断应启用 sysom 单路径模式还是默认多 sink 模式。
+pub fn sysom_logtail_path() -> Option<String> {
+    if let Ok(p) = std::env::var(LOGTAIL_ENV_VAR) {
+        if p.starts_with("/var/sysom/") {
+            return Some(p);
+        }
+    }
+    if let Ok(guard) = DYNAMIC_LOGTAIL_PATH.read() {
+        if let Some(ref p) = *guard {
+            if p.starts_with("/var/sysom/") {
+                return Some(p.clone());
+            }
+        }
+    }
+    None
+}
+
 /// 返回当前应写入 SLS Logtail 的所有活动路径。
 ///
 /// 规则与 `unified.rs` 中的 exporter 注册逻辑保持一致：
@@ -80,11 +100,14 @@ pub fn logtail_path() -> Option<String> {
 ///
 /// 返回的列表已去重，避免同一文件被重复写入。
 pub fn active_logtail_paths() -> Vec<std::path::PathBuf> {
+    // Sysom production mode: a single sysom path, regardless of whether it came
+    // from SLS_LOGTAIL_FILE or from runtime.sls_logtail_path.
+    if let Some(p) = sysom_logtail_path() {
+        return vec![std::path::PathBuf::from(p)];
+    }
+
     let mut paths = Vec::new();
     if let Some(p) = logtail_path() {
-        if p.starts_with("/var/sysom/") {
-            return vec![std::path::PathBuf::from(p)];
-        }
         paths.push(std::path::PathBuf::from(p));
     }
     let default = std::path::PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
@@ -736,7 +759,13 @@ pub fn export_interruption_events(events: &[InterruptionEvent]) {
         return;
     }
 
+    let default_path = std::path::PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
     for path in &paths {
+        // Skip the default path when it does not exist, matching the behavior
+        // of the default LogtailExporter for LLMCall records.
+        if path == &default_path && !path.exists() {
+            continue;
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1027,6 +1056,23 @@ mod tests {
     }
 
     #[test]
+    fn test_active_logtail_paths_dynamic_sysom_only() {
+        // When runtime.sls_logtail_path points to sysom (and env var is not set),
+        // active_logtail_paths() should return only the sysom path.
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+        let sysom_path = "/var/sysom/ilog/agentsight/agentsight.jsonl";
+        set_dynamic_logtail_path(sysom_path);
+
+        assert_eq!(sysom_logtail_path(), Some(sysom_path.to_string()));
+        let paths = active_logtail_paths();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], PathBuf::from(sysom_path));
+
+        reset_logtail_state();
+    }
+
+    #[test]
     fn test_logtail_exporter_new_default_path() {
         let _guard = ENV_LOCK.lock().unwrap();
         reset_logtail_state();
@@ -1178,6 +1224,73 @@ mod tests {
         assert!(content.contains("session-1"));
 
         std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    #[test]
+    fn test_export_interruption_events_env_path_creates_if_missing() {
+        // A path set via SLS_LOGTAIL_FILE should still be created if missing.
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_interruption_env_{}",
+            std::process::id()
+        ));
+        let path = tmp.join("interruption.jsonl");
+        // SAFETY: tests acquire ENV_LOCK before mutating this variable.
+        unsafe { std::env::set_var(LOGTAIL_ENV_VAR, path.to_str().unwrap()) };
+
+        let event = InterruptionEvent::new(
+            crate::interruption::InterruptionType::AgentCrash,
+            Some("session-1".to_string()),
+            None,
+            Some("conv-1".to_string()),
+            None,
+            Some(42),
+            Some("test-agent".to_string()),
+            1_000_000,
+            Some(serde_json::json!({"pid": 42})),
+        );
+        export_interruption_events(&[event]);
+
+        assert!(path.exists(), "env-configured path should be created");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("agent_crash"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        reset_logtail_state();
+    }
+
+    #[test]
+    fn test_export_interruption_events_skips_missing_default_path() {
+        // The default SLS path should not be auto-created; export should skip it.
+        let _guard = ENV_LOCK.lock().unwrap();
+        reset_logtail_state();
+
+        // Ensure the default path does not exist.
+        let default = std::path::PathBuf::from(DEFAULT_SLS_LOGTAIL_PATH);
+        assert!(
+            !default.exists(),
+            "precondition: default path must not exist"
+        );
+
+        let event = InterruptionEvent::new(
+            crate::interruption::InterruptionType::AgentCrash,
+            Some("session-1".to_string()),
+            None,
+            Some("conv-1".to_string()),
+            None,
+            Some(42),
+            Some("test-agent".to_string()),
+            1_000_000,
+            Some(serde_json::json!({"pid": 42})),
+        );
+        export_interruption_events(&[event]);
+
+        assert!(
+            !default.exists(),
+            "default path must not be created by interruption export"
+        );
         reset_logtail_state();
     }
 }

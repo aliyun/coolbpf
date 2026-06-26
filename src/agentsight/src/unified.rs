@@ -300,39 +300,36 @@ impl AgentSight {
         // Determine if Logtail is currently enabled (env var OR dynamic config)
         let logtail_currently_enabled = crate::genai::logtail::logtail_enabled();
 
-        // Sysom production mode: when SLS_LOGTAIL_FILE points under /var/sysom/,
+        // Sysom production mode: when the active Logtail path points under /var/sysom/,
         // use only the external Logtail path. Skip SQLite and the default SLS exporter.
-        let sysom_logtail_path = std::env::var(crate::genai::logtail::LOGTAIL_ENV_VAR)
-            .ok()
-            .filter(|p| p.starts_with("/var/sysom/"));
+        let sysom_logtail_path = crate::genai::logtail::sysom_logtail_path();
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected ({}={}), skipping SQLite and default SLS exporter",
-                crate::genai::logtail::LOGTAIL_ENV_VAR,
+                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
                 path
             );
             if logtail_currently_enabled {
-                if let Some(exporter) = LogtailExporter::new(
+                let exporter = LogtailExporter::new_with_fixed_path(
+                    path,
                     config.encryption_public_key.as_deref(),
                     config.trace_enabled,
-                ) {
-                    let uid = crate::genai::instance_id::get_owner_account_id();
-                    if uid.is_empty() {
-                        anyhow::bail!(
-                            "SLS Logtail exporter is enabled but failed to \
-                             fetch owner-account-id from ECS metadata service. \
-                             Cannot upload logs without uid. Aborting."
-                        );
-                    }
-                    log::info!(
-                        "Logtail file exporter enabled (sysom, {}), uid={}",
-                        exporter.path().display(),
-                        uid
+                );
+                let uid = crate::genai::instance_id::get_owner_account_id();
+                if uid.is_empty() {
+                    anyhow::bail!(
+                        "SLS Logtail exporter is enabled but failed to \
+                         fetch owner-account-id from ECS metadata service. \
+                         Cannot upload logs without uid. Aborting."
                     );
-                    genai_exporters.push(Box::new(exporter));
-                    sls_activated.store(true, Ordering::SeqCst);
                 }
+                log::info!(
+                    "Logtail file exporter enabled (sysom, {}), uid={}",
+                    exporter.path().display(),
+                    uid
+                );
+                genai_exporters.push(Box::new(exporter));
+                sls_activated.store(true, Ordering::SeqCst);
             }
         } else {
             // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
