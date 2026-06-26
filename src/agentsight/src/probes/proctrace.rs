@@ -432,25 +432,53 @@ impl ProcTrace {
                 .reuse_fd(map.as_fd())
                 .context("failed to reuse external rb map")?;
         } else {
-            let rb_bytes = ring_buffer_mb
-                .checked_mul(1024 * 1024)
-                .filter(|&b| b <= u32::MAX as usize)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ring_buffer_mb={ring_buffer_mb} is out of range (must be <= {} MiB)",
-                        u32::MAX as usize / (1024 * 1024)
-                    )
-                })? as u32;
-            open_skel
-                .maps_mut()
-                .rb()
-                .set_max_entries(rb_bytes)
-                .with_context(|| {
-                    format!(
-                        "failed to set ring buffer max_entries to {rb_bytes} bytes ({ring_buffer_mb} MiB)"
-                    )
-                })?;
-            log::info!("BPF ring buffer resized to {ring_buffer_mb} MiB ({rb_bytes} bytes)");
+            // Validate power-of-two: BPF ring buffer max_entries must be a
+            // power-of-two multiple of the page size (typically 4 KiB).
+            // Common valid values: 8, 16, 32, 64 MiB.
+            if !ring_buffer_mb.is_power_of_two() {
+                let next = ring_buffer_mb.next_power_of_two();
+                log::warn!(
+                    "ring_buffer_mb={ring_buffer_mb} is not a power of two; \
+                     rounding up to {next} MiB to avoid BPF load failure"
+                );
+                // We don't mutate the original; just use next for the actual size.
+                let rb_bytes = next
+                    .checked_mul(1024 * 1024)
+                    .filter(|&b| b <= u32::MAX as usize)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("ring_buffer_mb={next} (rounded) is out of range")
+                    })? as u32;
+                open_skel
+                    .maps_mut()
+                    .rb()
+                    .set_max_entries(rb_bytes)
+                    .with_context(|| {
+                        format!(
+                            "failed to set ring buffer max_entries to {rb_bytes} bytes ({next} MiB)"
+                        )
+                    })?;
+                log::info!("BPF ring buffer resized to {next} MiB ({rb_bytes} bytes)");
+            } else {
+                let rb_bytes = ring_buffer_mb
+                    .checked_mul(1024 * 1024)
+                    .filter(|&b| b <= u32::MAX as usize)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ring_buffer_mb={ring_buffer_mb} is out of range (must be <= {} MiB)",
+                            u32::MAX as usize / (1024 * 1024)
+                        )
+                    })? as u32;
+                open_skel
+                    .maps_mut()
+                    .rb()
+                    .set_max_entries(rb_bytes)
+                    .with_context(|| {
+                        format!(
+                            "failed to set ring buffer max_entries to {rb_bytes} bytes ({ring_buffer_mb} MiB)"
+                        )
+                    })?;
+                log::info!("BPF ring buffer resized to {ring_buffer_mb} MiB ({rb_bytes} bytes)");
+            }
         }
 
         let mut skel = open_skel.load().context("failed to load BPF object")?;

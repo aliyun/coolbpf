@@ -232,6 +232,36 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 **重要：用户配置文件会完全替换（replace）内嵌的默认规则，而非追加（extend）。** 如果配置文件中缺少某个 Agent 的规则（如 `*claude*`），该 Agent 将不会被发现。修改配置前请确保包含所有需要监控的 Agent 规则。
 
+### 功能开关（`features`）
+
+通过 `agentsight.json` 的 `features` 区块独立控制各可选功能的启停。关闭后对应模块不实例化（`Storage::noop()` / `InterruptionDetector::disabled()` / `ResponseSessionMapper::disabled()`），减少内存和 I/O 开销。
+
+| 功能 | JSON 路径 | 默认值 | 说明 |
+|------|-----------|--------|------|
+| Token 统计 | `features.token_stats` | `true` | 核心功能 |
+| 本地 Tokenizer | `features.tokenizer.enabled` | `false` | HuggingFace 模型 fallback |
+| Session 映射 | `features.session_mapping.enabled` | `true` | responseId → sessionId |
+| SQLite 存储 | `features.sqlite_storage.enabled` | `true` | 关闭后用内存 noop store |
+| 中断检测 | `features.interruption_detection.enabled` | `true` | 死循环/崩溃检测 |
+| 审计 | `features.audit` | `true` | LLM 调用审计持久化 |
+| Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
+| SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
+
+### 运行时资源上限（`runtime_limits`）
+
+通过 `runtime_limits` 配置有界缓冲区上限，防止内存无限增长。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `event_channel_capacity` | 10,000 | Probe 事件有界通道容量 |
+| `event_channel_policy` | `backpressure` | 满载策略：backpressure / drop_newest / sample |
+| `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
+| `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
+| `pid_cache_size` | 1,024 | PID → agent_name LRU 缓存 |
+| `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
+| `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时 |
+| `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
+
 ## 11. Design Docs
 
 - [eBPF Probes 设计](docs/design-docs/ebpf-probes.md)
