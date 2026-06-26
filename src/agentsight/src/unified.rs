@@ -2122,4 +2122,36 @@ mod tests {
 
         complete_deferred_genai(&[event], None, &exporters, None);
     }
+
+    #[test]
+    fn test_pending_genai_estimated_bytes() {
+        let pending = PendingGenAI {
+            events: vec![],
+            response_id: "test-response-id".to_string(),
+            pid: 1234,
+            created_at: std::time::Instant::now(),
+        };
+        let bytes = pending.estimated_bytes();
+        // Should include struct size + response_id length
+        assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 16);
+        // Empty events should contribute 0 extra
+        assert_eq!(
+            bytes,
+            std::mem::size_of::<PendingGenAI>() + "test-response-id".len()
+        );
+    }
+
+    #[test]
+    fn test_pending_genai_estimated_bytes_with_events() {
+        let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-x"));
+        let pending = PendingGenAI {
+            events: vec![event],
+            response_id: "r".to_string(),
+            pid: 1,
+            created_at: std::time::Instant::now(),
+        };
+        let bytes = pending.estimated_bytes();
+        // 1 event × 512 bytes estimate
+        assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
+    }
 }

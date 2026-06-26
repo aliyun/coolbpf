@@ -388,10 +388,30 @@ mod tests {
     }
 
     #[test]
-    fn test_noop_storage_store_does_not_panic() {
+    fn test_noop_storage_store_returns_zero() {
         let storage = Storage::noop();
-        // noop backend should not panic even though store is available
         assert!(storage.is_noop());
+        // Call store to verify noop path returns Ok(0) without writing
+        let token_record = crate::analyzer::token::TokenRecord {
+            id: 0,
+            timestamp_ns: 0,
+            pid: 1,
+            comm: "test".to_string(),
+            agent: None,
+            model: None,
+            provider: "test".to_string(),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            request_id: None,
+            endpoint: None,
+            tool_calls: vec![],
+            reasoning_content: None,
+        };
+        let result = crate::analyzer::AnalysisResult::Token(token_record);
+        let id = storage.store(&result).unwrap();
+        assert_eq!(id, 0);
     }
 
     #[test]
