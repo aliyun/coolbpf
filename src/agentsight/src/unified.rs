@@ -86,10 +86,16 @@ pub struct AgentSight {
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
     pending_genai: Vec<PendingGenAI>,
+    /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
+    pending_genai_bytes: usize,
+    /// Runtime limits for bounded buffers and eviction policies.
+    runtime_limits: crate::config::RuntimeLimits,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
     ffi_sender: Option<FfiEventSender>,
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
+    /// Rate-limiter for interruption DB purge (at most once per 60 s)
+    last_interruption_purge: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
@@ -103,7 +109,6 @@ pub struct AgentSight {
     /// Process killer for DeadLoop auto-kill (injectable for tests)
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
     /// Cached feature flags so runtime paths can check them without the config.
-    #[allow(dead_code)]
     features: crate::config::FeatureFlags,
 }
 
@@ -116,6 +121,13 @@ struct PendingGenAI {
     response_id: String,
     pid: u32,
     created_at: std::time::Instant,
+}
+
+impl PendingGenAI {
+    /// Rough byte estimate for memory budget enforcement.
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.response_id.len() + self.events.len() * 512 // conservative per-event estimate
+    }
 }
 
 /// Maximum time to wait for ResponseSessionMapper to resolve a session_id
@@ -290,13 +302,19 @@ impl AgentSight {
         // Start polling (non-blocking)
         let _poller = probes.run().context("Failed to start probe poller")?;
 
-        // Initialize unified storage based on config
-        let storage = Self::create_storage(&config)?;
+        // Initialize unified storage based on config.  When sqlite_storage is
+        // disabled we still create an empty storage object so the rest of the
+        // pipeline can call storage methods without Option plumbing.
+        let storage = if config.features.sqlite_storage_enabled {
+            Self::create_storage(&config)?
+        } else {
+            Storage::noop()
+        };
 
-        // Build GenAI exporters
+        // Build GenAI exporters based on feature flags.
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
-        let sls_activated = Arc::new(AtomicBool::new(false));
+        let sls_activated = Arc::new(AtomicBool::new(config.features.sls_logtail_enabled));
 
         // If config has runtime.sls_logtail_path set, seed the dynamic path
         if let Some(ref sls_path) = config.sls_logtail_path {
@@ -339,15 +357,28 @@ impl AgentSight {
             }
         } else {
             // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
-            match GenAISqliteStore::new() {
-                Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled");
-                    let store = Arc::new(store);
-                    genai_sqlite_store = Some(Arc::clone(&store));
-                    genai_exporters.push(Box::new(store));
-                }
-                Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
+            if config.features.sqlite_storage_enabled {
+                let db_path = config
+                    .db_path()
+                    .parent()
+                    .map(|p| p.join("genai_events.db"))
+                    .unwrap_or_else(GenAISqliteStore::default_path);
+                match GenAISqliteStore::new_with_path_and_batch(
+                    &db_path,
+                    config.features.sqlite_batch,
+                ) {
+                    Ok(store) => {
+                        log::info!(
+                            "SQLite GenAI exporter enabled (batch={:?})",
+                            config.features.sqlite_batch
+                        );
+                        let store = Arc::new(store);
+                        genai_sqlite_store = Some(Arc::clone(&store));
+                        genai_exporters.push(Box::new(store));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
+                    }
                 }
             }
 
@@ -418,23 +449,27 @@ impl AgentSight {
             Analyzer::new()
         };
 
-        // Initialize interruption store (co-located in same directory as genai db)
-        let interruption_store: Option<Arc<InterruptionStore>> = {
-            let db_path = GenAISqliteStore::default_path()
-                .parent()
-                .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                .join("interruption_events.db");
-            match InterruptionStore::new_with_path(&db_path) {
-                Ok(store) => {
-                    log::info!("Interruption events store initialized at {db_path:?}");
-                    Some(Arc::new(store))
+        // Initialize interruption store only when interruption detection is enabled.
+        let interruption_store: Option<Arc<InterruptionStore>> =
+            if config.features.interruption_detection_enabled {
+                let db_path = GenAISqliteStore::default_path()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+                    .join("interruption_events.db");
+                match InterruptionStore::new_with_path(&db_path) {
+                    Ok(store) => {
+                        log::info!("Interruption events store initialized at {db_path:?}");
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize interruption store: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Failed to initialize interruption store: {e}");
-                    None
-                }
-            }
-        };
+            } else {
+                log::debug!("Interruption detection disabled; skipping interruption store");
+                None
+            };
 
         // Run OOM recovery: scan dmesg for OOM kill events that occurred while
         // AgentSight was down (e.g. if AgentSight itself was OOM-killed).
@@ -473,12 +508,16 @@ impl AgentSight {
         Ok(AgentSight {
             probes,
             parser: Parser::new(),
-            aggregator: Aggregator::new(),
+            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits),
             analyzer,
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
-            interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
+            interruption_detector: if config.features.interruption_detection_enabled {
+                InterruptionDetector::new(DetectorConfig::default())
+            } else {
+                InterruptionDetector::disabled()
+            },
             interruption_store,
             storage,
             scanner,
@@ -492,8 +531,11 @@ impl AgentSight {
                 ResponseSessionMapper::disabled()
             },
             pending_genai: Vec::new(),
+            pending_genai_bytes: 0,
+            runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
+            last_interruption_purge: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
             pending_logtail,
@@ -718,6 +760,9 @@ impl AgentSight {
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
+                    self.pending_genai_bytes +=
+                        self.pending_genai.last().map_or(0, |p| p.estimated_bytes());
+                    self.enforce_pending_genai_limits();
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
                     // Session_id resolved (or no response_id) — export immediately.
@@ -774,6 +819,9 @@ impl AgentSight {
             // In FFI mode data is delivered via callbacks; skip local storage.
             if self.ffi_sender.is_none() {
                 for analysis_result in &analysis_results {
+                    if !self.should_persist_analysis_result(analysis_result) {
+                        continue;
+                    }
                     if let Err(e) = self.storage.store(analysis_result) {
                         log::warn!("Failed to store analysis result: {e}");
                     } else {
@@ -862,6 +910,8 @@ impl AgentSight {
                 self.drain_and_persist_dead_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
+                // Periodically purge old/oversized interruption DB entries
+                self.maybe_purge_interruption_store();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -1722,6 +1772,66 @@ impl AgentSight {
     pub fn query_tokens_full(&self, period: TimePeriod) -> TokenQueryResult {
         let query = TokenQuery::new(self.storage.token());
         query.full_query(period)
+    }
+
+    /// If pending GenAI queue exceeds count or byte limits, flush the oldest
+    /// entries with the fallback session_id to prevent unbounded memory growth.
+    fn enforce_pending_genai_limits(&mut self) {
+        let max_count = self.runtime_limits.pending_genai_max_count.max(1);
+        let max_bytes = self.runtime_limits.pending_genai_max_bytes.max(1);
+
+        while !self.pending_genai.is_empty()
+            && (self.pending_genai.len() >= max_count || self.pending_genai_bytes >= max_bytes)
+        {
+            let oldest = self.pending_genai.remove(0);
+            self.pending_genai_bytes = self
+                .pending_genai_bytes
+                .saturating_sub(oldest.estimated_bytes());
+            log::warn!(
+                "pending_genai limit exceeded (count={}/{}, bytes={}/{}), \
+                 flushing oldest response_id={}",
+                self.pending_genai.len() + 1,
+                max_count,
+                self.pending_genai_bytes + oldest.estimated_bytes(),
+                max_bytes,
+                oldest.response_id
+            );
+            let events = oldest.events;
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
+        }
+    }
+
+    /// Decide whether an analysis result should be persisted to storage.
+    ///
+    /// `token_stats` is the only default-on feature; `audit` and
+    /// `token_consumption` are gated by their respective feature flags.
+    fn should_persist_analysis_result(&self, result: &crate::analyzer::AnalysisResult) -> bool {
+        match result {
+            crate::analyzer::AnalysisResult::Token(_) => true,
+            crate::analyzer::AnalysisResult::Audit(_) => self.features.audit_enabled,
+            crate::analyzer::AnalysisResult::TokenConsumption(_) => {
+                self.features.token_consumption_enabled
+            }
+            // Http records, Message, and PromptTokens are always persisted.
+            _ => true,
+        }
+    }
+
+    /// Periodically purge old/oversized interruption DB entries.
+    fn maybe_purge_interruption_store(&mut self) {
+        if self.last_interruption_purge.elapsed() < std::time::Duration::from_secs(60) {
+            return;
+        }
+        self.last_interruption_purge = std::time::Instant::now();
+        if let Some(ref istore) = self.interruption_store {
+            if let Err(e) = istore.purge_old_and_oversized(
+                self.features.interruption_retention_days,
+                self.features.interruption_max_db_size_mb,
+            ) {
+                log::warn!("Interruption store purge failed: {e}");
+            }
+        }
     }
 }
 

@@ -152,8 +152,10 @@ impl HttpConnectionAggregator {
         self.max_body_bytes
     }
 
-    /// Insert connection state, logging if an unrelated entry is evicted by LRU
+    /// Insert connection state, logging if an unrelated entry is evicted by LRU.
+    /// Also records activity timestamp for idle eviction.
     fn insert(&mut self, key: ConnectionId, state: ConnectionState) {
+        self.touch(&key);
         if let Some((evicted_key, evicted_state)) = self.connections.push(key, state) {
             if evicted_key != key {
                 log::warn!(
@@ -240,7 +242,6 @@ impl HttpConnectionAggregator {
     }
 
     /// Record activity timestamp for a connection.
-    #[allow(dead_code)]
     fn touch(&mut self, key: &ConnectionId) {
         self.last_activity.push(*key, Instant::now());
     }

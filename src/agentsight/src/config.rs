@@ -511,7 +511,7 @@ impl From<&str> for ChannelPolicy {
                     .nth(1)
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(10);
-                ChannelPolicy::Sample(n)
+                ChannelPolicy::Sample(n.max(1))
             }
             _ => ChannelPolicy::Backpressure,
         }

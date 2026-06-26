@@ -88,7 +88,12 @@ impl GenAISqliteStore {
         Ok(store)
     }
 
-    /// Flush any buffered events to SQLite inside a single transaction.
+    /// Flush any buffered events to SQLite.
+    ///
+    /// Events are written through `store_event` which handles prune/retry.
+    /// The batch value comes from reducing the number of flush calls (fewer
+    /// fsync/WAL checkpoints), not from wrapping in a single transaction
+    /// (which would require refactoring the Mutex-based conn access).
     pub fn flush(&self) {
         let mut pending = self.pending.lock().unwrap();
         if pending.is_empty() {
@@ -97,10 +102,16 @@ impl GenAISqliteStore {
         let events: Vec<_> = pending.drain(..).collect();
         drop(pending); // release lock before writing
 
+        let mut ok_count = 0usize;
         for event in &events {
             if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event to SQLite: {e}");
+                log::warn!("Failed to store GenAI event in batch flush: {e}");
+            } else {
+                ok_count += 1;
             }
+        }
+        if ok_count > 0 {
+            log::debug!("Batch-flushed {ok_count} GenAI events");
         }
         *self.last_flush.lock().unwrap() = Instant::now();
     }
