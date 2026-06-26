@@ -787,8 +787,7 @@ impl AgentsightConfig {
 ///                          → **activation / re-activation** signal.
 ///
 /// Used by the config watcher to react to runtime hot-reload changes
-/// (delete `/etc/anolisa/enable_token_collector` → empty string → pause;
-/// re-create the trigger with a non-empty `SLS_LOG_PATH` → resume).
+/// (empty string → pause SLS uploads; non-empty path → activate).
 pub fn parse_runtime_sls_path(json: &str) -> Option<Option<String>> {
     #[derive(serde::Deserialize)]
     struct Partial {

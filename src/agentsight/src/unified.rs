@@ -449,7 +449,7 @@ impl AgentSight {
         // Create `running` flag early so background threads can observe shutdown.
         let running = Arc::new(AtomicBool::new(true));
 
-        // Spawn background threads (config watcher, token-collector, stale scanner).
+        // Spawn background threads (config watcher, stale scanner).
         if let Some(ref cfg_path) = config.config_path {
             crate::background::start_config_watcher(
                 cfg_path.clone(),
@@ -457,10 +457,6 @@ impl AgentSight {
                 Arc::clone(&pending_logtail),
                 config.encryption_public_key.clone(),
                 config.trace_enabled,
-                Arc::clone(&running),
-            );
-            crate::background::start_token_collector_watcher(
-                cfg_path.clone(),
                 Arc::clone(&running),
             );
         }
