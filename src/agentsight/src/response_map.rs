@@ -11,6 +11,11 @@
 //!     → parse buf lines as JSON, extract "responseId" field
 //!     → store responseId → sessionId in LRU cache
 //! ```
+//!
+//! Codex CLI writes its rollout file as `rollout-<ts>-<UUID>.jsonl` and does
+//! not embed an LLM `response_id` inside the JSONL, so we instead remember
+//! the most-recent UUID per writing pid and look it up by the HTTP call's
+//! pid as a fallback.
 
 use std::num::NonZeroUsize;
 
@@ -32,11 +37,25 @@ static RESPONSE_ID_RE: Lazy<Regex> =
 /// Only matches values starting with `msg_` to avoid false positives from other "id" fields.
 static ANTHROPIC_MSG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""id":"(msg_[^"]+)"#).unwrap());
 
+/// Regex to extract a trailing 36-char UUID from filenames like
+/// `rollout-2026-06-24T20-08-10-019ef987-dbc1-7663-81b0-589cbe5e47e8.jsonl`
+/// (Codex CLI session rollouts). Captured group is the UUID itself.
+static TRAILING_UUID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
+        .unwrap()
+});
+
+/// Maximum number of pid → sessionId entries kept for codex-style lookups.
+const MAX_PID_MAP_ENTRIES: usize = 1024;
+
 /// Processes FileWrite events to build an in-memory responseId → sessionId mapping.
 /// Uses an LRU cache to bound memory usage.
 pub struct ResponseSessionMapper {
     /// responseId → sessionId (bounded by LRU eviction)
     map: LruCache<String, String>,
+    /// pid → sessionId fallback used by agents (e.g. Codex CLI) whose
+    /// per-session rollout file does not embed an LLM `response_id`.
+    pid_map: LruCache<u32, String>,
 }
 
 impl Default for ResponseSessionMapper {
@@ -50,6 +69,7 @@ impl ResponseSessionMapper {
     pub fn new() -> Self {
         ResponseSessionMapper {
             map: LruCache::new(NonZeroUsize::new(MAX_RESPONSE_MAP_ENTRIES).unwrap()),
+            pid_map: LruCache::new(NonZeroUsize::new(MAX_PID_MAP_ENTRIES).unwrap()),
         }
     }
 
@@ -95,6 +115,11 @@ impl ResponseSessionMapper {
                 self.map.put(response_id, session_id.clone());
             }
         }
+
+        // Always record the pid → session_id association so agents whose
+        // rollout file does not embed an LLM response_id (e.g. Codex CLI)
+        // can still resolve the session via their writing pid.
+        self.pid_map.put(event.pid, session_id);
     }
 
     /// Look up sessionId by responseId.
@@ -103,21 +128,32 @@ impl ResponseSessionMapper {
         self.map.peek(response_id).map(|s| s.as_str())
     }
 
+    /// Look up sessionId by writing pid. Used as a fallback for agents
+    /// (e.g. Codex CLI) whose rollout file does not embed a response_id.
+    pub fn get_session_by_pid(&self, pid: u32) -> Option<&str> {
+        self.pid_map.peek(&pid).map(|s| s.as_str())
+    }
+
     /// Extract UUID from a filename like `<UUID>.jsonl` or `/path/to/<UUID>.jsonl`.
-    /// Returns the UUID portion (without path prefix or `.jsonl` suffix).
+    /// Also recognizes Codex CLI's `rollout-<ts>-<UUID>.jsonl` form by
+    /// extracting the trailing 36-char UUID.
     fn extract_session_id(filename: &str) -> Option<String> {
         // Take the last path component
         let basename = filename.rsplit('/').next().unwrap_or(filename);
 
         // Strip .jsonl suffix
-        let uuid = basename.strip_suffix(".jsonl")?;
+        let stem = basename.strip_suffix(".jsonl")?;
 
-        // Basic UUID length validation (36 chars: 8-4-4-4-12)
-        if uuid.len() == 36 {
-            Some(uuid.to_string())
-        } else {
-            None
+        // Plain `<UUID>.jsonl` (OpenClaw / Cosh / Claude Code)
+        if stem.len() == 36 {
+            return Some(stem.to_string());
         }
+
+        // Codex CLI: `rollout-<ts>-<UUID>.jsonl` — pull the trailing UUID.
+        TRAILING_UUID_RE
+            .captures(stem)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().to_string())
     }
 
     /// Extract "responseId" or "response_id" value from a single JSONL line using regex.
@@ -154,6 +190,43 @@ mod tests {
         let id =
             ResponseSessionMapper::extract_session_id("550e8400-e29b-41d4-a716-446655440000.jsonl");
         assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn test_extract_session_id_codex_rollout() {
+        // Codex CLI writes `rollout-<ts>-<UUID>.jsonl`; we want the trailing UUID.
+        let id = ResponseSessionMapper::extract_session_id(
+            "/root/.codex/sessions/2026/06/24/rollout-2026-06-24T20-08-10-019ef987-dbc1-7663-81b0-589cbe5e47e8.jsonl",
+        );
+        assert_eq!(id.as_deref(), Some("019ef987-dbc1-7663-81b0-589cbe5e47e8"));
+    }
+
+    #[test]
+    fn test_codex_pid_to_session_lookup() {
+        // Codex CLI's rollout file does not embed an LLM response_id, so the
+        // mapper must fall back to a pid-based lookup.
+        let mut mapper = ResponseSessionMapper::new();
+        let event = FileWriteEvent {
+            pid: 391658,
+            tid: 391658,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "codex".to_string(),
+            filename:
+                "/root/.codex/sessions/2026/06/24/rollout-2026-06-24T20-08-10-019ef987-dbc1-7663-81b0-589cbe5e47e8.jsonl"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: br#"{"timestamp":"2026-06-24T12:08:10.991Z","type":"session_meta","payload":{"id":"019ef987-dbc1-7663-81b0-589cbe5e47e8"}}
+"#
+            .to_vec(),
+        };
+        mapper.process_filewrite(&event);
+        assert_eq!(
+            mapper.get_session_by_pid(391658),
+            Some("019ef987-dbc1-7663-81b0-589cbe5e47e8"),
+        );
+        assert!(mapper.get_session_by_pid(99999).is_none());
     }
 
     #[test]

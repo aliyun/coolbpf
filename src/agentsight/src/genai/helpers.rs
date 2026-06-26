@@ -13,6 +13,7 @@ use crate::discovery::matcher::{CmdlineGlobMatcher, ProcessContext};
 
 /// LLM call classification: Main (normal), Recap (compaction/summary), WebSearch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(super) enum CallKind {
     Main,
     Recap,
@@ -20,6 +21,7 @@ pub(super) enum CallKind {
 }
 
 impl CallKind {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             CallKind::Main => "main",
@@ -33,6 +35,7 @@ impl CallKind {
 ///
 /// Conservative: unmatched → Main (zero false positives > recall).
 /// Signatures are from real captures (case-sensitive .contains()).
+#[allow(dead_code)]
 pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
     // Collect system instructions text
     let system_text: String = request
@@ -172,6 +175,65 @@ impl GenAIBuilder {
             .as_ref()
             .map(|b| b.contains("llmParamString"))
             .unwrap_or(false)
+    }
+
+    /// Normalize the messages array from a parsed request body.
+    ///
+    /// Supports both formats:
+    /// - OpenAI chat completions: top-level `"messages"` array.
+    /// - OpenAI Responses API (codex 0.137+ via dashscope `/v1/responses`):
+    ///   top-level `"input"` array with sibling `"instructions"` string.
+    ///
+    /// Returns `(messages_vec, instructions_text)` where `instructions_text`
+    /// is only set when the Responses API form is used (it serves as the
+    /// system prompt fallback when the messages array has no system role).
+    pub(super) fn extract_messages_view(
+        body: &serde_json::Value,
+    ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
+        if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
+            return Some((arr.clone(), None));
+        }
+        if let Some(arr) = body.get("input").and_then(|m| m.as_array()) {
+            let instructions = body
+                .get("instructions")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            return Some((arr.clone(), instructions));
+        }
+        None
+    }
+
+    /// Extract human-readable text from a message's `content` field.
+    ///
+    /// Supports:
+    /// - Plain string: `"content": "text"`.
+    /// - Array of content blocks with type `text` / `input_text` / `output_text`:
+    ///   `"content": [{"type":"input_text","text":"..."}]`.
+    pub(super) fn extract_message_text(message: &serde_json::Value) -> Option<String> {
+        let c = message.get("content")?;
+        if let Some(s) = c.as_str() {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+        if let Some(arr) = c.as_array() {
+            let text: String = arr
+                .iter()
+                .filter_map(|item| {
+                    let ty = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if matches!(ty, "text" | "input_text" | "output_text") {
+                        item.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+        None
     }
 
     /// Extract provider from path
@@ -860,5 +922,91 @@ mod tests {
             Some("gpt-4-turbo".to_string())
         );
         assert_eq!(builder.extract_model_from_message(&None), None);
+    }
+
+    #[test]
+    fn test_extract_messages_view_chat_completions() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn test_extract_messages_view_responses_api() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": [{"role": "user", "content": "hi"}],
+            "instructions": "sys prompt"
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions.as_deref(), Some("sys prompt"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_none() {
+        let body = serde_json::json!({"model": "gpt-4"});
+        assert!(GenAIBuilder::extract_messages_view(&body).is_none());
+    }
+
+    #[test]
+    fn test_extract_messages_view_responses_api_without_instructions() {
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "input": [{"role": "user", "content": "hi"}]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn test_extract_message_text_string() {
+        let msg = serde_json::json!({"role": "user", "content": "hello"});
+        assert_eq!(
+            GenAIBuilder::extract_message_text(&msg),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_message_text_array() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "hello"},
+                {"type": "output_text", "text": "world"},
+                {"type": "image", "text": "ignored"}
+            ]
+        });
+        assert_eq!(
+            GenAIBuilder::extract_message_text(&msg),
+            Some("hello\nworld".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_message_text_empty() {
+        let msg = serde_json::json!({"role": "user", "content": ""});
+        assert_eq!(GenAIBuilder::extract_message_text(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_message_text_array_non_text_only() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "image", "text": "ignored"},
+                {"type": "image_url", "image_url": {"url": "http://example.com"}}
+            ]
+        });
+        assert_eq!(GenAIBuilder::extract_message_text(&msg), None);
     }
 }

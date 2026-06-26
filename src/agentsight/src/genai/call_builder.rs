@@ -91,9 +91,6 @@ impl GenAIBuilder {
         let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
         let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
 
-        // Classify call_kind from request content
-        let call_kind = super::helpers::classify_call_kind(&request);
-
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
         // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
@@ -107,9 +104,9 @@ impl GenAIBuilder {
             .unwrap_or_else(|| http.comm.clone());
         let pid_i32 = http.pid as i32;
 
-        // session_id: 优先从 request metadata 获取（Claude Code），
-        // 次优先 response ID → .jsonl UUID 映射，
-        // 兜底 hash。
+        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
+        // 未命中时再尝试 pid → .jsonl UUID 映射（Codex CLI 等 rollout 文件不内嵌 response_id 的场景），
+        // 仍未命中则 fallback 到 `SHA256("session" + 该 session 内最早 response_id)`。
         let metadata_session = parsed_message
             .as_ref()
             .and_then(|m| m.request_metadata_session_id());
@@ -120,6 +117,7 @@ impl GenAIBuilder {
         let mapper_session = parsed_response_id
             .as_deref()
             .and_then(|rid| response_mapper.get_session_by_response_id(rid))
+            .or_else(|| response_mapper.get_session_by_pid(http.pid))
             .map(|s| s.to_string());
         let session_id = metadata_session.or(mapper_session).or_else(|| {
             self.id_resolver
@@ -242,7 +240,6 @@ impl GenAIBuilder {
                 } else if http.path.contains("/api/v1/copilot/generate_copilot") {
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 }
-                meta.insert("call_kind".to_string(), call_kind.as_str().to_string());
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 if let Some(ref cid) = conversation_id {
                     meta.insert("conversation_id".to_string(), cid.clone());

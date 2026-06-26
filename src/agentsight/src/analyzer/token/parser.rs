@@ -55,10 +55,71 @@ impl TokenParser {
             return None;
         }
 
-        // Parse as JSON
-        let json: serde_json::Value = serde_json::from_str(data).ok()?;
-        self.parse_json(&json).inspect(|_usage| {
-            log::debug!("token usage parsed from data: {data}");
+        // Try strict JSON parse first
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+            return self.parse_json(&json).inspect(|_usage| {
+                log::debug!("token usage parsed from data: {data}");
+            });
+        }
+
+        // Fallback: OpenAI Responses API embeds usage in a final
+        // `response.completed` event whose payload (instructions + tools +
+        // output) routinely exceeds a single TLS record. We may be looking
+        // at a concatenation of SSE chunks that together don't form a
+        // single valid JSON object. Recover input/output token counts via
+        // a regex-free string scan when the buffer references usage fields.
+        if data.contains("\"input_tokens\"")
+            || data.contains("\"output_tokens\"")
+            || data.contains("\"prompt_tokens\"")
+            || data.contains("\"completion_tokens\"")
+        {
+            let usage = Self::scan_partial_usage(data);
+            if usage.is_some() {
+                log::debug!("token usage recovered from continuation buffer");
+            }
+            return usage;
+        }
+
+        None
+    }
+
+    /// Recover token usage fields from a possibly-truncated JSON string by
+    /// scanning for the integer values that follow `"input_tokens"`,
+    /// `"output_tokens"`, etc. The first occurrence wins, which matches
+    /// dashscope's behaviour of placing the canonical `usage` block before
+    /// any `x_details` echo.
+    fn scan_partial_usage(data: &str) -> Option<TokenUsage> {
+        fn find_u64(s: &str, key: &str) -> Option<u64> {
+            let pat = format!("\"{key}\"");
+            let mut idx = s.find(&pat)?;
+            idx += pat.len();
+            let rest = s.get(idx..)?;
+            let rest = rest.trim_start();
+            let rest = rest.strip_prefix(':')?.trim_start();
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return None;
+            }
+            rest[..end].parse::<u64>().ok()
+        }
+
+        let input = find_u64(data, "input_tokens").or_else(|| find_u64(data, "prompt_tokens"));
+        let output =
+            find_u64(data, "output_tokens").or_else(|| find_u64(data, "completion_tokens"));
+        if input.is_none() && output.is_none() {
+            return None;
+        }
+
+        Some(TokenUsage {
+            input_tokens: input.unwrap_or(0),
+            output_tokens: output.unwrap_or(0),
+            cache_creation_input_tokens: find_u64(data, "cache_creation_input_tokens"),
+            cache_read_input_tokens: find_u64(data, "cache_read_input_tokens")
+                .or_else(|| find_u64(data, "cached_tokens")),
+            model: None,
+            provider: LLMProvider::OpenAI,
         })
     }
 
@@ -262,5 +323,76 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_dashscope_response_completed() {
+        // Real dashscope `/compatible-mode/v1/responses` `response.completed`
+        // payload, captured with curl. The strict JSON path should succeed
+        // for this complete buffer, so this just confirms canonical fields.
+        let data = r#"{"sequence_number":10,"type":"response.completed","response":{"top_logprobs":0,"instructions":"You are a helpful assistant.","metadata":{},"usage":{"total_tokens":60,"input_tokens_details":{"cached_tokens":0},"output_tokens":3,"input_tokens":57,"output_tokens_details":{"reasoning_tokens":0},"x_details":[{"total_tokens":60,"x_billing_type":"response_api","output_tokens":3,"input_tokens":57,"prompt_tokens_details":{"cached_tokens":0}}]},"created_at":1782287513,"model":"qwen3-coder-plus"}}"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("usage should parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_truncated_buffer() {
+        // Simulate a continuation buffer where only the leading bytes around
+        // the `usage` block survived; trailing braces / brackets are missing
+        // and strict JSON parsing fails. The fallback path should still
+        // recover the integer values.
+        let data = r#"event:response.completed
+data:{"sequence_number":10,"type":"response.completed","response":{"usage":{"total_tokens":60,"input_tokens_details":{"cached_tokens":2},"output_tokens":3,"input_tokens":57"#;
+        let parser = TokenParser::new();
+        let usage = parser
+            .parse_data(data)
+            .expect("partial usage should still parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.cache_read_input_tokens, Some(2));
+    }
+
+    #[test]
+    fn test_scan_partial_usage_returns_none_when_no_tokens() {
+        let data = "event:response.output_text.delta\ndata:{\"delta\":\"hi\"}";
+        let parser = TokenParser::new();
+        assert!(parser.parse_data(data).is_none());
+    }
+
+    #[test]
+    fn test_scan_partial_usage_only_input() {
+        // Truncated JSON forces the regex-free string-scan fallback.
+        let data = r#"{"input_tokens": 42"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("should parse input only");
+        assert_eq!(usage.input_tokens, 42);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_only_output() {
+        let data = r#"{"output_tokens": 7"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("should parse output only");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_prompt_completion_aliases() {
+        let data = r#"{"prompt_tokens": 10, "completion_tokens": 5"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("should parse aliases");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_scan_partial_usage_invalid_value_none() {
+        let data = r#"{"input_tokens": "not a number"}"#;
+        let parser = TokenParser::new();
+        assert!(parser.parse_data(data).is_none());
     }
 }

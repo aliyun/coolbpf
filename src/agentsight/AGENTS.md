@@ -77,10 +77,10 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 
 | 模块 | 位置 | 职责 | 关键类型 |
 |------|------|------|----------|
-| **Probes** | `src/probes/` | eBPF 探针管理 | `Probes`, `ProbesPoller`, `SslSniff`, `ProcMon`, `FileWatch`, `FileWriteProbe`, `UdpDns`, `TcpSniff` |
+| **Probes** | `src/probes/` | eBPF 探针管理 | `Probes`, `ProbesPoller`, `SslSniff`, `ProcMon`, `FileWatch`, `FileWriteProbe`, `UdpDns`, `TcpSniff`, `codex_offsets`, `elf_buildid` |
 | **Event** | `src/event.rs` | 统一事件枚举 | `Event::{Ssl, Proc, ProcMon, FileWatch, FileWrite, UdpDns}` |
 | **Parser** | `src/parser/` | 协议解析（HTTP/1.x, HTTP/2, SSE, ProcTrace） | `Parser`, `ParsedMessage` |
-| **Aggregator** | `src/aggregator/` | 请求-响应关联 | `Aggregator`, `AggregatedResult` |
+| **Aggregator** | `src/aggregator/` | 请求-响应关联 + SSE continuation buffer | `Aggregator`, `AggregatedResult` |
 | **Analyzer** | `src/analyzer/` | Token/审计/消息分析 | `Analyzer`, `AnalysisResult` |
 | **GenAI** | `src/genai/` | 语义事件构建+导出 | `GenAIBuilder`, `GenAISemanticEvent`, `GenAIExporter` |
 | **Storage** | `src/storage/` | SQLite 持久化 | `Storage`, `SqliteStore`, `AuditStore`, `TokenStore` |
@@ -113,6 +113,23 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | tcpsniff | `src/bpf/tcpsniff.bpf.c` | fentry on tcp_recvmsg/sendmsg 捕获明文 HTTP 流量 |
 
 构建时 `build.rs` 通过 `libbpf-cargo` 自动生成 eBPF skeleton。
+
+### Codex CLI 适配（三级回退）
+
+Codex CLI 静态链接 aws-lc/BoringSSL，无导出符号。`attach_process` 使用三级回退策略：
+
+1. **符号表查找**（Tier 1）：`nm` 读取 `.symtab` / `.dynsym` 中的 `SSL_write_ex` / `SSL_read_ex`
+2. **字节模式匹配**（Tier 2）：扫描 `.text` 段中的 BoringSSL 函数 prologue 模式
+3. **Offset 表查找**（Tier 3）：`agentsight.json → codex_offsets.entries` 按 fingerprint（file_size + head_64k_sha256 + BuildID）匹配
+
+使用 `scripts/extract-codex-offsets.py` 提取新版本 offset 并更新 `agentsight.json`。
+详见 [Codex CLI 适配文档](docs/codex-adaptation.md)。
+
+### SSE Continuation Buffer
+
+OpenAI Responses API 的 `response.completed` 事件可能跨多个 TLS record。
+`HttpConnectionAggregator` 在 SseActive 状态下为 `/v1/responses` 路径缓冲原始 SSL 字节，
+供下游 `Analyzer::extract_token_from_sse` 在标准 SSE 解析失败时回退扫描。
 
 ## 7. CLI Subcommands
 
@@ -220,6 +237,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 - [eBPF Probes 设计](docs/design-docs/ebpf-probes.md)
 - [数据流水线设计](docs/design-docs/data-pipeline.md)
 - [GenAI 语义层设计](docs/design-docs/genai-semantic.md)
+- [Codex CLI 适配](docs/codex-adaptation.md) — 三级回退 offset 查找 + SSE continuation buffer
 - [常见踩坑记录](docs/PITFALLS.md) — AI agent 和新贡献者最容易踩的坑
 - [架构决策记录（ADR）](docs/adr/) — 关键架构选型的背景和理由
 

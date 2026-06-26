@@ -14,6 +14,44 @@ use crate::discovery::AgentScanner;
 use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 
+/// Infer the UI role for a discovered agent.
+///
+/// Rules (in order):
+///   1. ports != empty            → Gateway (real service with TCP port)
+///   2. agent has no service port → Client (stand-alone CLI like Codex
+///                                  whose UI card adds no value when
+///                                  there is no gateway endpoint)
+///   3. parent is same agent_name → Worker (genuine fork, fold under parent)
+///   4. otherwise                 → Gateway (independent process, own card)
+///
+/// Two separately-launched hermes/openclaw client instances are
+/// independent (no parent-child link, different terminals), so they
+/// each deserve their own primary card; only true forks go into the
+/// associated-processes drawer of their parent.
+fn infer_agent_role(
+    agent_name: &str,
+    ports: &[u16],
+    ppid: Option<u32>,
+    agent_name_by_pid: &HashMap<u32, String>,
+) -> AgentRole {
+    if !ports.is_empty() {
+        return AgentRole::Gateway;
+    }
+    if agent_name == "Codex" {
+        return AgentRole::Client;
+    }
+    if let Some(pp) = ppid {
+        if agent_name_by_pid
+            .get(&pp)
+            .map(|n| n == agent_name)
+            .unwrap_or(false)
+        {
+            return AgentRole::Worker;
+        }
+    }
+    AgentRole::Gateway
+}
+
 /// Background health checker that periodically probes discovered agents
 pub struct HealthChecker {
     store: Arc<RwLock<HealthStore>>,
@@ -262,30 +300,7 @@ impl HealthChecker {
             // Read parent PID from /proc/<pid>/stat for role inference
             let ppid = read_ppid(agent.pid);
 
-            // Infer role:
-            //   1. ports != empty            → Gateway (real service with TCP port)
-            //   2. parent is same agent_name → Worker (genuine fork, fold under parent)
-            //   3. otherwise                 → Gateway (independent process, own card)
-            //
-            // Two separately-launched hermes/openclaw client instances are
-            // independent (no parent-child link, different terminals), so they
-            // each deserve their own primary card; only true forks go into the
-            // associated-processes drawer of their parent.
-            let role = if !ports.is_empty() {
-                AgentRole::Gateway
-            } else if let Some(pp) = ppid {
-                if agent_name_by_pid
-                    .get(&pp)
-                    .map(|n| n == &agent.agent_info.name)
-                    .unwrap_or(false)
-                {
-                    AgentRole::Worker
-                } else {
-                    AgentRole::Gateway
-                }
-            } else {
-                AgentRole::Gateway
-            };
+            let role = infer_agent_role(&agent.agent_info.name, &ports, ppid, &agent_name_by_pid);
 
             let status = if ports.is_empty() {
                 AgentHealthStatus {
@@ -482,4 +497,57 @@ fn read_ppid(pid: u32) -> Option<u32> {
     let _state = fields.next()?;
     let ppid_str = fields.next()?;
     ppid_str.parse::<u32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_agent_role_gateway_with_ports() {
+        let mut map = HashMap::new();
+        map.insert(1, "Codex".to_string());
+        assert_eq!(
+            infer_agent_role("Codex", &[8080], None, &map),
+            AgentRole::Gateway
+        );
+    }
+
+    #[test]
+    fn test_infer_agent_role_codex_client_without_ports() {
+        let map = HashMap::new();
+        assert_eq!(
+            infer_agent_role("Codex", &[], None, &map),
+            AgentRole::Client
+        );
+    }
+
+    #[test]
+    fn test_infer_agent_role_worker_same_parent_name() {
+        let mut map = HashMap::new();
+        map.insert(1, "Hermes".to_string());
+        assert_eq!(
+            infer_agent_role("Hermes", &[], Some(1), &map),
+            AgentRole::Worker
+        );
+    }
+
+    #[test]
+    fn test_infer_agent_role_gateway_different_parent_name() {
+        let mut map = HashMap::new();
+        map.insert(1, "Other".to_string());
+        assert_eq!(
+            infer_agent_role("Hermes", &[], Some(1), &map),
+            AgentRole::Gateway
+        );
+    }
+
+    #[test]
+    fn test_infer_agent_role_gateway_no_parent() {
+        let map = HashMap::new();
+        assert_eq!(
+            infer_agent_role("Hermes", &[], None, &map),
+            AgentRole::Gateway
+        );
+    }
 }

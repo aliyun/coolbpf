@@ -9,6 +9,9 @@ pub mod sslsniff;
 pub mod tcpsniff;
 pub mod udpdns;
 
+mod codex_offsets;
+mod elf_buildid;
+
 // Re-export commonly used types
 pub use filewatch::{FileWatch, FileWatchEvent};
 pub use filewrite::{FileWrite as FileWriteProbe, FileWriteEvent};

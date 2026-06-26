@@ -22,7 +22,7 @@
 
 use crate::aggregator::AggregatedResult;
 use crate::analyzer::token::extract_response_content;
-use crate::parser::sse::ParsedSseEvent;
+use crate::parser::sse::{ParsedSseEvent, SSEParser};
 use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
 
@@ -450,12 +450,22 @@ impl Analyzer {
             AggregatedResult::SseComplete(pair) => {
                 let pid = pair.request.source_event.pid;
                 let comm = pair.request.source_event.comm_str();
-                self.extract_token_from_sse(&pair.response.sse_events, pid, &comm)
+                self.extract_token_from_sse(
+                    &pair.response.sse_events,
+                    pair.response.sse_continuation_bytes.as_deref(),
+                    pid,
+                    &comm,
+                )
             }
             AggregatedResult::ResponseOnly { response, .. } if !response.sse_events.is_empty() => {
                 let pid = response.pid();
                 let comm = response.parsed.source_event.comm_str();
-                self.extract_token_from_sse(&response.sse_events, pid, &comm)
+                self.extract_token_from_sse(
+                    &response.sse_events,
+                    response.sse_continuation_bytes.as_deref(),
+                    pid,
+                    &comm,
+                )
             }
             AggregatedResult::HttpComplete(pair) => {
                 let pid = pair.request.source_event.pid;
@@ -592,13 +602,44 @@ impl Analyzer {
     fn extract_token_from_sse(
         &self,
         sse_events: &[ParsedSseEvent],
+        continuation_bytes: Option<&[u8]>,
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
         let usage = sse_events
             .iter()
             .rev()
-            .find_map(|e| self.token.parse_event(e))?;
+            .find_map(|e| self.token.parse_event(e))
+            .or_else(|| {
+                // Fallback: OpenAI Responses API embeds usage in a final
+                // `response.completed` event whose `data:` field routinely
+                // exceeds a single TLS record. The aggregator buffers the
+                // raw continuation bytes; re-parse them with the legacy
+                // SSEParser (which concatenates multi-line data fields)
+                // and walk events in reverse so the canonical usage event
+                // wins. If reassembled events still don't yield usage,
+                // fall back to a partial-scan over the raw buffer text.
+                let extra = continuation_bytes?;
+                let text = String::from_utf8_lossy(extra);
+                let reassembled = SSEParser::parse_stream(&text);
+                let from_events = reassembled
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|e| self.token.parse_data(&e.data));
+                if from_events.is_some() {
+                    return from_events;
+                }
+                let from_scan = self.token.parse_data(&text);
+                if from_scan.is_none() {
+                    log::debug!(
+                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                        extra.len(),
+                        reassembled.events.len(),
+                    );
+                }
+                from_scan
+            })?;
 
         let record = TokenRecord::new(
             pid,
@@ -717,15 +758,37 @@ impl Analyzer {
             "openai"
         };
 
-        // Count input tokens from request messages using chat template
-        let input_tokens = if let Some(messages) =
-            request_json_ref.get("messages").and_then(|m| m.as_array())
-        {
+        // Count input tokens from request messages using chat template.
+        // Supports both OpenAI chat completions format (top-level "messages")
+        // and Responses API format (top-level "input" + "instructions").
+        let messages_owned: Option<Vec<serde_json::Value>> = request_json_ref
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .or_else(|| {
+                let input = request_json_ref.get("input").and_then(|m| m.as_array())?;
+                let mut combined = Vec::new();
+                if let Some(instr) = request_json_ref
+                    .get("instructions")
+                    .and_then(|s| s.as_str())
+                {
+                    if !instr.is_empty() {
+                        combined.push(serde_json::json!({
+                            "role": "system",
+                            "content": instr,
+                        }));
+                    }
+                }
+                combined.extend(input.iter().cloned());
+                Some(combined)
+            });
+
+        let input_tokens = if let Some(messages) = messages_owned {
             if messages.is_empty() {
                 0
             } else {
                 // Clone messages for in-place modification of tool_calls.arguments
-                let mut msgs = messages.clone();
+                let mut msgs = messages;
 
                 // Process tool_calls arguments: parse JSON string to object in place
                 for msg in msgs.iter_mut() {
@@ -1195,6 +1258,26 @@ impl Analyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probes::sslsniff::SslEvent;
+    use std::rc::Rc;
+
+    fn create_test_event(data: &str) -> ParsedSseEvent {
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1234567890,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 5678,
+            uid: 0,
+            len: data.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: data.as_bytes().to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0,
+        });
+        ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
 
     #[test]
     fn test_extract_token_from_json_body_openai() {
@@ -1365,5 +1448,110 @@ mod tests {
                 .extract_token_from_json_body(Some(&json), 1234, "test")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_continuation_buffer() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        let continuation = br#"event:response.completed
+data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("should recover from continuation buffer");
+        assert_eq!(record.input_tokens, 57);
+        assert_eq!(record.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_events_only_no_usage() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        assert!(
+            analyzer
+                .extract_token_from_sse(&events, None, 1234, "test")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_continuation_buffer_scan_fallback() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        // Truncated JSON that is neither valid JSON nor well-formed SSE, but
+        // still carries token fields. This exercises the regex-free scan
+        // fallback (lines 633-642).
+        let continuation = b"{\"input_tokens\":57,\"output_tokens\":3";
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("should recover via partial scan");
+        assert_eq!(record.input_tokens, 57);
+        assert_eq!(record.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_analyze_aggregated_response_only_with_sse() {
+        use crate::aggregator::{AggregatedResponse, ConnectionId};
+        use crate::parser::http::ParsedResponse;
+
+        let analyzer = Analyzer::new();
+
+        let resp_buf = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1_000_000_000,
+            delta_ns: 0,
+            pid: 3000,
+            tid: 3000,
+            uid: 0,
+            len: resp_buf.len() as u32,
+            rw: 0,
+            comm: "python3".to_string(),
+            buf: resp_buf.to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0x9000,
+        });
+
+        let parsed_response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers: std::collections::HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: ssl_event,
+        };
+
+        let mut aggregated_response = AggregatedResponse::from_parsed(parsed_response);
+        let usage_event =
+            create_test_event("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7}}");
+        aggregated_response.set_sse_events(vec![usage_event]);
+
+        let result = AggregatedResult::ResponseOnly {
+            connection_id: ConnectionId {
+                pid: 3000,
+                ssl_ptr: 0x9000,
+            },
+            response: aggregated_response,
+        };
+
+        let results = analyzer.analyze_aggregated(&result);
+        let token_result = results
+            .iter()
+            .find(|r| matches!(r, AnalysisResult::Token(_)));
+        assert!(
+            token_result.is_some(),
+            "ResponseOnly with SSE usage should produce a TokenRecord"
+        );
+        if let Some(AnalysisResult::Token(record)) = token_result {
+            assert_eq!(record.input_tokens, 42);
+            assert_eq!(record.output_tokens, 7);
+        }
     }
 }
