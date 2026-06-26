@@ -39,6 +39,30 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 /// Default purge check interval (every N inserts)
 pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
 
+/// Default bounded channel capacity for probe → event loop events.
+pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Default maximum number of pending GenAI events waiting for session_id resolution.
+pub const DEFAULT_PENDING_GENAI_MAX_COUNT: usize = 1_000;
+
+/// Default maximum bytes for pending GenAI events waiting for session_id resolution (64 MB).
+pub const DEFAULT_PENDING_GENAI_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Default PID → agent_name cache size.
+pub const DEFAULT_PID_CACHE_SIZE: usize = 1024;
+
+/// Default tokenizer cache size (number of loaded tokenizer models).
+pub const DEFAULT_TOKENIZER_CACHE_SIZE: usize = 4;
+
+/// Default maximum per-connection HTTP body buffer size (8 MB).
+pub const DEFAULT_MAX_CONNECTION_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Default idle timeout for HTTP connection states before forced cleanup (60 s).
+pub const DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Default eBPF ring buffer size in MiB.
+pub const DEFAULT_RING_BUFFER_MB: usize = 32;
+
 pub const HF_ENDPOINT: &str = "https://hf-mirror.com";
 
 /// Get the HF_HOME path, expanding `~` to the user's home directory.
@@ -215,6 +239,10 @@ struct JsonFullConfig {
     cgroup_filter_enabled: Option<bool>,
     #[serde(default)]
     cgroup_ids: Option<Vec<u64>>,
+    #[serde(default)]
+    features: Option<JsonFeatures>,
+    #[serde(default)]
+    runtime_limits: Option<JsonRuntimeLimits>,
 }
 
 /// DeadLoop 检测配置区段
@@ -226,6 +254,90 @@ struct JsonDeadloop {
     /// 触发自动 kill 的循环检测次数阈值（默认 3）
     #[serde(default)]
     kill_after_count: Option<usize>,
+}
+
+/// Feature toggle configuration.
+///
+/// `token_stats` is the only feature enabled by default; all other features
+/// must be explicitly enabled in `agentsight.json`.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonFeatures {
+    /// Core token metering feature (always required, defaults to true).
+    pub token_stats: Option<bool>,
+    /// Local tokenizer for accurate token counting when APIs do not report usage.
+    pub tokenizer: Option<JsonTokenizerFeature>,
+    /// Response ID → session ID mapping for GenAI session attribution.
+    pub session_mapping: Option<JsonSessionMappingFeature>,
+    /// Local SQLite persistence of GenAI events.
+    pub sqlite_storage: Option<JsonSqliteStorageFeature>,
+    /// Interruption / DeadLoop detection.
+    pub interruption_detection: Option<JsonInterruptionFeature>,
+    /// Audit event storage.
+    pub audit: Option<bool>,
+    /// Token consumption breakdown storage.
+    pub token_consumption: Option<bool>,
+    /// SLS Logtail export.
+    pub sls_logtail: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonTokenizerFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub cache_size: Option<usize>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonSessionMappingFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub max_entries: Option<usize>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonSqliteStorageFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub batch: Option<JsonBatchConfig>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonBatchConfig {
+    pub max_size: Option<usize>,
+    pub flush_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonInterruptionFeature {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub retention_days: Option<u64>,
+    #[serde(default)]
+    pub max_db_size_mb: Option<u64>,
+}
+
+/// Resource limits and channel policy for memory-leak prevention.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonRuntimeLimits {
+    pub event_channel_capacity: Option<usize>,
+    #[serde(default)]
+    pub event_channel_policy: Option<String>,
+    pub pending_genai_max_count: Option<usize>,
+    pub pending_genai_max_bytes_mb: Option<usize>,
+    pub pid_cache_size: Option<usize>,
+    pub max_connection_body_mb: Option<usize>,
+    pub connection_idle_timeout_secs: Option<u64>,
+    /// eBPF ring buffer size in MiB. Must be a power-of-two multiple of the page
+    /// size (common valid values: 8, 16, 32, 64). Loaded from `agentsight.json`
+    /// and applied at BPF load time via `bpf_map__set_max_entries`.
+    pub ring_buffer_mb: Option<usize>,
 }
 
 /// Runtime 动态配置区段（支持热加载，无需重启）
@@ -374,6 +486,143 @@ pub fn chrome_trace() -> bool {
     *CHROME_TRACE.get_or_init(|| std::env::var("AGENTSIGHT_CHROME_TRACE").is_ok())
 }
 
+// ==================== Channel Policy ====================
+
+/// Policy applied when a bounded event channel is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelPolicy {
+    /// Block the producer until space is available (backpressure).
+    #[default]
+    Backpressure,
+    /// Drop the newest event and log a warning.
+    DropNewest,
+    /// Sample events: keep roughly 1 in N when overloaded.
+    Sample(usize),
+}
+
+impl From<&str> for ChannelPolicy {
+    fn from(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "backpressure" => ChannelPolicy::Backpressure,
+            "drop_newest" | "drop-newest" | "drop" => ChannelPolicy::DropNewest,
+            s if s.starts_with("sample") => {
+                let n = s
+                    .split([':', '='])
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10);
+                ChannelPolicy::Sample(n)
+            }
+            _ => ChannelPolicy::Backpressure,
+        }
+    }
+}
+
+// ==================== Feature Flags ====================
+
+/// Fine-grained feature toggles parsed from `agentsight.json`.
+#[derive(Debug, Clone)]
+pub struct FeatureFlags {
+    /// Core token metering (always enabled).
+    pub token_stats: bool,
+    /// Local tokenizer for usage-less token counting.
+    pub tokenizer_enabled: bool,
+    /// Max cached tokenizer models.
+    pub tokenizer_cache_size: usize,
+    /// Response ID → session ID mapping.
+    pub session_mapping_enabled: bool,
+    /// Max entries in the response/session mapper.
+    pub session_mapping_max_entries: usize,
+    /// Local SQLite persistence of GenAI events.
+    pub sqlite_storage_enabled: bool,
+    /// Optional SQLite batch insert config.
+    pub sqlite_batch: Option<BatchConfig>,
+    /// Interruption / DeadLoop detection.
+    pub interruption_detection_enabled: bool,
+    /// Interruption DB retention in days.
+    pub interruption_retention_days: u64,
+    /// Interruption DB max size in MB.
+    pub interruption_max_db_size_mb: u64,
+    /// Audit event storage.
+    pub audit_enabled: bool,
+    /// Token consumption breakdown storage.
+    pub token_consumption_enabled: bool,
+    /// SLS Logtail export.
+    pub sls_logtail_enabled: bool,
+}
+
+impl Default for FeatureFlags {
+    fn default() -> Self {
+        Self {
+            token_stats: true,
+            tokenizer_enabled: false,
+            tokenizer_cache_size: DEFAULT_TOKENIZER_CACHE_SIZE,
+            session_mapping_enabled: false,
+            session_mapping_max_entries: 10_000,
+            sqlite_storage_enabled: false,
+            sqlite_batch: None,
+            interruption_detection_enabled: false,
+            interruption_retention_days: 30,
+            interruption_max_db_size_mb: 100,
+            audit_enabled: false,
+            token_consumption_enabled: false,
+            sls_logtail_enabled: false,
+        }
+    }
+}
+
+/// SQLite batch insert configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchConfig {
+    pub max_size: usize,
+    pub flush_ms: u64,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 100,
+            flush_ms: 100,
+        }
+    }
+}
+
+/// Resource limits to prevent in-memory buffering leaks.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeLimits {
+    /// Bounded channel capacity between probes and the event loop.
+    pub event_channel_capacity: usize,
+    /// Policy when the event channel is full.
+    pub event_channel_policy: ChannelPolicy,
+    /// Max pending GenAI events waiting for session_id resolution.
+    pub pending_genai_max_count: usize,
+    /// Max bytes for pending GenAI events.
+    pub pending_genai_max_bytes: usize,
+    /// Max entries in PID → agent_name cache.
+    pub pid_cache_size: usize,
+    /// Max bytes buffered per HTTP connection.
+    pub max_connection_body_bytes: usize,
+    /// Idle timeout before an HTTP connection state is dropped.
+    pub connection_idle_timeout_secs: u64,
+    /// eBPF ring buffer size in MiB.
+    pub ring_buffer_mb: usize,
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self {
+            event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
+            event_channel_policy: ChannelPolicy::Backpressure,
+            pending_genai_max_count: DEFAULT_PENDING_GENAI_MAX_COUNT,
+            pending_genai_max_bytes: DEFAULT_PENDING_GENAI_MAX_BYTES,
+            pid_cache_size: DEFAULT_PID_CACHE_SIZE,
+            max_connection_body_bytes: DEFAULT_MAX_CONNECTION_BODY_BYTES,
+            connection_idle_timeout_secs: DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS,
+            ring_buffer_mb: DEFAULT_RING_BUFFER_MB,
+        }
+    }
+}
+
 // ==================== AgentsightConfig ====================
 
 /// Unified configuration for AgentSight
@@ -490,6 +739,14 @@ pub struct AgentsightConfig {
     pub deadloop_kill_enabled: bool,
     /// 触发 kill 的循环次数阈值（检测到 N 次后 kill）
     pub deadloop_kill_after_count: usize,
+
+    // --- Feature Toggles ---
+    /// Fine-grained feature flags (token_stats is the only default-on feature).
+    pub features: FeatureFlags,
+
+    // --- Runtime Resource Limits ---
+    /// Bounded channel capacities, pending queue limits, etc.
+    pub runtime_limits: RuntimeLimits,
 }
 
 impl Default for AgentsightConfig {
@@ -558,6 +815,12 @@ impl Default for AgentsightConfig {
             // DeadLoop auto-kill defaults (disabled by default)
             deadloop_kill_enabled: false,
             deadloop_kill_after_count: 3,
+
+            // Feature toggles (only token_stats is on by default)
+            features: FeatureFlags::default(),
+
+            // Runtime resource limits
+            runtime_limits: RuntimeLimits::default(),
         }
     }
 }
@@ -704,6 +967,92 @@ impl AgentsightConfig {
         }
         if let Some(ids) = parsed.cgroup_ids.take() {
             self.cgroup_ids = ids;
+        }
+
+        // Parse feature toggles
+        if let Some(features) = parsed.features.take() {
+            self.features = FeatureFlags {
+                token_stats: features.token_stats.unwrap_or(true),
+                tokenizer_enabled: features
+                    .tokenizer
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                tokenizer_cache_size: features
+                    .tokenizer
+                    .as_ref()
+                    .and_then(|f| f.cache_size)
+                    .unwrap_or(DEFAULT_TOKENIZER_CACHE_SIZE),
+                session_mapping_enabled: features
+                    .session_mapping
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                session_mapping_max_entries: features
+                    .session_mapping
+                    .as_ref()
+                    .and_then(|f| f.max_entries)
+                    .unwrap_or(10_000),
+                sqlite_storage_enabled: features
+                    .sqlite_storage
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                sqlite_batch: features.sqlite_storage.as_ref().and_then(|f| {
+                    f.batch.as_ref().map(|b| BatchConfig {
+                        max_size: b.max_size.unwrap_or(100),
+                        flush_ms: b.flush_ms.unwrap_or(100),
+                    })
+                }),
+                interruption_detection_enabled: features
+                    .interruption_detection
+                    .as_ref()
+                    .and_then(|f| f.enabled)
+                    .unwrap_or(false),
+                interruption_retention_days: features
+                    .interruption_detection
+                    .as_ref()
+                    .and_then(|f| f.retention_days)
+                    .unwrap_or(30),
+                interruption_max_db_size_mb: features
+                    .interruption_detection
+                    .as_ref()
+                    .and_then(|f| f.max_db_size_mb)
+                    .unwrap_or(100),
+                audit_enabled: features.audit.unwrap_or(false),
+                token_consumption_enabled: features.token_consumption.unwrap_or(false),
+                sls_logtail_enabled: features.sls_logtail.unwrap_or(false),
+            };
+        }
+
+        // Parse runtime limits
+        if let Some(limits) = parsed.runtime_limits.take() {
+            self.runtime_limits = RuntimeLimits {
+                event_channel_capacity: limits
+                    .event_channel_capacity
+                    .unwrap_or(DEFAULT_EVENT_CHANNEL_CAPACITY),
+                event_channel_policy: limits
+                    .event_channel_policy
+                    .as_deref()
+                    .map(ChannelPolicy::from)
+                    .unwrap_or_default(),
+                pending_genai_max_count: limits
+                    .pending_genai_max_count
+                    .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
+                pending_genai_max_bytes: limits
+                    .pending_genai_max_bytes_mb
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(DEFAULT_PENDING_GENAI_MAX_BYTES),
+                pid_cache_size: limits.pid_cache_size.unwrap_or(DEFAULT_PID_CACHE_SIZE),
+                max_connection_body_bytes: limits
+                    .max_connection_body_mb
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(DEFAULT_MAX_CONNECTION_BODY_BYTES),
+                connection_idle_timeout_secs: limits
+                    .connection_idle_timeout_secs
+                    .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
+                ring_buffer_mb: limits.ring_buffer_mb.unwrap_or(DEFAULT_RING_BUFFER_MB),
+            };
         }
 
         let (cmdline_rules, https_rules, http_targets) = extract_rules(&parsed);
@@ -1303,5 +1652,148 @@ mod tests {
         config.load_from_json(json).unwrap();
         assert!(!config.deadloop_kill_enabled);
         assert_eq!(config.deadloop_kill_after_count, 3);
+    }
+
+    #[test]
+    fn test_channel_policy_from_str() {
+        assert!(matches!(
+            ChannelPolicy::from("backpressure"),
+            ChannelPolicy::Backpressure
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("drop_newest"),
+            ChannelPolicy::DropNewest
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("drop-newest"),
+            ChannelPolicy::DropNewest
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("drop"),
+            ChannelPolicy::DropNewest
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("sample:5"),
+            ChannelPolicy::Sample(5)
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("sample=20"),
+            ChannelPolicy::Sample(20)
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("sample"),
+            ChannelPolicy::Sample(10)
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("BACKPRESSURE"),
+            ChannelPolicy::Backpressure
+        ));
+        assert!(matches!(
+            ChannelPolicy::from("unknown"),
+            ChannelPolicy::Backpressure
+        ));
+    }
+
+    #[test]
+    fn test_runtime_limits_defaults() {
+        let limits = RuntimeLimits::default();
+        assert_eq!(
+            limits.event_channel_capacity,
+            DEFAULT_EVENT_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            limits.pending_genai_max_count,
+            DEFAULT_PENDING_GENAI_MAX_COUNT
+        );
+        assert_eq!(
+            limits.pending_genai_max_bytes,
+            DEFAULT_PENDING_GENAI_MAX_BYTES
+        );
+        assert_eq!(limits.pid_cache_size, DEFAULT_PID_CACHE_SIZE);
+        assert_eq!(
+            limits.max_connection_body_bytes,
+            DEFAULT_MAX_CONNECTION_BODY_BYTES
+        );
+        assert_eq!(
+            limits.connection_idle_timeout_secs,
+            DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS
+        );
+        assert_eq!(limits.ring_buffer_mb, DEFAULT_RING_BUFFER_MB);
+    }
+
+    #[test]
+    fn test_feature_flags_defaults() {
+        let flags = FeatureFlags::default();
+        assert!(flags.token_stats);
+        assert!(!flags.tokenizer_enabled);
+        assert_eq!(flags.tokenizer_cache_size, DEFAULT_TOKENIZER_CACHE_SIZE);
+        assert!(!flags.session_mapping_enabled);
+        assert!(!flags.sqlite_storage_enabled);
+        assert!(!flags.interruption_detection_enabled);
+        assert!(!flags.audit_enabled);
+        assert!(!flags.token_consumption_enabled);
+        assert!(!flags.sls_logtail_enabled);
+    }
+
+    #[test]
+    fn test_load_from_json_runtime_limits() {
+        let json = r#"{
+            "runtime_limits": {
+                "event_channel_capacity": 5000,
+                "event_channel_policy": "drop_newest",
+                "pending_genai_max_count": 500,
+                "pending_genai_max_bytes_mb": 32,
+                "pid_cache_size": 256,
+                "max_connection_body_mb": 4,
+                "connection_idle_timeout_secs": 30,
+                "ring_buffer_mb": 16
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert_eq!(config.runtime_limits.event_channel_capacity, 5000);
+        assert!(matches!(
+            config.runtime_limits.event_channel_policy,
+            ChannelPolicy::DropNewest
+        ));
+        assert_eq!(config.runtime_limits.pending_genai_max_count, 500);
+        assert_eq!(
+            config.runtime_limits.pending_genai_max_bytes,
+            32 * 1024 * 1024
+        );
+        assert_eq!(config.runtime_limits.pid_cache_size, 256);
+        assert_eq!(
+            config.runtime_limits.max_connection_body_bytes,
+            4 * 1024 * 1024
+        );
+        assert_eq!(config.runtime_limits.connection_idle_timeout_secs, 30);
+        assert_eq!(config.runtime_limits.ring_buffer_mb, 16);
+    }
+
+    #[test]
+    fn test_load_from_json_features() {
+        let json = r#"{
+            "features": {
+                "token_stats": true,
+                "tokenizer": { "enabled": true, "cache_size": 8 },
+                "session_mapping": { "enabled": false, "max_entries": 5000 },
+                "sqlite_storage": { "enabled": false },
+                "interruption_detection": { "enabled": false },
+                "audit": false,
+                "token_consumption": true,
+                "sls_logtail": true
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.features.tokenizer_enabled);
+        assert_eq!(config.features.tokenizer_cache_size, 8);
+        assert!(!config.features.session_mapping_enabled);
+        assert_eq!(config.features.session_mapping_max_entries, 5000);
+        assert!(!config.features.sqlite_storage_enabled);
+        assert!(!config.features.interruption_detection_enabled);
+        assert!(!config.features.audit_enabled);
+        assert!(config.features.token_consumption_enabled);
+        assert!(config.features.sls_logtail_enabled);
     }
 }

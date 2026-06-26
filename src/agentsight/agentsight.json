@@ -6,6 +6,42 @@
     "enabled": false,
     "kill_after_count": 3
   },
+  "features": {
+    "token_stats": true,
+    "tokenizer": {
+      "enabled": false,
+      "cache_size": 4
+    },
+    "session_mapping": {
+      "enabled": true,
+      "max_entries": 10000
+    },
+    "sqlite_storage": {
+      "enabled": true,
+      "batch": {
+        "max_size": 100,
+        "flush_ms": 100
+      }
+    },
+    "interruption_detection": {
+      "enabled": true,
+      "retention_days": 30,
+      "max_db_size_mb": 100
+    },
+    "audit": true,
+    "token_consumption": false,
+    "sls_logtail": false
+  },
+  "runtime_limits": {
+    "event_channel_capacity": 10000,
+    "event_channel_policy": "backpressure",
+    "pending_genai_max_count": 1000,
+    "pending_genai_max_bytes_mb": 64,
+    "pid_cache_size": 1024,
+    "max_connection_body_mb": 8,
+    "connection_idle_timeout_secs": 60,
+    "ring_buffer_mb": 32
+  },
   "https": [
     {"rule": ["dashscope.aliyuncs.com"]},
     {"rule": ["api.openai.com"]}

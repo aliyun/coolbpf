@@ -696,7 +696,13 @@ impl Analyzer {
     /// This method is called when token extraction from SSE events fails.
     /// It uses the global tokenizer to compute input and output tokens
     /// from the request messages and response content.
+    ///
+    /// If the analyzer was created without a tokenizer (the `tokenizer`
+    /// feature is disabled), the fallback is skipped to avoid triggering
+    /// downloads/loads of large tokenizer models.
     fn compute_tokens_manually(&self, result: &AggregatedResult) -> Option<TokenRecord> {
+        self.tokenizer.as_ref()?;
+
         // Extract context from the aggregated result.
         // Both SseComplete and Http2StreamComplete are unified into
         // Vec<serde_json::Value> chunks to avoid a method-local enum

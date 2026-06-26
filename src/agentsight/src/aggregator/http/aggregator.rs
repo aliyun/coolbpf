@@ -12,6 +12,7 @@ use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::sslsniff::SslEvent;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::time::{Duration, Instant};
 
 /// Hard cap on a *compressed* SSE buffer awaiting completion. A malicious or
 /// buggy stream that never sends a chunk terminator would otherwise grow this
@@ -82,6 +83,12 @@ pub struct HttpConnectionAggregator {
     /// connection. Used to dedup when a single SSL_read produces multiple
     /// ParsedSseEvents that share the same source SslEvent buffer.
     last_appended_src_ptr: LruCache<ConnectionId, usize>,
+    /// Last activity timestamp per connection, used for idle timeout eviction.
+    last_activity: LruCache<ConnectionId, Instant>,
+    /// Maximum bytes buffered per connection (request body or compressed SSE).
+    max_body_bytes: usize,
+    /// Idle timeout before a connection state is forcibly dropped.
+    idle_timeout: Duration,
 }
 
 /// Returns true if oversized-SSE-event continuation buffering should run for
@@ -104,6 +111,12 @@ fn needs_sse_continuation_buffer(request: Option<&ParsedRequest>) -> bool {
     path.ends_with("/responses") || path.contains("/responses?")
 }
 
+/// Default per-connection body buffer cap (8 MiB).
+const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Default idle timeout for connection states (60 s).
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl Default for HttpConnectionAggregator {
     fn default() -> Self {
         Self::new()
@@ -111,26 +124,32 @@ impl Default for HttpConnectionAggregator {
 }
 
 impl HttpConnectionAggregator {
-    /// Create a new aggregator with default capacity
+    /// Create a new aggregator with default capacity and limits.
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_CONNECTION_CAPACITY)
+    }
+
+    /// Create a new aggregator with custom capacity and default limits.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_limits(capacity, DEFAULT_MAX_BODY_BYTES, DEFAULT_IDLE_TIMEOUT)
+    }
+
+    /// Create a new aggregator with explicit capacity and memory/time limits.
+    pub fn with_limits(capacity: usize, max_body_bytes: usize, idle_timeout: Duration) -> Self {
+        let cap = NonZeroUsize::new(capacity).unwrap();
         HttpConnectionAggregator {
-            connections: LruCache::new(NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap()),
-            sse_continuation_buffers: LruCache::new(
-                NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap(),
-            ),
-            last_appended_src_ptr: LruCache::new(
-                NonZeroUsize::new(DEFAULT_CONNECTION_CAPACITY).unwrap(),
-            ),
+            connections: LruCache::new(cap),
+            sse_continuation_buffers: LruCache::new(cap),
+            last_appended_src_ptr: LruCache::new(cap),
+            last_activity: LruCache::new(cap),
+            max_body_bytes: max_body_bytes.max(1024),
+            idle_timeout,
         }
     }
 
-    /// Create a new aggregator with custom capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        HttpConnectionAggregator {
-            connections: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
-            sse_continuation_buffers: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
-            last_appended_src_ptr: LruCache::new(NonZeroUsize::new(capacity).unwrap()),
-        }
+    /// Current per-connection body buffer cap.
+    pub fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
     }
 
     /// Insert connection state, logging if an unrelated entry is evicted by LRU
@@ -150,6 +169,80 @@ impl HttpConnectionAggregator {
                 );
             }
         }
+    }
+
+    /// Evict connections that have been idle for longer than `self.idle_timeout`
+    /// or whose buffered body exceeds `self.max_body_bytes`.
+    ///
+    /// Called periodically from the main event loop (via `UnifiedAggregator`)
+    /// to prevent stale or oversized connection states from accumulating.
+    pub fn evict_idle_and_oversized(&mut self) {
+        let now = Instant::now();
+        let timeout = self.idle_timeout;
+        let max_bytes = self.max_body_bytes;
+
+        // Collect keys to evict (cannot mutate while iterating).
+        let to_evict: Vec<ConnectionId> = self
+            .last_activity
+            .iter()
+            .filter_map(|(k, ts)| {
+                if now.duration_since(*ts) > timeout {
+                    Some(*k)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for key in &to_evict {
+            self.connections.pop(key);
+            self.sse_continuation_buffers.pop(key);
+            self.last_appended_src_ptr.pop(key);
+            self.last_activity.pop(key);
+        }
+        if !to_evict.is_empty() {
+            log::info!(
+                "[HttpAggregator] evicted {} idle connections (timeout={}s)",
+                to_evict.len(),
+                timeout.as_secs()
+            );
+        }
+
+        // Also evict oversized body buffers.
+        let oversized: Vec<ConnectionId> = self
+            .connections
+            .iter()
+            .filter_map(|(k, state)| {
+                let body_len = match state {
+                    ConnectionState::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
+                    ConnectionState::SseActive {
+                        compressed_buffer, ..
+                    } => compressed_buffer.as_ref().map_or(0, |b| b.len()),
+                    _ => 0,
+                };
+                if body_len > max_bytes { Some(*k) } else { None }
+            })
+            .collect();
+
+        for key in &oversized {
+            self.connections.pop(key);
+            self.sse_continuation_buffers.pop(key);
+            self.last_appended_src_ptr.pop(key);
+            self.last_activity.pop(key);
+        }
+        if !oversized.is_empty() {
+            log::warn!(
+                "[HttpAggregator] evicted {} oversized connections (max_body={}B)",
+                oversized.len(),
+                max_bytes
+            );
+        }
+    }
+
+    /// Record activity timestamp for a connection.
+    #[allow(dead_code)]
+    fn touch(&mut self, key: &ConnectionId) {
+        self.last_activity.push(*key, Instant::now());
     }
 
     /// Parse initial SSE body bytes from the first HTTP response packet.
@@ -2242,5 +2335,42 @@ mod tests {
             count, 1,
             "same-source SSE events must contribute to the buffer only once"
         );
+    }
+
+    #[test]
+    fn test_with_limits_sets_fields() {
+        let agg = HttpConnectionAggregator::with_limits(10, 4096, Duration::from_secs(30));
+        assert_eq!(agg.max_body_bytes(), 4096);
+    }
+
+    #[test]
+    fn test_with_limits_min_body_bytes() {
+        // max_body_bytes should be at least 1024
+        let agg = HttpConnectionAggregator::with_limits(10, 100, Duration::from_secs(60));
+        assert_eq!(agg.max_body_bytes(), 1024);
+    }
+
+    #[test]
+    fn test_evict_idle_and_oversized_empty() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 8192, Duration::from_secs(1));
+        // Should not panic on empty aggregator
+        agg.evict_idle_and_oversized();
+    }
+
+    #[test]
+    fn test_touch_and_evict_after_timeout() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 8192, Duration::from_millis(50));
+        let conn_id = ConnectionId { pid: 1, ssl_ptr: 1 };
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.connections.push(conn_id, ConnectionState::Idle);
+
+        // Before timeout: should not evict
+        agg.evict_idle_and_oversized();
+        assert!(agg.connections.peek(&conn_id).is_some());
+
+        // Wait for timeout
+        std::thread::sleep(Duration::from_millis(60));
+        agg.evict_idle_and_oversized();
+        assert!(agg.connections.peek(&conn_id).is_none());
     }
 }

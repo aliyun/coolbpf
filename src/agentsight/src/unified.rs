@@ -19,7 +19,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -91,7 +91,7 @@ pub struct AgentSight {
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
-    pid_agent_name_cache: HashMap<u32, String>,
+    pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
@@ -102,6 +102,9 @@ pub struct AgentSight {
     deadloop_kill_after_count: usize,
     /// Process killer for DeadLoop auto-kill (injectable for tests)
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
+    /// Cached feature flags so runtime paths can check them without the config.
+    #[allow(dead_code)]
+    features: crate::config::FeatureFlags,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -226,6 +229,7 @@ impl AgentSight {
             enable_udpdns,
             &tcp_targets,
             config.cgroup_filter_enabled,
+            &config.runtime_limits,
         )
         .context("Failed to create probes")?;
 
@@ -261,9 +265,11 @@ impl AgentSight {
         };
 
         // Build pid → agent_name cache from existing agents (persists after process exit)
-        let mut pid_agent_name_cache = HashMap::new();
+        let pid_cache_cap =
+            std::num::NonZeroUsize::new(config.runtime_limits.pid_cache_size.max(1)).unwrap();
+        let mut pid_agent_name_cache = lru::LruCache::new(pid_cache_cap);
         for agent in &existing_agents {
-            pid_agent_name_cache.insert(agent.pid, agent.agent_info.name.clone());
+            pid_agent_name_cache.put(agent.pid, agent.agent_info.name.clone());
         }
         for result in &conn_results {
             // Prefer cmdline agent name over domain fallback if the process matches a rule.
@@ -272,7 +278,7 @@ impl AgentSight {
                 .map(|a| a.agent_info.name)
                 .unwrap_or_else(|| format!("domain:{}", result.domain));
             Self::attach_process_internal(&mut probes, result.pid, &agent_name);
-            pid_agent_name_cache.insert(result.pid, agent_name);
+            pid_agent_name_cache.put(result.pid, agent_name);
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -480,7 +486,11 @@ impl AgentSight {
             running,
             event_count: 0,
             filewatch_callback: None,
-            response_mapper: ResponseSessionMapper::new(),
+            response_mapper: if config.features.session_mapping_enabled {
+                ResponseSessionMapper::with_capacity(config.features.session_mapping_max_entries)
+            } else {
+                ResponseSessionMapper::disabled()
+            },
             pending_genai: Vec::new(),
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
@@ -490,6 +500,7 @@ impl AgentSight {
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
+            features: config.features.clone(),
         })
     }
 
@@ -794,7 +805,7 @@ impl AgentSight {
                 // Phase 2: check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.pid_agent_name_cache.insert(*pid, agent_name.clone());
+                    self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
                 }
             }
@@ -1846,7 +1857,7 @@ mod tests {
             pid: 1234,
             process_name: "test".to_string(),
             agent_name: Some("test-agent".to_string()),
-            metadata: HashMap::new(),
+            metadata: std::collections::HashMap::new(),
         }
     }
 

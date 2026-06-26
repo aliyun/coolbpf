@@ -2,15 +2,40 @@ use libbpf_cargo::SkeletonBuilder;
 use std::env;
 use std::path::PathBuf;
 
-fn generate_skeleton(out: &mut PathBuf, name: &str) {
+/// Read the Ring Buffer size (in MiB) from the `AGENTSIGHT_RING_BUFFER_MB`
+/// environment variable and return the corresponding clang `-D` flag.
+///
+/// The BPF ring buffer `max_entries` must be a power-of-two multiple of the
+/// page size.  We accept any positive integer of MiB here and let the kernel
+/// validate at load time; common values are 8, 16, 32, 64.
+///
+/// Default: 32 MiB (matches `common.h` fallback).
+fn ring_buffer_clang_define() -> String {
+    let mb = env::var("AGENTSIGHT_RING_BUFFER_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0);
+    match mb {
+        Some(v) => {
+            let bytes = v * 1024 * 1024;
+            println!("cargo:warning=AGENTSIGHT_RING_BUFFER_MB={v} ({bytes} bytes)");
+            format!("-DRING_BUFFER_SIZE={bytes}")
+        }
+        None => String::new(),
+    }
+}
+
+fn generate_skeleton(out: &mut PathBuf, name: &str, clang_define: &str) {
     let c_path = format!("src/bpf/{name}.bpf.c");
     let rs_name = format!("{name}.skel.rs");
     out.push(&rs_name);
 
-    SkeletonBuilder::new()
-        .source(&c_path)
-        .build_and_generate(&out)
-        .unwrap();
+    let mut builder = SkeletonBuilder::new();
+    builder.source(&c_path);
+    if !clang_define.is_empty() {
+        builder.clang_args([clang_define]);
+    }
+    builder.build_and_generate(&out).unwrap();
 
     out.pop();
     println!("cargo:rerun-if-changed={c_path}");
@@ -36,31 +61,36 @@ fn main() {
     let mut out =
         PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
 
-    generate_skeleton(&mut out, "sslsniff");
+    // Read AGENTSIGHT_RING_BUFFER_MB once and pass to every BPF skeleton build.
+    let ring_define = ring_buffer_clang_define();
+    // Rebuild when the env var changes.
+    println!("cargo:rerun-if-env-changed=AGENTSIGHT_RING_BUFFER_MB");
+
+    generate_skeleton(&mut out, "sslsniff", &ring_define);
     generate_header(&mut out, "sslsniff");
 
     // Generate proctrace skeleton and bindings
-    generate_skeleton(&mut out, "proctrace");
+    generate_skeleton(&mut out, "proctrace", &ring_define);
     generate_header(&mut out, "proctrace");
 
     // Generate procmon skeleton and bindings
-    generate_skeleton(&mut out, "procmon");
+    generate_skeleton(&mut out, "procmon", &ring_define);
     generate_header(&mut out, "procmon");
 
     // Generate filewatch skeleton and bindings
-    generate_skeleton(&mut out, "filewatch");
+    generate_skeleton(&mut out, "filewatch", &ring_define);
     generate_header(&mut out, "filewatch");
 
     // Generate filewrite skeleton and bindings
-    generate_skeleton(&mut out, "filewrite");
+    generate_skeleton(&mut out, "filewrite", &ring_define);
     generate_header(&mut out, "filewrite");
 
     // Generate udpdns skeleton and bindings
-    generate_skeleton(&mut out, "udpdns");
+    generate_skeleton(&mut out, "udpdns", &ring_define);
     generate_header(&mut out, "udpdns");
 
     // Generate tcpsniff skeleton (no header — reuses sslsniff.h event format)
-    generate_skeleton(&mut out, "tcpsniff");
+    generate_skeleton(&mut out, "tcpsniff", &ring_define);
 
     // generate_header(&mut out, "frametypes");
     // generate_header(&mut out, "errors");

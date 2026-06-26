@@ -365,7 +365,14 @@ impl ProcTrace {
         traced_processes: Option<&MapHandle>,
         rb: Option<&MapHandle>,
     ) -> Result<Self> {
-        Self::new_with_target_and_maps(target_pids, target_uid, traced_processes, rb, false)
+        Self::new_with_target_and_maps(
+            target_pids,
+            target_uid,
+            traced_processes,
+            rb,
+            false,
+            config::DEFAULT_RING_BUFFER_MB,
+        )
     }
 
     /// Create a new ProcTrace with extra control over the cgroup-level filter.
@@ -373,12 +380,17 @@ impl ProcTrace {
     /// `cgroup_filter_enabled` flips the rodata flag baked into the BPF object.
     /// When false (default), the cgroup filter logic short-circuits to true and
     /// the cgroup_filter map is ignored — behavior identical to pre-feature.
+    ///
+    /// `ring_buffer_mb` controls the BPF ring buffer `max_entries` at load time.
+    /// It is ignored when `rb` is `Some` because the ring buffer is owned by the
+    /// external map in that case.
     pub fn new_with_target_and_maps(
         target_pids: &[u32],
         target_uid: Option<u32>,
         traced_processes: Option<&MapHandle>,
         rb: Option<&MapHandle>,
         cgroup_filter_enabled: bool,
+        ring_buffer_mb: usize,
     ) -> Result<Self> {
         // Open + load skeleton
         let mut builder = ProctraceSkelBuilder::default();
@@ -411,13 +423,34 @@ impl ProcTrace {
                 .context("failed to reuse external traced_processes map")?;
         }
 
-        // If external rb map is provided, reuse its fd
+        // If external rb map is provided, reuse its fd.
+        // Otherwise resize the ring buffer according to the runtime config.
         if let Some(map) = rb {
             open_skel
                 .maps_mut()
                 .rb()
                 .reuse_fd(map.as_fd())
                 .context("failed to reuse external rb map")?;
+        } else {
+            let rb_bytes = ring_buffer_mb
+                .checked_mul(1024 * 1024)
+                .filter(|&b| b <= u32::MAX as usize)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ring_buffer_mb={ring_buffer_mb} is out of range (must be <= {} MiB)",
+                        u32::MAX as usize / (1024 * 1024)
+                    )
+                })? as u32;
+            open_skel
+                .maps_mut()
+                .rb()
+                .set_max_entries(rb_bytes)
+                .with_context(|| {
+                    format!(
+                        "failed to set ring buffer max_entries to {rb_bytes} bytes ({ring_buffer_mb} MiB)"
+                    )
+                })?;
+            log::info!("BPF ring buffer resized to {ring_buffer_mb} MiB ({rb_bytes} bytes)");
         }
 
         let mut skel = open_skel.load().context("failed to load BPF object")?;

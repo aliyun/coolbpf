@@ -156,6 +156,29 @@ pub(super) fn classify_call_kind_from_raw(
     }
 }
 
+/// Trait abstracting over PID → agent_name caches.
+///
+/// Implemented for both `HashMap` (tests) and `LruCache` (production) so the
+/// GenAI builder helpers do not need to know the concrete cache type.
+pub trait PidAgentNameCache {
+    /// Look up the agent name for a given PID.
+    fn get_agent_name(&self, pid: &u32) -> Option<&String>;
+}
+
+impl PidAgentNameCache for std::collections::HashMap<u32, String> {
+    fn get_agent_name(&self, pid: &u32) -> Option<&String> {
+        self.get(pid)
+    }
+}
+
+impl PidAgentNameCache for lru::LruCache<u32, String> {
+    fn get_agent_name(&self, pid: &u32) -> Option<&String> {
+        // Use `peek` to avoid mutable access; the LRU order update is not
+        // important for agent-name lookup.
+        self.peek(pid)
+    }
+}
+
 impl GenAIBuilder {
     /// Check if the path indicates an LLM API call
     pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
@@ -426,10 +449,10 @@ impl GenAIBuilder {
     pub(super) fn resolve_agent_name_from_comm(
         comm: &str,
         pid: u32,
-        cache: &std::collections::HashMap<u32, String>,
+        cache: &impl PidAgentNameCache,
     ) -> Option<String> {
         // First check the pid→agent_name cache (works even for dead processes)
-        if let Some(name) = cache.get(&pid) {
+        if let Some(name) = cache.get_agent_name(&pid) {
             return Some(name.clone());
         }
         let ctx = ProcessContext {
@@ -448,10 +471,10 @@ impl GenAIBuilder {
     pub(super) fn resolve_agent_name(
         comm: &str,
         pid: u32,
-        cache: &std::collections::HashMap<u32, String>,
+        cache: &impl PidAgentNameCache,
     ) -> Option<String> {
         // First check the pid→agent_name cache (works even for dead processes)
-        if let Some(name) = cache.get(&pid) {
+        if let Some(name) = cache.get_agent_name(&pid) {
             return Some(name.clone());
         }
         // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
@@ -1008,5 +1031,23 @@ mod tests {
             ]
         });
         assert_eq!(GenAIBuilder::extract_message_text(&msg), None);
+    }
+
+    #[test]
+    fn test_pid_agent_name_cache_hashmap() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(123u32, "TestAgent".to_string());
+        assert_eq!(cache.get_agent_name(&123), Some(&"TestAgent".to_string()));
+        assert_eq!(cache.get_agent_name(&999), None);
+    }
+
+    #[test]
+    fn test_pid_agent_name_cache_lru() {
+        let mut cache = lru::LruCache::new(std::num::NonZeroUsize::new(2).unwrap());
+        cache.put(1, "Agent1".to_string());
+        cache.put(2, "Agent2".to_string());
+        assert_eq!(cache.get_agent_name(&1), Some(&"Agent1".to_string()));
+        assert_eq!(cache.get_agent_name(&2), Some(&"Agent2".to_string()));
+        assert_eq!(cache.get_agent_name(&3), None);
     }
 }

@@ -56,6 +56,10 @@ pub struct ResponseSessionMapper {
     /// pid → sessionId fallback used by agents (e.g. Codex CLI) whose
     /// per-session rollout file does not embed an LLM `response_id`.
     pid_map: LruCache<u32, String>,
+    /// When disabled the mapper is a cheap no-op placeholder; FileWrite events
+    /// are ignored and lookups always return None.  Used to gate the session
+    /// mapping feature via `agentsight.json`.
+    enabled: bool,
 }
 
 impl Default for ResponseSessionMapper {
@@ -67,9 +71,29 @@ impl Default for ResponseSessionMapper {
 impl ResponseSessionMapper {
     /// Create a new empty mapper with default capacity.
     pub fn new() -> Self {
+        Self::with_capacity(MAX_RESPONSE_MAP_ENTRIES)
+    }
+
+    /// Create a new empty mapper with a custom capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1))
+            .unwrap_or_else(|| NonZeroUsize::new(MAX_RESPONSE_MAP_ENTRIES).unwrap());
         ResponseSessionMapper {
-            map: LruCache::new(NonZeroUsize::new(MAX_RESPONSE_MAP_ENTRIES).unwrap()),
+            map: LruCache::new(cap),
             pid_map: LruCache::new(NonZeroUsize::new(MAX_PID_MAP_ENTRIES).unwrap()),
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled placeholder mapper.
+    ///
+    /// `process_filewrite` is a no-op and `get_session_by_response_id` always
+    /// returns None, so the session-mapping feature consumes negligible memory.
+    pub fn disabled() -> Self {
+        ResponseSessionMapper {
+            map: LruCache::new(NonZeroUsize::new(1).unwrap()),
+            pid_map: LruCache::new(NonZeroUsize::new(1).unwrap()),
+            enabled: false,
         }
     }
 
@@ -79,6 +103,10 @@ impl ResponseSessionMapper {
     /// 3. For each line, try JSON parse and extract "responseId"
     /// 4. Insert responseId → sessionId into the map
     pub fn process_filewrite(&mut self, event: &FileWriteEvent) {
+        if !self.enabled {
+            return;
+        }
+
         let session_id = match Self::extract_session_id(&event.filename) {
             Some(id) => id,
             None => {
@@ -382,5 +410,36 @@ mod tests {
             mapper.get_session_by_response_id("msg_72b84528-120a-4857-8c20-a3d1747c062b"),
             Some("002b93c6-fbc3-4c66-9a8e-4a157715c049")
         );
+    }
+
+    #[test]
+    fn test_disabled_mapper_ignores_events() {
+        let mut mapper = ResponseSessionMapper::disabled();
+        let event = FileWriteEvent {
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: String::new(),
+            filename: "550e8400-e29b-41d4-a716-446655440000.jsonl".to_string(),
+            cgroup_id: 0,
+            buf: br#"{"responseId":"resp_123"}"#.to_vec(),
+        };
+        mapper.process_filewrite(&event);
+        assert_eq!(mapper.get_session_by_response_id("resp_123"), None);
+    }
+
+    #[test]
+    fn test_with_capacity_creates_enabled_mapper() {
+        let mapper = ResponseSessionMapper::with_capacity(100);
+        // enabled mapper should be able to store mappings
+        assert_eq!(mapper.get_session_by_response_id("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_disabled_mapper_get_session_by_pid_returns_none() {
+        let mapper = ResponseSessionMapper::disabled();
+        assert_eq!(mapper.get_session_by_pid(12345), None);
     }
 }

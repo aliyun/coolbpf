@@ -58,6 +58,8 @@ pub enum StorageBackend {
         access_key_id: String,
         access_key_secret: String,
     },
+    /// No-op backend: stores nothing, used when all persistence features are disabled.
+    Noop,
     // Future: other backends can be added here
 }
 
@@ -145,6 +147,7 @@ impl Storage {
                 // TODO: Implement SLS storage
                 anyhow::bail!("SLS storage backend is not yet implemented");
             }
+            StorageBackend::Noop => Ok(Self::noop()),
         }
     }
 
@@ -172,6 +175,39 @@ impl Storage {
     /// Create a new Storage with default SQLite config
     pub fn sqlite() -> Result<Self> {
         Self::new(StorageBackend::Sqlite)
+    }
+
+    /// Create a new no-op Storage that silently drops all writes.
+    ///
+    /// Used when all persistence features are disabled in `agentsight.json`.
+    pub fn noop() -> Self {
+        // Reuse SQLite stores with an in-memory database so the store API
+        // remains available without touching the filesystem.
+        let db_path = PathBuf::from(":memory:");
+        let audit_store = AuditStore::with_table(&db_path, "audit_events")
+            .expect("in-memory audit store should always succeed");
+        let token_store = TokenStore::with_table(&db_path, "token_records");
+        let http_store = HttpStore::with_table(&db_path, "http_records")
+            .expect("in-memory http store should always succeed");
+        let token_consumption_store =
+            TokenConsumptionStore::with_table(&db_path, "token_consumption")
+                .expect("in-memory token_consumption store should always succeed");
+
+        Storage {
+            backend: StorageBackend::Noop,
+            audit_store,
+            token_store,
+            http_store,
+            token_consumption_store,
+            retention_days: 0,
+            purge_interval: 0,
+            insert_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns true if this storage backend is the no-op backend.
+    pub fn is_noop(&self) -> bool {
+        matches!(self.backend, StorageBackend::Noop)
     }
 
     /// Get the backend type
@@ -206,6 +242,10 @@ impl Storage {
     /// Periodically triggers data purge based on `purge_interval` configuration.
     pub fn store(&self, result: &AnalysisResult) -> Result<i64> {
         if let AnalysisResult::Http(_) = result {
+            return Ok(0);
+        }
+        if matches!(self.backend, StorageBackend::Noop) {
+            log::trace!("Noop storage dropping analysis result");
             return Ok(0);
         }
         log::debug!("Storing analysis result: {result:?}");
@@ -334,5 +374,31 @@ impl Drop for Storage {
         if let Err(e) = self.checkpoint() {
             log::warn!("WAL checkpoint during Storage drop failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_noop_storage_is_noop() {
+        let storage = Storage::noop();
+        assert!(storage.is_noop());
+    }
+
+    #[test]
+    fn test_noop_storage_store_does_not_panic() {
+        let storage = Storage::noop();
+        // noop backend should not panic even though store is available
+        assert!(storage.is_noop());
+    }
+
+    #[test]
+    fn test_noop_storage_should_persist() {
+        let storage = Storage::noop();
+        // Just verify it doesn't panic
+        let _ = storage.is_noop();
+        drop(storage);
     }
 }

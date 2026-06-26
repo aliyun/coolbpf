@@ -236,7 +236,9 @@ sudo agentsight trace
 
 ## 配置
 
-通过 `AgentsightConfig` 进行统一配置：
+AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路径 `/etc/agentsight/config.json`，若不存在则使用内嵌默认值）。
+
+### 基础配置
 
 | 类别 | 选项 | 说明 |
 |------|------|------|
@@ -247,6 +249,63 @@ sudo agentsight trace
 | HTTP | `connection_cache_capacity` | 连接追踪的 LRU 缓存大小 |
 | SLS | `sls_endpoint` / `sls_project` / `sls_logstore` | 阿里云 SLS 导出配置 |
 | Tokenizer | `tokenizer_file` | HuggingFace tokenizer 文件路径或 URL |
+
+### 功能开关（`features`）
+
+所有可选功能**默认全开**。可通过 `agentsight.json` 的 `features` 区块逐个关闭以降低内存和 I/O 开销：
+
+| 功能 | JSON 路径 | 默认值 | 说明 |
+|------|-----------|--------|------|
+| Token 统计 | `features.token_stats` | `true` | 核心功能，不建议关闭 |
+| 本地 Tokenizer | `features.tokenizer.enabled` | `false` | HuggingFace 模型 fallback 计数（每个模型 50–100 MB） |
+| Session 映射 | `features.session_mapping.enabled` | `true` | responseId → sessionId 关联（LRU 10,000 条） |
+| SQLite 存储 | `features.sqlite_storage.enabled` | `true` | 持久化到磁盘 SQLite；关闭后用内存 noop store |
+| 中断检测 | `features.interruption_detection.enabled` | `true` | 死循环 / 崩溃 / 上下文溢出检测 |
+| 审计 | `features.audit` | `true` | LLM 调用审计事件持久化 |
+| Token 消费 | `features.token_consumption` | `false` | 聚合 Token 消费记录 |
+| SLS Logtail | `features.sls_logtail` | `false` | 写入 SLS 日志文件 |
+
+### 运行时资源上限（`runtime_limits`）
+
+通过 `runtime_limits` 配置缓冲区上限，防止内存无限增长：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `event_channel_capacity` | 10,000 | Probe → 事件通道的有界容量 |
+| `event_channel_policy` | `"backpressure"` | 满载策略：`backpressure` / `drop_newest` / `sample` |
+| `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
+| `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
+| `pid_cache_size` | 1,024 | PID → agent_name 的 LRU 缓存大小 |
+| `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
+| `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时（秒） |
+| `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
+
+### 最小内存配置示例
+
+如需在资源受限环境下运行，可关闭非必要功能并缩小 ring buffer：
+
+```json
+{
+  "features": {
+    "token_stats": true,
+    "tokenizer": { "enabled": false },
+    "session_mapping": { "enabled": false },
+    "sqlite_storage": { "enabled": false },
+    "interruption_detection": { "enabled": false },
+    "audit": false,
+    "token_consumption": false,
+    "sls_logtail": false
+  },
+  "runtime_limits": {
+    "ring_buffer_mb": 8,
+    "event_channel_capacity": 5000,
+    "pending_genai_max_count": 500,
+    "pending_genai_max_bytes_mb": 32
+  }
+}
+```
+
+> 此配置下 idle 状态 RSS 约 24–30 MB，有事件流量时约 35–40 MB。
 
 ## 支持的 LLM 提供商
 
