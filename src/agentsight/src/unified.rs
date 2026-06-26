@@ -326,7 +326,8 @@ impl AgentSight {
 
         // Sysom production mode: when the active Logtail path points under /var/sysom/,
         // use only the external Logtail path. Skip SQLite and the default SLS exporter.
-        let sysom_logtail_path = crate::genai::logtail::sysom_logtail_path();
+        let sysom_logtail_path =
+            crate::genai::logtail::logtail_path().filter(|p| p.starts_with("/var/sysom/"));
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
