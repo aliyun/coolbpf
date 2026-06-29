@@ -3,6 +3,7 @@
 //! This module builds GenAI semantic events from AnalysisResult.
 //! It reuses already-extracted data to avoid redundant parsing.
 
+use super::helpers::PidAgentNameCache;
 use super::id_resolver::IdResolver;
 use super::semantic::GenAISemanticEvent;
 use crate::aggregator::{ConnectionId, ParsedRequest};
@@ -72,7 +73,7 @@ impl GenAIBuilder {
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
-        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
+        pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> (BuildOutput, Option<PendingCallInfo>) {
         let mut events = Vec::new();
         let mut pending: Option<PendingCallInfo> = None;
@@ -184,7 +185,7 @@ impl GenAIBuilder {
         &self,
         request: &ParsedRequest,
         conn_id: &ConnectionId,
-        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
+        pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
         let path_match = self.is_llm_api_path(&request.path);

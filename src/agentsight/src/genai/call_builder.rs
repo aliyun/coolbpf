@@ -6,6 +6,7 @@
 //! widened to `pub(super)` so `builder.rs` can call `build_llm_call`.
 
 use super::GenAIBuilder;
+use super::helpers::PidAgentNameCache;
 use super::semantic::{
     InputMessage, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage, TokenUsage,
 };
@@ -21,7 +22,7 @@ impl GenAIBuilder {
         &self,
         results: &[AnalysisResult],
         response_mapper: &ResponseSessionMapper,
-        pid_agent_name_cache: &std::collections::HashMap<u32, String>,
+        pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<LLMCall> {
         // Extract components from analysis results
         let token_record = results.iter().find_map(|r| match r {

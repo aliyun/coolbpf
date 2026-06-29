@@ -19,7 +19,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -86,12 +86,18 @@ pub struct AgentSight {
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
     pending_genai: Vec<PendingGenAI>,
+    /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
+    pending_genai_bytes: usize,
+    /// Runtime limits for bounded buffers and eviction policies.
+    runtime_limits: crate::config::RuntimeLimits,
     /// Optional FFI event sender (set when running in FFI/C-API mode)
     ffi_sender: Option<FfiEventSender>,
     /// Rate-limiter for dead-PID connection drain (at most once per second)
     last_drain_check: std::time::Instant,
+    /// Rate-limiter for interruption DB purge (at most once per 60 s)
+    last_interruption_purge: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
-    pid_agent_name_cache: HashMap<u32, String>,
+    pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
@@ -102,6 +108,8 @@ pub struct AgentSight {
     deadloop_kill_after_count: usize,
     /// Process killer for DeadLoop auto-kill (injectable for tests)
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
+    /// Cached feature flags so runtime paths can check them without the config.
+    features: crate::config::FeatureFlags,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -113,6 +121,13 @@ struct PendingGenAI {
     response_id: String,
     pid: u32,
     created_at: std::time::Instant,
+}
+
+impl PendingGenAI {
+    /// Rough byte estimate for memory budget enforcement.
+    fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.response_id.len() + self.events.len() * 512 // conservative per-event estimate
+    }
 }
 
 /// Maximum time to wait for ResponseSessionMapper to resolve a session_id
@@ -226,6 +241,7 @@ impl AgentSight {
             enable_udpdns,
             &tcp_targets,
             config.cgroup_filter_enabled,
+            &config.runtime_limits,
         )
         .context("Failed to create probes")?;
 
@@ -261,9 +277,11 @@ impl AgentSight {
         };
 
         // Build pid → agent_name cache from existing agents (persists after process exit)
-        let mut pid_agent_name_cache = HashMap::new();
+        let pid_cache_cap =
+            std::num::NonZeroUsize::new(config.runtime_limits.pid_cache_size.max(1)).unwrap();
+        let mut pid_agent_name_cache = lru::LruCache::new(pid_cache_cap);
         for agent in &existing_agents {
-            pid_agent_name_cache.insert(agent.pid, agent.agent_info.name.clone());
+            pid_agent_name_cache.put(agent.pid, agent.agent_info.name.clone());
         }
         for result in &conn_results {
             // Prefer cmdline agent name over domain fallback if the process matches a rule.
@@ -272,7 +290,7 @@ impl AgentSight {
                 .map(|a| a.agent_info.name)
                 .unwrap_or_else(|| format!("domain:{}", result.domain));
             Self::attach_process_internal(&mut probes, result.pid, &agent_name);
-            pid_agent_name_cache.insert(result.pid, agent_name);
+            pid_agent_name_cache.put(result.pid, agent_name);
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -284,13 +302,19 @@ impl AgentSight {
         // Start polling (non-blocking)
         let _poller = probes.run().context("Failed to start probe poller")?;
 
-        // Initialize unified storage based on config
-        let storage = Self::create_storage(&config)?;
+        // Initialize unified storage based on config.  When sqlite_storage is
+        // disabled we still create an empty storage object so the rest of the
+        // pipeline can call storage methods without Option plumbing.
+        let storage = if config.features.sqlite_storage_enabled {
+            Self::create_storage(&config)?
+        } else {
+            Storage::noop()
+        };
 
-        // Build GenAI exporters
+        // Build GenAI exporters based on feature flags.
         let mut genai_exporters: Vec<Box<dyn GenAIExporter>> = Vec::new();
         let mut genai_sqlite_store: Option<Arc<GenAISqliteStore>> = None;
-        let sls_activated = Arc::new(AtomicBool::new(false));
+        let sls_activated = Arc::new(AtomicBool::new(config.features.sls_logtail_enabled));
 
         // If config has runtime.sls_logtail_path set, seed the dynamic path
         if let Some(ref sls_path) = config.sls_logtail_path {
@@ -302,7 +326,8 @@ impl AgentSight {
 
         // Sysom production mode: when the active Logtail path points under /var/sysom/,
         // use only the external Logtail path. Skip SQLite and the default SLS exporter.
-        let sysom_logtail_path = crate::genai::logtail::sysom_logtail_path();
+        let sysom_logtail_path =
+            crate::genai::logtail::logtail_path().filter(|p| p.starts_with("/var/sysom/"));
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
@@ -333,15 +358,28 @@ impl AgentSight {
             }
         } else {
             // Default/dev mode: SQLite + default SLS exporter, plus optional env Logtail.
-            match GenAISqliteStore::new() {
-                Ok(store) => {
-                    log::info!("SQLite GenAI exporter enabled");
-                    let store = Arc::new(store);
-                    genai_sqlite_store = Some(Arc::clone(&store));
-                    genai_exporters.push(Box::new(store));
-                }
-                Err(e) => {
-                    log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
+            if config.features.sqlite_storage_enabled {
+                let db_path = config
+                    .db_path()
+                    .parent()
+                    .map(|p| p.join("genai_events.db"))
+                    .unwrap_or_else(GenAISqliteStore::default_path);
+                match GenAISqliteStore::new_with_path_and_batch(
+                    &db_path,
+                    config.features.sqlite_batch,
+                ) {
+                    Ok(store) => {
+                        log::info!(
+                            "SQLite GenAI exporter enabled (batch={:?})",
+                            config.features.sqlite_batch
+                        );
+                        let store = Arc::new(store);
+                        genai_sqlite_store = Some(Arc::clone(&store));
+                        genai_exporters.push(Box::new(store));
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize SQLite GenAI exporter: {e}");
+                    }
                 }
             }
 
@@ -412,23 +450,27 @@ impl AgentSight {
             Analyzer::new()
         };
 
-        // Initialize interruption store (co-located in same directory as genai db)
-        let interruption_store: Option<Arc<InterruptionStore>> = {
-            let db_path = GenAISqliteStore::default_path()
-                .parent()
-                .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
-                .join("interruption_events.db");
-            match InterruptionStore::new_with_path(&db_path) {
-                Ok(store) => {
-                    log::info!("Interruption events store initialized at {db_path:?}");
-                    Some(Arc::new(store))
+        // Initialize interruption store only when interruption detection is enabled.
+        let interruption_store: Option<Arc<InterruptionStore>> =
+            if config.features.interruption_detection_enabled {
+                let db_path = GenAISqliteStore::default_path()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+                    .join("interruption_events.db");
+                match InterruptionStore::new_with_path(&db_path) {
+                    Ok(store) => {
+                        log::info!("Interruption events store initialized at {db_path:?}");
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize interruption store: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Failed to initialize interruption store: {e}");
-                    None
-                }
-            }
-        };
+            } else {
+                log::debug!("Interruption detection disabled; skipping interruption store");
+                None
+            };
 
         // Run OOM recovery: scan dmesg for OOM kill events that occurred while
         // AgentSight was down (e.g. if AgentSight itself was OOM-killed).
@@ -467,12 +509,16 @@ impl AgentSight {
         Ok(AgentSight {
             probes,
             parser: Parser::new(),
-            aggregator: Aggregator::new(),
+            aggregator: Aggregator::with_limits(config.connection_capacity, &config.runtime_limits),
             analyzer,
             genai_builder: GenAIBuilder::new(),
             genai_exporters,
             genai_sqlite_store,
-            interruption_detector: InterruptionDetector::new(DetectorConfig::default()),
+            interruption_detector: if config.features.interruption_detection_enabled {
+                InterruptionDetector::new(DetectorConfig::default())
+            } else {
+                InterruptionDetector::disabled()
+            },
             interruption_store,
             storage,
             scanner,
@@ -480,16 +526,24 @@ impl AgentSight {
             running,
             event_count: 0,
             filewatch_callback: None,
-            response_mapper: ResponseSessionMapper::new(),
+            response_mapper: if config.features.session_mapping_enabled {
+                ResponseSessionMapper::with_capacity(config.features.session_mapping_max_entries)
+            } else {
+                ResponseSessionMapper::disabled()
+            },
             pending_genai: Vec::new(),
+            pending_genai_bytes: 0,
+            runtime_limits: config.runtime_limits,
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
+            last_interruption_purge: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
+            features: config.features.clone(),
         })
     }
 
@@ -707,6 +761,9 @@ impl AgentSight {
                         pid: pending_info.as_ref().map(|p| p.pid as u32).unwrap_or(0),
                         created_at: std::time::Instant::now(),
                     });
+                    self.pending_genai_bytes +=
+                        self.pending_genai.last().map_or(0, |p| p.estimated_bytes());
+                    self.enforce_pending_genai_limits();
                     log::debug!("GenAI events queued for deferred session_id resolution");
                 } else {
                     // Session_id resolved (or no response_id) — export immediately.
@@ -763,6 +820,9 @@ impl AgentSight {
             // In FFI mode data is delivered via callbacks; skip local storage.
             if self.ffi_sender.is_none() {
                 for analysis_result in &analysis_results {
+                    if !self.should_persist_analysis_result(analysis_result) {
+                        continue;
+                    }
                     if let Err(e) = self.storage.store(analysis_result) {
                         log::warn!("Failed to store analysis result: {e}");
                     } else {
@@ -794,7 +854,7 @@ impl AgentSight {
                 // Phase 2: check if this is a known agent and start tracking
                 if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.pid_agent_name_cache.insert(*pid, agent_name.clone());
+                    self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
                 }
             }
@@ -851,6 +911,8 @@ impl AgentSight {
                 self.drain_and_persist_dead_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
+                // Periodically purge old/oversized interruption DB entries
+                self.maybe_purge_interruption_store();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -1712,6 +1774,66 @@ impl AgentSight {
         let query = TokenQuery::new(self.storage.token());
         query.full_query(period)
     }
+
+    /// If pending GenAI queue exceeds count or byte limits, flush the oldest
+    /// entries with the fallback session_id to prevent unbounded memory growth.
+    fn enforce_pending_genai_limits(&mut self) {
+        let max_count = self.runtime_limits.pending_genai_max_count.max(1);
+        let max_bytes = self.runtime_limits.pending_genai_max_bytes.max(1);
+
+        while !self.pending_genai.is_empty()
+            && (self.pending_genai.len() >= max_count || self.pending_genai_bytes >= max_bytes)
+        {
+            let oldest = self.pending_genai.remove(0);
+            self.pending_genai_bytes = self
+                .pending_genai_bytes
+                .saturating_sub(oldest.estimated_bytes());
+            log::warn!(
+                "pending_genai limit exceeded (count={}/{}, bytes={}/{}), \
+                 flushing oldest response_id={}",
+                self.pending_genai.len() + 1,
+                max_count,
+                self.pending_genai_bytes + oldest.estimated_bytes(),
+                max_bytes,
+                oldest.response_id
+            );
+            let events = oldest.events;
+            self.complete_and_export_deferred_genai(&events);
+            self.detect_and_store_interruptions(&events);
+        }
+    }
+
+    /// Decide whether an analysis result should be persisted to storage.
+    ///
+    /// `token_stats` is the only default-on feature; `audit` and
+    /// `token_consumption` are gated by their respective feature flags.
+    fn should_persist_analysis_result(&self, result: &crate::analyzer::AnalysisResult) -> bool {
+        match result {
+            crate::analyzer::AnalysisResult::Token(_) => true,
+            crate::analyzer::AnalysisResult::Audit(_) => self.features.audit_enabled,
+            crate::analyzer::AnalysisResult::TokenConsumption(_) => {
+                self.features.token_consumption_enabled
+            }
+            // Http records, Message, and PromptTokens are always persisted.
+            _ => true,
+        }
+    }
+
+    /// Periodically purge old/oversized interruption DB entries.
+    fn maybe_purge_interruption_store(&mut self) {
+        if self.last_interruption_purge.elapsed() < std::time::Duration::from_secs(60) {
+            return;
+        }
+        self.last_interruption_purge = std::time::Instant::now();
+        if let Some(ref istore) = self.interruption_store {
+            if let Err(e) = istore.purge_old_and_oversized(
+                self.features.interruption_retention_days,
+                self.features.interruption_max_db_size_mb,
+            ) {
+                log::warn!("Interruption store purge failed: {e}");
+            }
+        }
+    }
 }
 
 impl Drop for AgentSight {
@@ -1846,7 +1968,7 @@ mod tests {
             pid: 1234,
             process_name: "test".to_string(),
             agent_name: Some("test-agent".to_string()),
-            metadata: HashMap::new(),
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -2000,5 +2122,37 @@ mod tests {
             vec![Box::new(RecordingExporter::new("test-recorder"))];
 
         complete_deferred_genai(&[event], None, &exporters, None);
+    }
+
+    #[test]
+    fn test_pending_genai_estimated_bytes() {
+        let pending = PendingGenAI {
+            events: vec![],
+            response_id: "test-response-id".to_string(),
+            pid: 1234,
+            created_at: std::time::Instant::now(),
+        };
+        let bytes = pending.estimated_bytes();
+        // Should include struct size + response_id length
+        assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 16);
+        // Empty events should contribute 0 extra
+        assert_eq!(
+            bytes,
+            std::mem::size_of::<PendingGenAI>() + "test-response-id".len()
+        );
+    }
+
+    #[test]
+    fn test_pending_genai_estimated_bytes_with_events() {
+        let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-x"));
+        let pending = PendingGenAI {
+            events: vec![event],
+            response_id: "r".to_string(),
+            pid: 1,
+            created_at: std::time::Instant::now(),
+        };
+        let bytes = pending.estimated_bytes();
+        // 1 event × 512 bytes estimate
+        assert!(bytes >= std::mem::size_of::<PendingGenAI>() + 1 + 512);
     }
 }

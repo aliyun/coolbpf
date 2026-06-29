@@ -247,7 +247,9 @@ sudo agentsight trace
 
 ## Configuration
 
-Key configuration options via `AgentsightConfig`:
+AgentSight is configured via `agentsight.json` (default path `/etc/agentsight/config.json`; falls back to embedded defaults if absent).
+
+### Basic Options
 
 | Category | Option | Description |
 |----------|--------|-------------|
@@ -258,6 +260,63 @@ Key configuration options via `AgentsightConfig`:
 | HTTP | `connection_cache_capacity` | LRU cache size for connection tracking |
 | SLS | `sls_endpoint` / `sls_project` / `sls_logstore` | Alibaba Cloud SLS export settings |
 | Tokenizer | `tokenizer_file` | Path or URL to HuggingFace tokenizer |
+
+### Feature Flags (`features`)
+
+All optional features are **enabled by default**. Disable them individually via the `features` block in `agentsight.json` to reduce memory and I/O overhead:
+
+| Feature | JSON Path | Default | Description |
+|---------|-----------|---------|-------------|
+| Token Stats | `features.token_stats` | `true` | Core functionality, not recommended to disable |
+| Local Tokenizer | `features.tokenizer.enabled` | `false` | HuggingFace model fallback (50–100 MB per model) |
+| Session Mapping | `features.session_mapping.enabled` | `true` | responseId → sessionId correlation (LRU 10,000) |
+| SQLite Storage | `features.sqlite_storage.enabled` | `true` | Persist to disk SQLite; disabled uses noop store |
+| Interruption Detection | `features.interruption_detection.enabled` | `true` | Dead loop / crash / context overflow detection |
+| Audit | `features.audit` | `true` | LLM call audit event persistence |
+| Token Consumption | `features.token_consumption` | `false` | Aggregated token consumption records |
+| SLS Logtail | `features.sls_logtail` | `false` | Write to SLS log file |
+
+### Runtime Resource Limits (`runtime_limits`)
+
+Configure buffer caps to prevent unbounded memory growth:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `event_channel_capacity` | 10,000 | Bounded channel capacity for probe events |
+| `event_channel_policy` | `"backpressure"` | Full-channel policy: `backpressure` / `drop_newest` / `sample` |
+| `pending_genai_max_count` | 1,000 | Max pending events awaiting session_id |
+| `pending_genai_max_bytes_mb` | 64 | Max bytes for pending events |
+| `pid_cache_size` | 1,024 | PID → agent_name LRU cache size |
+| `max_connection_body_mb` | 8 | Per-connection HTTP body buffer cap |
+| `connection_idle_timeout_secs` | 60 | HTTP connection idle timeout (seconds) |
+| `ring_buffer_mb` | 32 | eBPF Ring Buffer size (must be power of 2) |
+
+### Minimal Memory Configuration
+
+For resource-constrained environments, disable non-essential features and reduce ring buffer:
+
+```json
+{
+  "features": {
+    "token_stats": true,
+    "tokenizer": { "enabled": false },
+    "session_mapping": { "enabled": false },
+    "sqlite_storage": { "enabled": false },
+    "interruption_detection": { "enabled": false },
+    "audit": false,
+    "token_consumption": false,
+    "sls_logtail": false
+  },
+  "runtime_limits": {
+    "ring_buffer_mb": 8,
+    "event_channel_capacity": 5000,
+    "pending_genai_max_count": 500,
+    "pending_genai_max_bytes_mb": 32
+  }
+}
+```
+
+> With this config: idle RSS ~24–30 MB, with event traffic ~35–40 MB.
 
 ## Supported LLM Providers
 

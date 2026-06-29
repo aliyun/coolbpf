@@ -545,6 +545,84 @@ impl InterruptionStore {
         )?;
         Ok(deleted)
     }
+
+    /// Purge old records and trim the DB file if it exceeds a size budget.
+    ///
+    /// * `retention_days` - delete rows whose `occurred_at_ns` is older than this
+    ///   many days.  A value of 0 disables age-based purging.
+    /// * `max_db_size_mb` - if the database file is larger than this, delete the
+    ///   oldest rows until it fits.  A value of 0 disables size-based purging.
+    ///
+    /// Returns the total number of rows deleted.
+    pub fn purge_old_and_oversized(
+        &self,
+        retention_days: u64,
+        max_db_size_mb: u64,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut total_deleted = 0usize;
+
+        // 1. Age-based retention
+        if retention_days > 0 {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            let retention_ns = retention_days as i64 * 24 * 3600 * 1_000_000_000;
+            let cutoff_ns = now_ns.saturating_sub(retention_ns);
+            total_deleted += self.purge_before(cutoff_ns)?;
+        }
+
+        // 2. Size-based trimming: if file still exceeds max_db_size_mb, delete
+        // oldest records in batches until it fits or no rows remain.
+        if max_db_size_mb > 0 {
+            let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
+            let path = self.db_path();
+            for _ in 0..100 {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                if size <= max_bytes {
+                    break;
+                }
+                let deleted = self.delete_oldest_batch(1000)?;
+                total_deleted += deleted;
+                if deleted == 0 {
+                    break;
+                }
+            }
+            // Reclaim free pages after bulk deletes.
+            let _ = self.vacuum();
+        }
+
+        Ok(total_deleted)
+    }
+
+    /// Delete the oldest N interruption events.
+    fn delete_oldest_batch(&self, limit: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM interruption_events WHERE id IN (
+                SELECT id FROM interruption_events ORDER BY occurred_at_ns ASC LIMIT ?1
+            )",
+            params![limit as i64],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Return the filesystem path of this store.
+    fn db_path(&self) -> std::path::PathBuf {
+        // The connection was created from a path in `new_with_path`; we can
+        // recover it via `path()` on the underlying connection.
+        let conn = self.conn.lock().unwrap();
+        conn.path()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("interruption_events.db"))
+    }
+
+    /// Run VACUUM to reclaim free pages.
+    fn vacuum(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
 }
 
 // ─── Error matching helpers ────────────────────────────────────────────────────

@@ -8,7 +8,9 @@ use super::http2::Http2StreamAggregator;
 use super::proctrace::ProcessEventAggregator;
 use super::result::AggregatedResult;
 use crate::chrome_trace::export_trace_events;
+use crate::config::{DEFAULT_CONNECTION_CAPACITY, RuntimeLimits};
 use crate::parser::{ParseResult, ParsedMessage};
+use std::time::{Duration, Instant};
 
 /// Unified aggregator for all event types
 ///
@@ -18,6 +20,10 @@ pub struct Aggregator {
     http: HttpConnectionAggregator,
     http2: Http2StreamAggregator,
     process: ProcessEventAggregator,
+    /// Last time idle/overweight HTTP connections were evicted.
+    last_eviction: Instant,
+    /// Eviction period for idle/overweight HTTP connections.
+    eviction_period: Duration,
 }
 
 impl Default for Aggregator {
@@ -27,12 +33,24 @@ impl Default for Aggregator {
 }
 
 impl Aggregator {
-    /// Create new unified aggregator
+    /// Create new unified aggregator with default limits.
     pub fn new() -> Self {
+        Self::with_limits(DEFAULT_CONNECTION_CAPACITY, &RuntimeLimits::default())
+    }
+
+    /// Create new unified aggregator with explicit memory/time limits.
+    pub fn with_limits(connection_capacity: usize, limits: &RuntimeLimits) -> Self {
+        let idle_timeout = Duration::from_secs(limits.connection_idle_timeout_secs);
         Aggregator {
-            http: HttpConnectionAggregator::new(),
+            http: HttpConnectionAggregator::with_limits(
+                connection_capacity,
+                limits.max_connection_body_bytes,
+                idle_timeout,
+            ),
             http2: Http2StreamAggregator::new(),
             process: ProcessEventAggregator::new(),
+            last_eviction: Instant::now(),
+            eviction_period: idle_timeout.min(Duration::from_secs(10)),
         }
     }
 
@@ -88,6 +106,16 @@ impl Aggregator {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+
+        // Periodically evict idle or overweight HTTP connection states to keep
+        // memory bounded.  Runs cheaply on every parse result because the check
+        // is O(number of active connections).
+        let now = Instant::now();
+        if now.duration_since(self.last_eviction) >= self.eviction_period {
+            self.http.evict_idle_and_oversized();
+            self.last_eviction = now;
+        }
+
         let results: Vec<AggregatedResult> = result
             .messages
             .into_iter()
@@ -132,6 +160,7 @@ impl Aggregator {
         self.http.clear();
         self.http2.clear();
         self.process.clear();
+        self.last_eviction = Instant::now();
     }
 
     /// Drain all connections belonging to a specific PID.

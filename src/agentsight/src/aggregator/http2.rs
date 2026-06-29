@@ -802,6 +802,9 @@ impl Http2StreamAggregator {
             stream.decoded_request_headers = pair.request;
             stream.decoded_response_headers = pair.response;
         }
+        // Defensive cleanup: a malformed or aborted stream could leave a stale
+        // continuation buffer behind; remove it when the stream completes.
+        self.continuation_buffers.remove(&stream_id);
         stream
     }
 

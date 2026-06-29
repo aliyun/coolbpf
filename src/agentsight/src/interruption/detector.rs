@@ -39,6 +39,9 @@ impl Default for DetectorConfig {
 
 pub struct InterruptionDetector {
     pub config: DetectorConfig,
+    /// When false, `detect` returns an empty vector without doing any work.
+    /// Used to gate the interruption-detection feature via `agentsight.json`.
+    enabled: bool,
 }
 
 impl Default for InterruptionDetector {
@@ -49,7 +52,20 @@ impl Default for InterruptionDetector {
 
 impl InterruptionDetector {
     pub fn new(config: DetectorConfig) -> Self {
-        InterruptionDetector { config }
+        InterruptionDetector {
+            config,
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled detector.
+    ///
+    /// `detect` returns an empty vector and consumes no meaningful memory.
+    pub fn disabled() -> Self {
+        InterruptionDetector {
+            config: DetectorConfig::default(),
+            enabled: false,
+        }
     }
 
     /// Online detection: inspect a single completed LLMCall.
@@ -66,6 +82,10 @@ impl InterruptionDetector {
     ///   9. TokenLimit      — finish_reason == "length" + ratio
     ///  10. ContextOverflow via finish_reason heuristic
     pub fn detect(&self, call: &LLMCall) -> Vec<InterruptionEvent> {
+        if !self.enabled {
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
 
         let session_id = call.metadata.get("session_id").cloned();
@@ -975,5 +995,11 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::ContextOverflow
         );
+    }
+
+    #[test]
+    fn test_disabled_detector_is_disabled() {
+        let detector = InterruptionDetector::disabled();
+        assert!(!detector.enabled);
     }
 }

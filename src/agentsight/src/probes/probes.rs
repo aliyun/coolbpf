@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+use crate::config::{ChannelPolicy, RuntimeLimits};
 use crate::event::Event;
 
 use super::filewatch::{FileWatch, RawFileWatchEvent};
@@ -65,6 +66,8 @@ pub struct Probes {
     /// Unified event channel - events are converted to Event type inside the poller
     event_tx: crossbeam_channel::Sender<Event>,
     event_rx: crossbeam_channel::Receiver<Event>,
+    /// Policy applied when the bounded event channel is full.
+    event_channel_policy: ChannelPolicy,
 }
 
 impl Probes {
@@ -90,6 +93,7 @@ impl Probes {
             enable_udpdns,
             tcp_targets,
             false,
+            &RuntimeLimits::default(),
         )
     }
 
@@ -107,6 +111,7 @@ impl Probes {
         enable_udpdns: bool,
         tcp_targets: &[TcpTarget],
         cgroup_filter_enabled: bool,
+        runtime_limits: &RuntimeLimits,
     ) -> Result<Self> {
         // Create proctrace first - it owns the traced_processes map, the ring
         // buffer, and (when enabled) the cgroup_filter map.
@@ -116,6 +121,7 @@ impl Probes {
             None,
             None,
             cgroup_filter_enabled,
+            runtime_limits.ring_buffer_mb,
         )
         .context("failed to create proctrace")?;
 
@@ -185,7 +191,8 @@ impl Probes {
             None
         };
 
-        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let capacity = runtime_limits.event_channel_capacity.max(1);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(capacity);
 
         Ok(Self {
             proctrace,
@@ -198,6 +205,7 @@ impl Probes {
             rb_handle,
             event_tx,
             event_rx,
+            event_channel_policy: runtime_limits.event_channel_policy,
         })
     }
 
@@ -253,6 +261,8 @@ impl Probes {
         let udpdns_event_size = mem::size_of::<RawUdpDnsEvent>();
 
         let event_tx = self.event_tx.clone();
+        let event_policy = self.event_channel_policy;
+        let drop_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
 
@@ -319,7 +329,32 @@ impl Probes {
                 };
 
                 if let Some(e) = event {
-                    let _ = event_tx.send(e);
+                    match event_policy {
+                        ChannelPolicy::Backpressure => {
+                            if event_tx.send(e).is_err() {
+                                log::warn!("Probes event channel closed");
+                            }
+                        }
+                        ChannelPolicy::DropNewest => {
+                            if event_tx.try_send(e).is_err() {
+                                log::warn!(
+                                    "Probes event channel full (capacity={}); dropping event",
+                                    event_tx.capacity().unwrap_or(0)
+                                );
+                            }
+                        }
+                        ChannelPolicy::Sample(n) => {
+                            let idx = drop_counter.fetch_add(1, Ordering::Relaxed);
+                            if idx % n == 0 {
+                                if event_tx.try_send(e).is_err() {
+                                    log::warn!(
+                                        "Probes event channel full (capacity={}); dropping sampled event",
+                                        event_tx.capacity().unwrap_or(0)
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 0
             })

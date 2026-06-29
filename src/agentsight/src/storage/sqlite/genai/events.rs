@@ -555,10 +555,14 @@ impl GenAIExporter for GenAISqliteStore {
     }
 
     fn export(&self, events: &[GenAISemanticEvent]) {
-        for event in events {
-            if let Err(e) = self.store_event(event) {
-                log::warn!("Failed to store GenAI event to SQLite: {e}");
-            }
+        // Batch buffering: accumulate events and flush when threshold is reached.
+        let mut pending = self.pending.lock().unwrap();
+        pending.extend(events.iter().cloned());
+        let pending_len = pending.len();
+        drop(pending);
+
+        if self.should_flush(pending_len) {
+            self.flush();
         }
     }
 }

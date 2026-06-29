@@ -35,21 +35,37 @@ enum ProbeCommand {
     RemoveCgroup(u64),
 }
 
-/// Wraps an `mpsc::Sender<FfiEvent>` together with the `eventfd` descriptor
+/// Wraps an `mpsc::SyncSender<FfiEvent>` together with the `eventfd` descriptor
 /// so that a single `.send()` call both enqueues the event and wakes up the
 /// consumer's epoll/select loop.
+///
+/// Uses a bounded channel to prevent unbounded memory growth when the FFI
+/// consumer does not call `agentsight_read()` frequently enough.
 pub(crate) struct FfiEventSender {
-    tx: mpsc::Sender<FfiEvent>,
+    tx: mpsc::SyncSender<FfiEvent>,
     eventfd: i32,
 }
 
 impl FfiEventSender {
     pub fn send(&self, event: FfiEvent) {
-        if self.tx.send(event).is_ok() {
-            // Write 1 to the eventfd counter to wake up the consumer.
-            let val: u64 = 1;
-            unsafe {
-                libc::write(self.eventfd, &val as *const u64 as *const c_void, 8);
+        // Bounded channel: if the consumer cannot keep up, drop the newest event
+        // rather than blocking the background pipeline or growing memory without
+        // limit.  This matches the `DropNewest` policy used for probe events.
+        match self.tx.try_send(event) {
+            Ok(()) => {
+                // Write 1 to the eventfd counter to wake up the consumer.
+                let val: u64 = 1;
+                unsafe {
+                    libc::write(self.eventfd, &val as *const u64 as *const c_void, 8);
+                }
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                log::warn!(
+                    "FFI event channel full; dropping event because consumer is not reading fast enough"
+                );
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                // Receiver gone; nothing to do.
             }
         }
     }
@@ -175,7 +191,7 @@ pub struct AgentsightHandle {
     rx: mpsc::Receiver<FfiEvent>,
     /// Sender kept alive so the background thread's sends don't fail
     /// after start; taken (moved) into the thread in `agentsight_start`.
-    tx: Option<mpsc::Sender<FfiEvent>>,
+    tx: Option<mpsc::SyncSender<FfiEvent>>,
     eventfd: i32,
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -658,7 +674,10 @@ pub unsafe extern "C" fn agentsight_new(cfg: *mut AgentsightConfigHandle) -> *mu
         unsafe { (*cfg).clone() }
     };
 
-    let (tx, rx) = mpsc::channel();
+    // Bounded FFI event channel sized from runtime_limits so that a slow
+    // consumer cannot cause unbounded memory growth.
+    let ffi_channel_capacity = config.runtime_limits.event_channel_capacity.max(1);
+    let (tx, rx) = mpsc::sync_channel(ffi_channel_capacity);
     let running = Arc::new(AtomicBool::new(false));
 
     Box::into_raw(Box::new(AgentsightHandle {
@@ -723,7 +742,7 @@ pub unsafe extern "C" fn agentsight_start(h: *mut AgentsightHandle) -> c_int {
 /// constraints on eBPF objects.
 fn ffi_background_thread(
     config: AgentsightConfig,
-    tx: mpsc::Sender<FfiEvent>,
+    tx: mpsc::SyncSender<FfiEvent>,
     eventfd: i32,
     running: Arc<AtomicBool>,
     probe_cmd_rx: mpsc::Receiver<ProbeCommand>,

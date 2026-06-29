@@ -3,13 +3,14 @@
 //! Provides a unified interface for managing multiple LLM tokenizers,
 //! allowing different models to be used based on model name.
 
-use crate::config::{HF_ENDPOINT, hf_home};
+use crate::config::{DEFAULT_TOKENIZER_CACHE_SIZE, HF_ENDPOINT, hf_home};
 use crate::tokenizer::llm_tok::LlmTokenizer;
 use crate::tokenizer::model_mapping::map_to_hf_model_id;
 use anyhow::{Result, anyhow};
 use hf_hub::api::sync::{Api, ApiBuilder};
+use lru::LruCache;
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static GLOBAL_TOKENIZER: OnceCell<Mutex<MultiModelTokenizer>> = OnceCell::new();
@@ -52,19 +53,32 @@ impl TokenizerEntry {
 }
 
 /// Multi-model tokenizer manager
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MultiModelTokenizer {
-    /// Map of model IDs to tokenizer entries
-    tokenizers: HashMap<String, TokenizerEntry>,
+    /// Map of model IDs to tokenizer entries (bounded LRU)
+    tokenizers: LruCache<String, TokenizerEntry>,
     /// HuggingFace Hub API client (cached)
     hf_api: Option<Api>,
 }
 
+impl Default for MultiModelTokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiModelTokenizer {
-    /// Create a new empty multi-model tokenizer manager
+    /// Create a new empty multi-model tokenizer manager with the default capacity.
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_TOKENIZER_CACHE_SIZE)
+    }
+
+    /// Create a new tokenizer manager with a specific LRU capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let cap =
+            NonZeroUsize::new(capacity.max(1)).unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
         Self {
-            tokenizers: HashMap::new(),
+            tokenizers: LruCache::new(cap),
             hf_api: None,
         }
     }
@@ -92,18 +106,18 @@ impl MultiModelTokenizer {
         let config_path = repo.get("tokenizer_config.json")?;
         let tokenizer = LlmTokenizer::from_file(&tokenizer_path, &config_path)?;
         let entry = TokenizerEntry::new(tokenizer, model_id, model_id);
-        self.tokenizers.insert(model_id.to_string(), entry);
+        self.tokenizers.put(model_id.to_string(), entry);
         Ok(())
     }
 
     /// Register a tokenizer with a model ID
     pub fn register(&mut self, model_id: &str, tokenizer: LlmTokenizer) {
         let entry = TokenizerEntry::new(tokenizer, model_id, model_id);
-        self.tokenizers.insert(model_id.to_string(), entry);
+        self.tokenizers.put(model_id.to_string(), entry);
     }
 
     /// Get a tokenizer for a specific model ID
-    pub fn get(&self, model_id: &str) -> Option<Arc<LlmTokenizer>> {
+    pub fn get(&mut self, model_id: &str) -> Option<Arc<LlmTokenizer>> {
         self.tokenizers
             .get(model_id)
             .map(|entry| Arc::clone(&entry.tokenizer))
@@ -130,7 +144,7 @@ impl MultiModelTokenizer {
                 // Cache under original model name too
                 let entry = self.tokenizers.get(hf_model_id).cloned();
                 if let Some(entry) = entry {
-                    self.tokenizers.insert(model_name.to_string(), entry);
+                    self.tokenizers.put(model_name.to_string(), entry);
                 }
                 return Ok(tokenizer);
             }
@@ -142,7 +156,7 @@ impl MultiModelTokenizer {
         // If we used a different HF ID, also cache under original model name
         if hf_model_id != model_name {
             if let Some(entry) = self.tokenizers.get(hf_model_id).cloned() {
-                self.tokenizers.insert(model_name.to_string(), entry);
+                self.tokenizers.put(model_name.to_string(), entry);
             }
         }
 
@@ -153,23 +167,23 @@ impl MultiModelTokenizer {
     }
 
     /// Get a tokenizer entry for a specific model ID
-    pub fn get_entry(&self, model_id: &str) -> Option<&TokenizerEntry> {
+    pub fn get_entry(&mut self, model_id: &str) -> Option<&TokenizerEntry> {
         self.tokenizers.get(model_id)
     }
 
     /// Check if a tokenizer is registered for the given model
-    pub fn has(&self, model_id: &str) -> bool {
-        self.tokenizers.contains_key(model_id)
+    pub fn has(&mut self, model_id: &str) -> bool {
+        self.tokenizers.get(model_id).is_some()
     }
 
     /// Remove a tokenizer for a specific model
     pub fn remove(&mut self, model_id: &str) -> Option<TokenizerEntry> {
-        self.tokenizers.remove(model_id)
+        self.tokenizers.pop(model_id)
     }
 
     /// Get all registered model IDs
     pub fn registered_models(&self) -> Vec<&String> {
-        self.tokenizers.keys().collect()
+        self.tokenizers.iter().map(|(k, _)| k).collect()
     }
 
     /// Get the number of registered tokenizers
@@ -190,5 +204,54 @@ impl MultiModelTokenizer {
     /// Iterate over all registered tokenizer entries
     pub fn iter(&self) -> impl Iterator<Item = (&String, &TokenizerEntry)> {
         self.tokenizers.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_creates_with_default_capacity() {
+        let t = MultiModelTokenizer::default();
+        assert!(t.is_empty());
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn test_new_creates_empty() {
+        let t = MultiModelTokenizer::new();
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn test_with_capacity_zero_clamped_to_one() {
+        let t = MultiModelTokenizer::with_capacity(0);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn test_with_capacity_custom() {
+        let t = MultiModelTokenizer::with_capacity(8);
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn test_register_and_get() {
+        let mut t = MultiModelTokenizer::with_capacity(4);
+        // We can't create a real LlmTokenizer without files, so test the API shape
+        // via has/get_entry/remove/registered_models/len/clear
+        assert!(!t.has("test-model"));
+        assert!(t.get("test-model").is_none());
+        assert!(t.get_entry("test-model").is_none());
+        assert!(t.remove("test-model").is_none());
+        assert!(t.registered_models().is_empty());
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut t = MultiModelTokenizer::with_capacity(4);
+        t.clear();
+        assert!(t.is_empty());
     }
 }
