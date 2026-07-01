@@ -66,6 +66,13 @@ const warningEvent = {
   },
 };
 
+const defaultSecurityCountItems = (groupBy: string) => {
+  if (groupBy === 'category') return [{ value: 'tool_output', count: 8 }];
+  if (groupBy === 'result') return [{ value: 'succeeded', count: 12 }];
+  if (groupBy === 'verdict') return [{ value: 'deny', count: 1 }, { value: 'warning', count: 1 }];
+  return [{ value: 'tool_output_leak', count: 8 }];
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockFetchSecurityStatus.mockResolvedValue({
@@ -94,11 +101,7 @@ beforeEach(() => {
     state: 'ok',
     data: {
       group_by: groupBy,
-      items: groupBy === 'category'
-        ? [{ value: 'tool_output', count: 8 }]
-        : groupBy === 'result'
-          ? [{ value: 'succeeded', count: 12 }]
-          : [{ value: 'tool_output_leak', count: 8 }],
+      items: defaultSecurityCountItems(groupBy),
     },
   }));
   mockFetchSecurityEvents.mockResolvedValue({
@@ -215,6 +218,28 @@ describe('SecurityObservabilityPage', () => {
     expect(screen.queryByText('latest events')).not.toBeInTheDocument();
   });
 
+  it('uses exact verdict counts instead of the overview event sample', async () => {
+    mockFetchSecurityCountBy.mockImplementation((groupBy: string) => Promise.resolve({
+      state: 'ok',
+      data: {
+        group_by: groupBy,
+        items: groupBy === 'verdict'
+          ? [{ value: 'deny', count: 58 }, { value: 'pass', count: 120 }]
+          : defaultSecurityCountItems(groupBy),
+      },
+    }));
+    mockFetchSecurityEvents.mockResolvedValueOnce({
+      state: 'ok',
+      data: { items: [event], total: 500, limit: 500, offset: 0, next_offset: null },
+    });
+
+    render(<SecurityObservabilityPage />);
+
+    expect(await screen.findByText('58 / 178 个 verdict 非 pass')).toBeInTheDocument();
+    expect(screen.getByText('存在 58 个风险 verdict')).toBeInTheDocument();
+    expect(screen.getByText('基于当前时间范围内 178 条含 verdict 事件统计')).toBeInTheDocument();
+  });
+
   it('opens event detail drawer from the events tab', async () => {
     render(<SecurityObservabilityPage />);
 
@@ -228,10 +253,13 @@ describe('SecurityObservabilityPage', () => {
     expect(screen.getAllByText('Verdict').length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText('Event Type')).not.toBeInTheDocument();
     expect(screen.queryByText('PID')).not.toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'tool_output_leak' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'deny' })).toBeInTheDocument();
     expect(screen.getAllByText('succeeded').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('deny').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('warning')).toHaveClass('bg-amber-100');
+    const warningBadge = screen.getAllByText('warning')
+      .find((element) => element.tagName.toLowerCase() === 'span');
+    expect(warningBadge).toBeDefined();
+    expect(warningBadge!).toHaveClass('bg-amber-100');
 
     fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'tool_output' } });
     fireEvent.change(screen.getByLabelText('Result'), { target: { value: 'succeeded' } });

@@ -449,6 +449,7 @@ export const SecurityObservabilityPage: React.FC = () => {
               categoryItems={categoryItems}
               eventTypeItems={eventTypeItems}
               resultItems={resultItems}
+              verdictItems={verdictItems}
               latestEvents={latestEvents}
               onSelectEvent={setSelectedEventId}
               onViewVerdict={(verdict) => {
