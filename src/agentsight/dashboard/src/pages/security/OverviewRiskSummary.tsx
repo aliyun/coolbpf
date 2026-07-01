@@ -11,10 +11,8 @@ import {
   fmtNumber,
   fmtPercent,
   isPassVerdict,
-  securityEventVerdict,
   verdictBadgeClasses,
   verdictBarClasses,
-  verdictCountItems,
   verdictTone,
 } from './utils';
 
@@ -23,24 +21,26 @@ export const OverviewRiskSummary: React.FC<{
   eventsResponse: SecurityApiResponse<SecurityPaginated<SecurityEventRecord>> | null;
   categoryItems: SecurityCountItem[];
   resultItems: SecurityCountItem[];
+  verdictItems: SecurityCountItem[];
   onViewVerdict?: (verdict: string) => void;
-}> = ({ summary, eventsResponse, categoryItems, resultItems, onViewVerdict }) => {
-  const events = eventsResponse?.data.items ?? [];
+}> = ({ summary, eventsResponse, categoryItems, resultItems, verdictItems, onViewVerdict }) => {
   const totalEvents = eventsResponse?.data.total ?? summary?.total ?? 0;
-  const loadedEvents = events.length;
-  const verdictItems = verdictCountItems(events);
   const verdictTotal = verdictItems.reduce((sum, item) => sum + item.count, 0);
   const maxVerdictCount = Math.max(1, ...verdictItems.map((item) => item.count));
-  const nonPassCount = events.filter((event) => {
-    const verdict = securityEventVerdict(event);
-    return verdict !== '-' && !isPassVerdict(verdict);
-  }).length;
-  const riskCount = events.filter((event) => verdictTone(securityEventVerdict(event)) === 'risk').length;
-  const warningCount = events.filter((event) => verdictTone(securityEventVerdict(event)) === 'warning').length;
+  const nonPassCount = verdictItems
+    .filter((item) => {
+      const verdict = String(item.value);
+      return verdict !== '-' && !isPassVerdict(verdict);
+    })
+    .reduce((sum, item) => sum + item.count, 0);
+  const riskCount = verdictItems
+    .filter((item) => verdictTone(String(item.value)) === 'risk')
+    .reduce((sum, item) => sum + item.count, 0);
+  const warningCount = verdictItems
+    .filter((item) => verdictTone(String(item.value)) === 'warning')
+    .reduce((sum, item) => sum + item.count, 0);
   const nonPassRatio = fmtPercent(nonPassCount, verdictTotal);
-  const coverageText = loadedEvents < totalEvents
-    ? `基于最近 ${fmtNumber(loadedEvents)} / ${fmtNumber(totalEvents)} 条含详情事件统计 verdict`
-    : `基于当前时间范围内 ${fmtNumber(loadedEvents)} 条含详情事件统计 verdict`;
+  const coverageText = `基于当前时间范围内 ${fmtNumber(verdictTotal)} 条含 verdict 事件统计`;
 
   let statusLabel = '暂无 verdict';
   let statusClasses = 'bg-gray-100 text-gray-700';

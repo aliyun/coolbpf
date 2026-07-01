@@ -19,6 +19,7 @@ export const OverviewTab: React.FC<{
   categoryItems: SecurityCountItem[];
   eventTypeItems: SecurityCountItem[];
   resultItems: SecurityCountItem[];
+  verdictItems: SecurityCountItem[];
   latestEvents: SecurityEventRecord[];
   onSelectEvent: (eventId: string) => void;
   onViewVerdict: (verdict: string) => void;
@@ -31,6 +32,7 @@ export const OverviewTab: React.FC<{
   categoryItems,
   eventTypeItems,
   resultItems,
+  verdictItems,
   latestEvents,
   onSelectEvent,
   onViewVerdict,
@@ -56,6 +58,7 @@ export const OverviewTab: React.FC<{
       eventsResponse={recentEvents}
       categoryItems={categoryItems}
       resultItems={resultItems}
+      verdictItems={verdictItems}
       onViewVerdict={onViewVerdict}
     />
     {summary?.state === 'empty' && (
