@@ -170,6 +170,9 @@ impl HealthChecker {
                 let mut seen_conv: HashSet<(String, Option<String>, Option<String>)> =
                     HashSet::new();
 
+                // Track PIDs that had crash events (for sidebar display filtering)
+                let mut crash_pids: Vec<u32> = Vec::new();
+
                 for (agent_name, group) in &by_agent {
                     let pids: Vec<i32> = group.iter().map(|o| o.pid as i32).collect();
                     // Use the representative offline entry for metadata (pid shown in detail).
@@ -263,10 +266,26 @@ impl HealthChecker {
                         for o in group {
                             self.mark_pending_interrupted(o.pid, "agent_crash");
                         }
+                        // Mark all PIDs in this group as having a crash event
+                        crash_pids.extend(group.iter().map(|o| o.pid));
                     } else {
                         // No pending calls — treat as normal/graceful shutdown.
                         log::debug!(
                             "Agent {agent_name} (pids={pids:?}) exited with no pending calls — treating as normal shutdown"
+                        );
+                    }
+                }
+
+                // Update store: mark crash PIDs, then remove normal exits
+                if let Ok(mut store) = self.store.write() {
+                    for pid in &crash_pids {
+                        store.mark_has_crash(*pid);
+                    }
+                    let removed = store.remove_normal_exits();
+                    if removed > 0 {
+                        log::debug!(
+                            "Removed {} normal-exit entries from health store (no crash event)",
+                            removed
                         );
                     }
                 }
@@ -317,6 +336,7 @@ impl HealthChecker {
                     offline_since: None,
                     role,
                     parent_pid: ppid,
+                    has_crash: false,
                 }
             } else {
                 self.probe_agent(agent, &ports, restart_cmd, role, ppid)
@@ -375,6 +395,7 @@ impl HealthChecker {
                         offline_since: None,
                         role: role.clone(),
                         parent_pid,
+                        has_crash: false,
                     };
                 }
                 Err(ureq::Error::Status(_code, _resp)) => {
@@ -393,6 +414,7 @@ impl HealthChecker {
                         offline_since: None,
                         role: role.clone(),
                         parent_pid,
+                        has_crash: false,
                     };
                 }
                 Err(ureq::Error::Transport(e)) => {
@@ -436,6 +458,7 @@ impl HealthChecker {
             offline_since: None,
             role,
             parent_pid,
+            has_crash: false,
         }
     }
 

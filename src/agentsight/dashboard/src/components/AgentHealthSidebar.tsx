@@ -19,7 +19,7 @@ const STATUS_LABELS: Record<string, string> = {
   hung: '响应卡住',
   unknown: '待检测',
   no_port: '客户端进程',
-  offline: '已退出',
+  offline: '异常退出',
 };
 
 /** Status tooltip / 描述，帮助用户理解状态含义 */
@@ -29,7 +29,7 @@ const STATUS_TOOLTIPS: Record<string, string> = {
   hung: '端口可连但 HTTP 探活超时，进程可能卡死',
   unknown: '首轮健康检查未完成',
   no_port: 'TUI / 子进程，本身不提供服务端口（正常）',
-  offline: '进程已退出，5 分钟后从列表自动移除',
+  offline: '进程异常退出，影响了进行中的 LLM 对话，5 分钟后自动移除',
 };
 
 /** Format relative time in Chinese */
@@ -239,15 +239,15 @@ export const AgentHealthSidebar: React.FC = () => {
       // 一次拉全部（包含 client/worker），后续按 agent_name 分组挂到各自主卡下面
       const data = await fetchAgentHealth({ includeClients: true });
 
-      // 检测新增离线和卡顿 agent
+      // 检测新增异常退出（仅 has_crash=true 的才通知）和卡顿 agent
       data.agents.forEach(a => {
-        if (a.status === 'offline' && !notifiedOfflineRef.current.has(a.pid)) {
+        if (a.status === 'offline' && a.has_crash && !notifiedOfflineRef.current.has(a.pid)) {
           notifiedOfflineRef.current.add(a.pid);
-          addToast(`\u26a0\ufe0f Agent "${a.agent_name}" (PID ${a.pid}) \u5df2\u9000\u51fa`);
+          addToast(`⚠️ Agent "${a.agent_name}" (PID ${a.pid}) 异常退出，影响了进行中的对话`);
         }
         if (a.status === 'hung' && !notifiedOfflineRef.current.has(-a.pid)) {
           notifiedOfflineRef.current.add(-a.pid); // 用负数区分 hung 通知
-          addToast(`\u23f3 Agent "${a.agent_name}" (PID ${a.pid}) \u54cd\u5e94\u8d85\u65f6\uff0c\u53ef\u80fd\u5361\u987f`);
+          addToast(`⏳ Agent "${a.agent_name}" (PID ${a.pid}) 响应超时，可能卡顿`);
         }
       });
       // 清理不再存在的 PID
@@ -340,11 +340,16 @@ export const AgentHealthSidebar: React.FC = () => {
              style={{ height: 'calc(100vh - 56px)' }}>
         {/* Header */}
         <div className="px-3 py-3 border-b border-gray-200 flex items-center justify-between">
-          <span className="text-sm font-semibold text-gray-800">Agent 状态</span>
+          <span
+            className="text-sm font-semibold text-gray-800 cursor-help border-b border-dashed border-gray-300"
+            title="监控本机 AI Agent 进程健康状态。仅当进程异常退出并影响了进行中的 LLM 对话时，才会展示崩溃记录。正常退出的进程不会显示。"
+          >
+            Agent 状态
+          </span>
           <div className="flex items-center gap-1">
             {offlineCount > 0 && (
               <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 font-semibold">
-                {offlineCount} 下线
+                {offlineCount} 崩溃
               </span>
             )}
             {hungCount > 0 && (

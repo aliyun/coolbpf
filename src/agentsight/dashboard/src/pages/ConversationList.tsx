@@ -1067,9 +1067,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                         {(
                           [
                             { key: 'critical', label: '严重', bg: 'bg-red-100 text-red-700 border border-red-300' },
-                            { key: 'high',     label: '高危', bg: 'bg-orange-100 text-orange-700 border border-orange-300' },
-                            { key: 'medium',   label: '中危', bg: 'bg-yellow-100 text-yellow-700 border border-yellow-300' },
-                            { key: 'low',      label: '低危', bg: 'bg-blue-100 text-blue-700 border border-blue-300' },
+                            { key: 'high',     label: '重要', bg: 'bg-orange-100 text-orange-700 border border-orange-300' },
+                            { key: 'medium',   label: '中等', bg: 'bg-yellow-100 text-yellow-700 border border-yellow-300' },
+                            { key: 'low',      label: '轻微', bg: 'bg-blue-100 text-blue-700 border border-blue-300' },
                           ] as const
                         ).map(({ key, label, bg }) => {
                           const cnt = interruptionCount.by_severity[key];

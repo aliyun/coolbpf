@@ -21,9 +21,9 @@ const SEVERITY_STYLES: Record<InterruptionSeverity, string> = {
 
 const SEVERITY_LABEL: Record<InterruptionSeverity, string> = {
   critical: '严重',
-  high:     '高危',
-  medium:   '中危',
-  low:      '低危',
+  high:     '重要',
+  medium:   '中等',
+  low:      '轻微',
 };
 
 const SEVERITY_ORDER: InterruptionSeverity[] = ['critical', 'high', 'medium', 'low'];
