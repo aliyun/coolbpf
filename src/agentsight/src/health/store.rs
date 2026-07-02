@@ -66,6 +66,10 @@ pub struct AgentHealthStatus {
     /// 父进程 PID（用于折叠展示）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_pid: Option<u32>,
+    /// 进程退出时是否关联了 agent_crash 中断事件（有未完成的 LLM 调用）。
+    /// 仅 Offline 状态有意义：true = 异常退出（影响了进行中的对话），false = 正常退出。
+    #[serde(default)]
+    pub has_crash: bool,
 }
 
 /// Stores the latest health check results for all tracked agents
@@ -105,10 +109,27 @@ impl HealthStore {
                 entry.latency_ms = None;
                 entry.error_message = Some("进程已退出".to_string());
                 entry.offline_since = Some(now_ms());
+                entry.has_crash = false;
                 newly_offline.push(entry.clone());
             }
         }
         newly_offline
+    }
+
+    /// 标记指定 PID 的 offline 条目为关联了 crash 事件（异常退出）。
+    pub fn mark_has_crash(&mut self, pid: u32) {
+        if let Some(entry) = self.agents.get_mut(&pid) {
+            entry.has_crash = true;
+        }
+    }
+
+    /// 移除所有无 crash 关联的 offline 条目（正常退出不需要展示）。
+    /// 返回被移除的 PID 数量。
+    pub fn remove_normal_exits(&mut self) -> usize {
+        let before = self.agents.len();
+        self.agents
+            .retain(|_, entry| entry.status != AgentHealthState::Offline || entry.has_crash);
+        before - self.agents.len()
     }
 
     /// 自动清理超过 TTL 的 Offline 条目（避免历史进程长期残留 UI）。
@@ -146,4 +167,172 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_agent(pid: u32, status: AgentHealthState, has_crash: bool) -> AgentHealthStatus {
+        AgentHealthStatus {
+            pid,
+            agent_name: format!("agent-{pid}"),
+            category: "test".to_string(),
+            exe_path: "/usr/bin/test".to_string(),
+            ports: vec![],
+            status,
+            last_check_time: now_ms(),
+            latency_ms: None,
+            error_message: None,
+            restart_cmd: None,
+            offline_since: None,
+            role: AgentRole::Gateway,
+            parent_pid: None,
+            has_crash,
+        }
+    }
+
+    #[test]
+    fn test_new_store_is_empty() {
+        let store = HealthStore::new();
+        assert_eq!(store.all_agents().len(), 0);
+        assert_eq!(store.last_scan_time, 0);
+    }
+
+    #[test]
+    fn test_update_and_retrieve() {
+        let mut store = HealthStore::new();
+        let agent = make_agent(100, AgentHealthState::Healthy, false);
+        store.update(100, agent.clone());
+        let all = store.all_agents();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].pid, 100);
+    }
+
+    #[test]
+    fn test_mark_stale_offline() {
+        let mut store = HealthStore::new();
+        store.update(1, make_agent(1, AgentHealthState::Healthy, false));
+        store.update(2, make_agent(2, AgentHealthState::Healthy, false));
+
+        // PID 1 is still active, PID 2 is gone
+        let active: HashSet<u32> = [1].into_iter().collect();
+        let newly_offline = store.mark_stale_offline(&active);
+
+        assert_eq!(newly_offline.len(), 1);
+        assert_eq!(newly_offline[0].pid, 2);
+        assert_eq!(newly_offline[0].status, AgentHealthState::Offline);
+        assert!(!newly_offline[0].has_crash);
+        assert!(newly_offline[0].offline_since.is_some());
+    }
+
+    #[test]
+    fn test_mark_stale_offline_idempotent() {
+        let mut store = HealthStore::new();
+        store.update(1, make_agent(1, AgentHealthState::Healthy, false));
+
+        let active: HashSet<u32> = HashSet::new();
+        let first = store.mark_stale_offline(&active);
+        assert_eq!(first.len(), 1);
+
+        // Second call should not re-mark already-offline entries
+        let second = store.mark_stale_offline(&active);
+        assert_eq!(second.len(), 0);
+    }
+
+    #[test]
+    fn test_mark_has_crash() {
+        let mut store = HealthStore::new();
+        let mut agent = make_agent(10, AgentHealthState::Offline, false);
+        agent.offline_since = Some(now_ms());
+        store.update(10, agent);
+
+        assert!(!store.all_agents()[0].has_crash);
+
+        store.mark_has_crash(10);
+        assert!(store.all_agents()[0].has_crash);
+    }
+
+    #[test]
+    fn test_mark_has_crash_nonexistent_pid() {
+        let mut store = HealthStore::new();
+        // Should not panic on missing PID
+        store.mark_has_crash(999);
+        assert_eq!(store.all_agents().len(), 0);
+    }
+
+    #[test]
+    fn test_remove_normal_exits() {
+        let mut store = HealthStore::new();
+        // Crash exit (should be kept)
+        store.update(1, make_agent(1, AgentHealthState::Offline, true));
+        // Normal exit (should be removed)
+        store.update(2, make_agent(2, AgentHealthState::Offline, false));
+        // Still alive (should be kept)
+        store.update(3, make_agent(3, AgentHealthState::Healthy, false));
+
+        let removed = store.remove_normal_exits();
+        assert_eq!(removed, 1);
+
+        let remaining = store.all_agents();
+        assert_eq!(remaining.len(), 2);
+        let pids: HashSet<u32> = remaining.iter().map(|a| a.pid).collect();
+        assert!(pids.contains(&1)); // crash kept
+        assert!(pids.contains(&3)); // alive kept
+        assert!(!pids.contains(&2)); // normal exit removed
+    }
+
+    #[test]
+    fn test_remove_normal_exits_no_offline() {
+        let mut store = HealthStore::new();
+        store.update(1, make_agent(1, AgentHealthState::Healthy, false));
+        store.update(2, make_agent(2, AgentHealthState::Hung, false));
+
+        let removed = store.remove_normal_exits();
+        assert_eq!(removed, 0);
+        assert_eq!(store.all_agents().len(), 2);
+    }
+
+    #[test]
+    fn test_cleanup_stale_offline() {
+        let mut store = HealthStore::new();
+        let mut agent = make_agent(1, AgentHealthState::Offline, true);
+        // Set offline_since to 10 minutes ago
+        agent.offline_since = Some(now_ms().saturating_sub(10 * 60 * 1000));
+        store.update(1, agent);
+
+        // TTL = 5 minutes -> should be cleaned
+        let removed = store.cleanup_stale_offline(5 * 60 * 1000);
+        assert_eq!(removed, 1);
+        assert_eq!(store.all_agents().len(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_stale_offline_within_ttl() {
+        let mut store = HealthStore::new();
+        let mut agent = make_agent(1, AgentHealthState::Offline, true);
+        agent.offline_since = Some(now_ms()); // just now
+        store.update(1, agent);
+
+        let removed = store.cleanup_stale_offline(5 * 60 * 1000);
+        assert_eq!(removed, 0);
+        assert_eq!(store.all_agents().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_by_pid() {
+        let mut store = HealthStore::new();
+        store.update(5, make_agent(5, AgentHealthState::Healthy, false));
+
+        assert!(store.remove_by_pid(5));
+        assert!(!store.remove_by_pid(5)); // already removed
+        assert_eq!(store.all_agents().len(), 0);
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let store = HealthStore::default();
+        assert_eq!(store.all_agents().len(), 0);
+        assert_eq!(store.last_scan_time, 0);
+    }
 }

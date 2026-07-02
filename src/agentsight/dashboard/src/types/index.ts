@@ -184,6 +184,8 @@ export interface AgentHealthStatus {
   role: 'gateway' | 'client' | 'worker';
   /** 父进程 PID */
   parent_pid?: number;
+  /** 进程退出时是否关联了 agent_crash 事件（有未完成的 LLM 调用被中断） */
+  has_crash?: boolean;
 }
 
 export interface AgentHealthResponse {

@@ -17,7 +17,7 @@ describe('InterruptionBadge', () => {
 
     it('should render count and severity label', () => {
       render(<InterruptionBadge count={3} severity="high" />);
-      expect(screen.getAllByText('3 高危').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('3 重要').length).toBeGreaterThan(0);
     });
 
     it('should render critical severity', () => {
@@ -27,12 +27,12 @@ describe('InterruptionBadge', () => {
 
     it('should render medium severity by default', () => {
       render(<InterruptionBadge count={2} />);
-      expect(screen.getAllByText('2 中危').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('2 中等').length).toBeGreaterThan(0);
     });
 
     it('should render low severity', () => {
       render(<InterruptionBadge count={5} severity="low" />);
-      expect(screen.getAllByText('5 低危').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('5 轻微').length).toBeGreaterThan(0);
     });
 
     it('should call onClick when clicked', () => {
@@ -52,7 +52,7 @@ describe('InterruptionBadge', () => {
         />
       );
       expect(screen.getAllByText('1 严重').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('2 高危').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('2 重要').length).toBeGreaterThan(0);
     });
 
     it('should return null when all severities are zero', () => {
@@ -74,7 +74,7 @@ describe('InterruptionBadge', () => {
           ]}
         />
       );
-      expect(screen.getAllByText('3 高危').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('3 重要').length).toBeGreaterThan(0);
     });
 
     it('should call onClick on detailed badges', () => {
