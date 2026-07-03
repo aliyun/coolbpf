@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+### Fixes
+- Improve severity labels and agent sidebar UX.
+- Show all verdicts in the summary command.
+- Sync component.toml version with package version.
+
 ## 0.7.0
 
 ### Features
