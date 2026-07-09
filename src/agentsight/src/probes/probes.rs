@@ -237,7 +237,15 @@ impl Probes {
     }
 
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
-        self.attach_ssl_to_process(pid)?;
+        if let Err(e) = self.attach_ssl_to_process(pid) {
+            // SSL attach may fail when the process exits before /proc/<pid>/maps is
+            // readable, but a previously-attached global uprobe (pid=-1) is still
+            // valid.  Register the pid in the traced map so BPF events from the
+            // global uprobe are not silently dropped.
+            log::warn!(
+                "[attach_process] pid={pid}: SSL attach failed ({e:#}); registering pid anyway for global uprobe coverage"
+            );
+        }
         self.add_traced_pid(pid as u32)
     }
 

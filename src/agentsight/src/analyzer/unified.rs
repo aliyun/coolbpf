@@ -630,12 +630,24 @@ impl Analyzer {
                 if from_events.is_some() {
                     return from_events;
                 }
+                // The final response.completed event may be incomplete (no
+                // trailing \n\n) because its data field spans multiple TLS
+                // records and later chunks arrived after the stream closed.
+                // SSEParser puts such partial events in `remaining`; try to
+                // extract usage from that too.
+                if !reassembled.remaining.is_empty() {
+                    let from_remaining = self.token.parse_data(&reassembled.remaining);
+                    if from_remaining.is_some() {
+                        return from_remaining;
+                    }
+                }
                 let from_scan = self.token.parse_data(&text);
                 if from_scan.is_none() {
                     log::debug!(
-                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={} remaining_len={}",
                         extra.len(),
                         reassembled.events.len(),
+                        reassembled.remaining.len(),
                     );
                 }
                 from_scan
@@ -1499,6 +1511,37 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
             .expect("should recover via partial scan");
         assert_eq!(record.input_tokens, 57);
         assert_eq!(record.output_tokens, 3);
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_remaining_field() {
+        // Covers the SSEParser `remaining` fallback: usage extracted from
+        // a partial SSE event without trailing \n\n.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        // Simulate a continuation buffer where the SSE event is incomplete
+        // (no trailing double-newline), so SSEParser puts it in `remaining`
+        // rather than in `events`.
+        let continuation = b"data: {\"usage\":{\"input_tokens\":100,\"output_tokens\":42}}";
+        let record = analyzer
+            .extract_token_from_sse(&events, Some(continuation), 1234, "test")
+            .expect("should recover from remaining field");
+        assert_eq!(record.input_tokens, 100);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_continuation_no_usage_returns_none() {
+        // Continuation buffer with no parseable token data at all.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        let continuation = b"event: response.completed\ndata: {\"id\":\"resp_001\"}\n\n";
+        let result = analyzer.extract_token_from_sse(&events, Some(continuation), 1234, "test");
+        assert!(result.is_none(), "should return None when no usage found");
     }
 
     #[test]

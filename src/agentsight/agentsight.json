@@ -62,6 +62,7 @@
       {"rule": ["*python*", "-m", "*hermes*"], "agent_name": "Hermes"},
       {"rule": ["*codex*"], "agent_name": "Codex"},
       {"rule": ["*node*", "*codex*"], "agent_name": "Codex"},
+      {"rule": ["*/node*", "*", "*", "*", "*", "*server/index.ts*"], "agent_name": "Runloop"},
       {"rule": ["node*", "*/bin/co*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*/bin/cosh*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*/bin/copliot*"], "agent_name": "Cosh"},
@@ -89,6 +90,11 @@
         "codex_version": "0.137.0",
         "fingerprint": { "file_size": 227758400, "head_64k_sha256": "49b0a1c3a831071e9766cd0db83537a5270a374f8ac11783264a5a354c3b544a" },
         "offsets": { "ssl_write": 172964768, "ssl_read": 172964176, "ssl_do_handshake": 172962496, "write_is_ex": true, "read_is_ex": true }
+      },
+      {
+        "codex_version": "0.50.0",
+        "fingerprint": { "build_id": "bb5d7e7c56d11f3877c23081359ad9b94faa85fe", "file_size": 46101568, "head_64k_sha256": "8a223d7f6dfcbc6f8a21a15cb349ae81ec4b82fc3aeb37383cf3331f4b95dbac" },
+        "offsets": null
       }
     ]
   }

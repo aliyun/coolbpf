@@ -861,15 +861,20 @@ impl HttpConnectionAggregator {
                 // Responses API — other providers emit usage in single
                 // small events. Dedup by source_event pointer so a single
                 // SSL_read producing multiple SSE events contributes only
-                // once.
+                // once — EXCEPT for the done event, which we always append
+                // because its source chunk carries usage data that must not
+                // be lost to dedup.
                 if needs_sse_continuation_buffer(request.as_ref()) {
                     const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
                     let src = sse_event.source_event();
                     let src_ptr = src as *const _ as usize;
                     let src_buf_len = src.buf_size() as usize;
                     let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
-                    if last_ptr != Some(src_ptr) && src_buf_len > 0 && src_buf_len <= src.buf.len()
-                    {
+                    let should_append = is_done
+                        || (last_ptr != Some(src_ptr)
+                            && src_buf_len > 0
+                            && src_buf_len <= src.buf.len());
+                    if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
                         let buf = self
                             .sse_continuation_buffers
                             .get_or_insert_mut(*connection_id, Vec::new);
@@ -2406,6 +2411,46 @@ mod tests {
         assert_eq!(
             count, 1,
             "same-source SSE events must contribute to the buffer only once"
+        );
+    }
+
+    #[test]
+    fn test_sse_continuation_buffer_done_event_bypasses_dedup() {
+        // The done event's source chunk must always be appended to the
+        // continuation buffer, even when it shares the same source_event
+        // pointer as a prior event. Without this bypass, the usage data
+        // in the done event's chunk would be lost to dedup.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id = enter_uncompressed_responses_sse_active(&mut aggregator, 32, 0xE000);
+
+        // Two events sharing the same source SslEvent — first is non-done,
+        // second is done. The done event carries usage data in its source
+        // buffer that must not be skipped.
+        let payload = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}";
+        let usage_payload = b"data: {\"usage\":{\"input_tokens\":42,\"output_tokens\":7}}";
+
+        // Non-done event from a different source
+        let src1 = create_mock_ssl_event_with_buf(32, 0xE000, payload.to_vec(), 0);
+        let event1 = ParsedSseEvent::new(None, None, None, 0, payload.len(), src1);
+        let _ = aggregator.process_sse_event(&conn_id, event1);
+
+        // Done event sharing the SAME source pointer as event1 — its buffer
+        // contains usage data that differs from event1's payload.
+        let src_done = create_mock_ssl_event_with_buf(32, 0xE000, usage_payload.to_vec(), 0);
+        let done = ParsedSseEvent::new_done_marker(src_done);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should exist");
+        // The done event's payload must appear in the buffer despite dedup.
+        assert!(
+            buf.windows(usage_payload.len()).any(|w| w == usage_payload),
+            "done event source chunk must be in continuation buffer even with dedup"
         );
     }
 

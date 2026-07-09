@@ -584,15 +584,13 @@ impl AgentSight {
 
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
-        log::debug!("Attaching to pid {pid}, agent name: {agent_name}");
         if let Err(e) = probes.add_traced_pid(pid) {
             log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
-        if let Err(e) = probes.attach_process(pid as i32) {
-            log::error!("Failed to attach SSL probe to pid {pid}: {e}");
-        } else {
-            log::info!("Attached to agent: {agent_name} (pid={pid})");
-        }
+        // attach_process logs WARN internally if SSL attach degrades to
+        // global-uprobe-only coverage; always succeeds for BPF map registration.
+        let _ = probes.attach_process(pid as i32);
+        log::info!("Attached to agent: {agent_name} (pid={pid})");
     }
 
     /// Detach SSL probes from a specific agent process
@@ -862,7 +860,7 @@ impl AgentSight {
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.detach_process(*pid, &agent_name);
+                    self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name);
                 }
             }

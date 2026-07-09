@@ -80,18 +80,62 @@ impl Parser {
             }
         }
 
-        // 2.5. Detect HTTP chunked transfer encoding end marker "0\r\n\r\n"
-        // This signals end of a chunked SSE stream (e.g., SysOM POP API)
-        // Synthesize a [DONE] event so the SSE aggregator can complete the stream
+        // 2.5. Detect HTTP chunked transfer encoding end marker "0\r\n\r\n".
+        // This signals end of a chunked SSE stream (e.g., OpenAI Responses API).
+        // The terminator is often appended to the end of the last SSE data
+        // chunk rather than arriving as a standalone 5-byte read, so we check
+        // whether the buffer ends with (or equals) `0\r\n\r\n`.
+        //
+        // When found, strip the terminator bytes, parse any remaining SSE data
+        // from the prefix, and synthesize a [DONE] event so the aggregator can
+        // complete the stream.
         {
             let buf_size = ssl_event.buf_size() as usize;
             let buf = &ssl_event.buf[..buf_size];
-            if buf == b"0\r\n\r\n" {
-                return ParseResult {
-                    messages: vec![ParsedMessage::SseEvent(ParsedSseEvent::new_done_marker(
-                        Rc::clone(&ssl_event),
-                    ))],
-                };
+            const TERMINATOR: &[u8] = b"0\r\n\r\n";
+
+            let terminator_pos = if buf.len() >= TERMINATOR.len() && buf.ends_with(TERMINATOR) {
+                // Buffer ends with `0\r\n\r\n` — could be standalone or
+                // appended to SSE data. Strip it and keep the prefix for SSE
+                // parsing.
+                Some(buf.len() - TERMINATOR.len())
+            } else {
+                // Also handle the case where `0\r\n\r\n` is the entire buffer.
+                if buf == TERMINATOR { Some(0) } else { None }
+            };
+
+            if let Some(prefix_len) = terminator_pos {
+                let prefix = &buf[..prefix_len];
+                let mut messages = Vec::new();
+
+                // Parse SSE events from the data before the terminator
+                if !prefix.is_empty() {
+                    let trimmed = SslEvent {
+                        source: ssl_event.source,
+                        timestamp_ns: ssl_event.timestamp_ns,
+                        delta_ns: ssl_event.delta_ns,
+                        pid: ssl_event.pid,
+                        tid: ssl_event.tid,
+                        uid: ssl_event.uid,
+                        len: prefix_len as u32,
+                        rw: ssl_event.rw,
+                        comm: ssl_event.comm.clone(),
+                        buf: ssl_event.buf[..prefix_len].to_vec(),
+                        is_handshake: ssl_event.is_handshake,
+                        ssl_ptr: ssl_event.ssl_ptr,
+                    };
+                    let prefix_events = self.sse_parser.parse(Rc::new(trimmed));
+                    for ev in prefix_events {
+                        messages.push(ParsedMessage::SseEvent(ev));
+                    }
+                }
+
+                // Always append a synthetic done marker
+                messages.push(ParsedMessage::SseEvent(ParsedSseEvent::new_done_marker(
+                    Rc::clone(&ssl_event),
+                )));
+
+                return ParseResult { messages };
             }
         }
 
@@ -176,5 +220,71 @@ impl Parser {
     /// Get reference to HTTP/2 parser
     pub fn http2_parser(&self) -> &Http2Parser {
         &self.http2_parser
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ssl_event(data: Vec<u8>) -> Rc<SslEvent> {
+        let len = data.len();
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 0,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: len as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: data,
+            is_handshake: false,
+            ssl_ptr: 0x1000,
+        })
+    }
+
+    #[test]
+    fn test_chunked_terminator_standalone() {
+        let parser = Parser::new();
+        let event = make_ssl_event(b"0\r\n\r\n".to_vec());
+        let result = parser.parse_ssl_event(event);
+        assert_eq!(result.messages.len(), 1);
+        assert!(matches!(
+            result.messages[0],
+            ParsedMessage::SseEvent(ref e) if e.is_done()
+        ));
+    }
+
+    #[test]
+    fn test_chunked_terminator_appended_to_sse_data() {
+        let parser = Parser::new();
+        let data = b"data: {\"type\":\"response.output_text.delta\"}\n\n0\r\n\r\n".to_vec();
+        let event = make_ssl_event(data);
+        let result = parser.parse_ssl_event(event);
+        // Should produce: 1 SSE event from the data + 1 done marker
+        assert_eq!(result.messages.len(), 2);
+        assert!(matches!(
+            result.messages[0],
+            ParsedMessage::SseEvent(ref e) if !e.is_done()
+        ));
+        assert!(matches!(
+            result.messages[1],
+            ParsedMessage::SseEvent(ref e) if e.is_done()
+        ));
+    }
+
+    #[test]
+    fn test_no_chunked_terminator_normal_sse() {
+        let parser = Parser::new();
+        let data = b"data: hello\n\n".to_vec();
+        let event = make_ssl_event(data);
+        let result = parser.parse_ssl_event(event);
+        assert_eq!(result.messages.len(), 1);
+        assert!(matches!(
+            result.messages[0],
+            ParsedMessage::SseEvent(ref e) if !e.is_done()
+        ));
     }
 }
