@@ -214,6 +214,37 @@ impl FromStr for TcpTarget {
     }
 }
 
+/// Server authentication configuration (JSON).
+///
+/// Only `enabled` is configurable.  The token is always auto-generated
+/// (or read from the default `.dashboard_token` file) — there is no
+/// way to specify a fixed token or custom token-file path.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonServerAuth {
+    pub enabled: Option<bool>,
+}
+
+/// Server configuration block (JSON).
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonServer {
+    pub auth: Option<JsonServerAuth>,
+}
+
+/// Runtime server authentication configuration.
+#[derive(Debug, Clone)]
+pub struct ServerAuthConfig {
+    /// Whether dashboard authentication is enabled.
+    pub enabled: bool,
+}
+
+impl Default for ServerAuthConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
 struct JsonFullConfig {
@@ -243,6 +274,8 @@ struct JsonFullConfig {
     features: Option<JsonFeatures>,
     #[serde(default)]
     runtime_limits: Option<JsonRuntimeLimits>,
+    #[serde(default)]
+    server: Option<JsonServer>,
 }
 
 /// DeadLoop 检测配置区段
@@ -747,6 +780,10 @@ pub struct AgentsightConfig {
     // --- Runtime Resource Limits ---
     /// Bounded channel capacities, pending queue limits, etc.
     pub runtime_limits: RuntimeLimits,
+
+    // --- Server Authentication ---
+    /// Dashboard authentication configuration.
+    pub server_auth: ServerAuthConfig,
 }
 
 impl Default for AgentsightConfig {
@@ -821,6 +858,9 @@ impl Default for AgentsightConfig {
 
             // Runtime resource limits
             runtime_limits: RuntimeLimits::default(),
+
+            // Server authentication
+            server_auth: ServerAuthConfig::default(),
         }
     }
 }
@@ -1053,6 +1093,15 @@ impl AgentsightConfig {
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
                 ring_buffer_mb: limits.ring_buffer_mb.unwrap_or(DEFAULT_RING_BUFFER_MB),
             };
+        }
+
+        // Parse server auth configuration
+        if let Some(ref server) = parsed.server {
+            if let Some(ref auth) = server.auth {
+                if let Some(enabled) = auth.enabled {
+                    self.server_auth.enabled = enabled;
+                }
+            }
         }
 
         let (cmdline_rules, https_rules, http_targets) = extract_rules(&parsed);
@@ -1795,5 +1844,41 @@ mod tests {
         assert!(!config.features.audit_enabled);
         assert!(config.features.token_consumption_enabled);
         assert!(config.features.sls_logtail_enabled);
+    }
+
+    #[test]
+    fn load_from_json_parses_server_auth_enabled() {
+        let json = r#"{
+            "server": {
+                "auth": {
+                    "enabled": true
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.server_auth.enabled);
+    }
+
+    #[test]
+    fn load_from_json_server_auth_defaults_when_absent() {
+        let json = r#"{}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.server_auth.enabled); // default is true
+    }
+
+    #[test]
+    fn load_from_json_server_auth_disabled() {
+        let json = r#"{
+            "server": {
+                "auth": {
+                    "enabled": false
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.server_auth.enabled);
     }
 }

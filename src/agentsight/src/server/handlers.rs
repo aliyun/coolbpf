@@ -33,6 +33,65 @@ pub async fn health(data: web::Data<AppState>) -> impl Responder {
     }))
 }
 
+// ─── Authentication endpoints ────────────────────────────────────────────────
+
+/// POST /api/auth/login
+///
+/// Accepts `{"token": "..."}` and sets a signed session cookie on success.
+pub async fn auth_login(
+    data: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let candidate = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+
+    if !data.auth.verify_token(candidate) {
+        return HttpResponse::Unauthorized()
+            .json(json!({"error": "invalid_token", "message": "The provided token is incorrect"}));
+    }
+
+    // Create a signed session cookie (24-hour TTL)
+    let cookie_value = data.auth.create_session_cookie(24 * 3600);
+    let cookie = actix_web::cookie::Cookie::build("agentsight_session", cookie_value)
+        .path("/")
+        .http_only(true)
+        .same_site(actix_web::cookie::SameSite::Lax)
+        .max_age(actix_web::cookie::time::Duration::hours(24))
+        .finish();
+
+    HttpResponse::Ok()
+        .cookie(cookie)
+        .json(json!({"status": "authenticated"}))
+}
+
+/// GET /api/auth/status
+///
+/// Returns whether authentication is enabled.  Exempt from auth middleware.
+#[get("/status")]
+pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(json!({
+        "auth_enabled": data.auth.enabled,
+    }))
+}
+
+/// GET /api/auth/verify
+///
+/// Checks whether the current request carries a valid session.  Exempt from
+/// auth middleware so the frontend can probe authentication state.
+#[get("/verify")]
+pub async fn auth_verify(data: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    if !data.auth.enabled {
+        return HttpResponse::Ok().json(json!({"authenticated": true}));
+    }
+
+    // Check session cookie
+    let authenticated = req
+        .cookie("agentsight_session")
+        .map(|c| data.auth.verify_session_cookie(c.value()))
+        .unwrap_or(false);
+
+    HttpResponse::Ok().json(json!({"authenticated": authenticated}))
+}
+
 // ─── Session / Trace query endpoints ───────────────────────────────────────
 
 /// Query parameters for /api/sessions
@@ -845,12 +904,18 @@ mod tests {
     }
 
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
+            auth,
         })
     }
 
@@ -918,6 +983,153 @@ mod tests {
             !is_api_404,
             "SPA path /dashboard must not get API 404, got status={status}"
         );
+    }
+
+    // ─── Auth endpoint tests ──────────────────────────────────────────────────
+
+    /// A test token that is >= 32 chars (required by read_or_create_token).
+    const TEST_TOKEN: &str = "correct-token-for-auth-testing-32chars!!";
+
+    fn test_app_state_with_auth(enabled: bool) -> web::Data<AppState> {
+        // Use a unique dir per call to avoid test-parallelism races
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("handler_auth_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        if enabled {
+            std::fs::write(dir.join(".dashboard_token"), TEST_TOKEN).ok();
+        }
+        let auth_config = crate::config::ServerAuthConfig { enabled };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+        })
+    }
+
+    #[actix_web::test]
+    async fn auth_login_success_with_correct_token() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_auth(true))
+                .route("/api/auth/login", web::post().to(auth_login)),
+        )
+        .await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"token": TEST_TOKEN}))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Should have a session cookie set
+        let cookie = resp
+            .response()
+            .cookies()
+            .find(|c| c.name() == "agentsight_session");
+        assert!(cookie.is_some(), "response should contain session cookie");
+    }
+
+    #[actix_web::test]
+    async fn auth_login_fails_with_wrong_token() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_auth(true))
+                .route("/api/auth/login", web::post().to(auth_login)),
+        )
+        .await;
+        let req = awtest::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"token": "wrong-token"}))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"], "invalid_token");
+    }
+
+    #[actix_web::test]
+    async fn auth_status_reports_enabled() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_auth(true))
+                .service(auth_status),
+        )
+        .await;
+        let req = awtest::TestRequest::get().uri("/status").to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["auth_enabled"], true);
+    }
+
+    #[actix_web::test]
+    async fn auth_status_reports_disabled() {
+        let app =
+            awtest::init_service(App::new().app_data(test_app_state(0)).service(auth_status)).await;
+        let req = awtest::TestRequest::get().uri("/status").to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["auth_enabled"], false);
+    }
+
+    #[actix_web::test]
+    async fn auth_verify_returns_true_when_disabled() {
+        let app =
+            awtest::init_service(App::new().app_data(test_app_state(0)).service(auth_verify)).await;
+        let req = awtest::TestRequest::get().uri("/verify").to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["authenticated"], true);
+    }
+
+    #[actix_web::test]
+    async fn auth_verify_returns_false_without_cookie() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_auth(true))
+                .service(auth_verify),
+        )
+        .await;
+        let req = awtest::TestRequest::get().uri("/verify").to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["authenticated"], false);
+    }
+
+    #[actix_web::test]
+    async fn auth_verify_returns_true_with_valid_cookie() {
+        let state = test_app_state_with_auth(true);
+        let cookie_value = state.auth.create_session_cookie(3600);
+        let app = awtest::init_service(App::new().app_data(state).service(auth_verify)).await;
+        let req = awtest::TestRequest::get()
+            .uri("/verify")
+            .cookie(actix_web::cookie::Cookie::new(
+                "agentsight_session",
+                cookie_value,
+            ))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["authenticated"], true);
     }
 }
 

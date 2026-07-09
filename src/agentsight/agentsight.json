@@ -2,6 +2,11 @@
   "runtime": {
     "sls_logtail_path": ""
   },
+  "server": {
+    "auth": {
+      "enabled": true
+    }
+  },
   "deadloop": {
     "enabled": false,
     "kill_after_count": 3

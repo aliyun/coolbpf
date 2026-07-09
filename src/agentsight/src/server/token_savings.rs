@@ -934,6 +934,10 @@ mod tests {
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
             interruption_store: None,
             security_observability: crate::server::SecurityObservabilityConfig::default(),
+            auth: Arc::new(crate::server::auth::DashboardAuth::init(
+                &crate::config::ServerAuthConfig { enabled: false },
+                std::path::Path::new("/tmp"),
+            )),
         }
     }
 
