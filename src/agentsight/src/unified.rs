@@ -152,13 +152,13 @@ impl AgentSight {
         let mut config_load_ok = false;
         let mut config_load_err: Option<(PathBuf, anyhow::Error)> = None;
         if let Some(path) = config.config_path.clone() {
-            let load_result = if path.exists() {
-                config.load_from_file(&path)
-            } else {
-                match crate::config::ensure_default_agents_config(&path) {
-                    Ok(()) => config.load_from_file(&path),
-                    Err(e) => Err(e),
-                }
+            // ensure_default_agents_config handles both cases:
+            // - File missing: creates it with the embedded default.
+            // - File exists: checks schema_version; if outdated, backs up and
+            //   overwrites with the current default.
+            let load_result = match crate::config::ensure_default_agents_config(&path) {
+                Ok(()) => config.load_from_file(&path),
+                Err(e) => Err(e),
             };
             match load_result {
                 Ok(()) => config_load_ok = true,

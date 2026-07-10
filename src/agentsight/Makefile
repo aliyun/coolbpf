@@ -42,6 +42,7 @@ PREFIX ?= /usr
 BINDIR ?= /usr/local/bin
 INSTALL_SYSTEMD ?= 1
 endif
+SYSCONFDIR ?= /etc
 LIBDIR ?= $(PREFIX)/lib
 SYSTEMD_SYSTEM_DIR ?= $(LIBDIR)/systemd/system
 SERVICE_BINDIR ?= $(BINDIR)
@@ -50,7 +51,9 @@ SETCAP ?= auto
 .PHONY: install uninstall
 install: build-all ## Build and install agentsight binary and set BPF capabilities
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
+	install -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/anolisa
 	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
+	install -p -m 0644 agentsight.json $(DESTDIR)$(SYSCONFDIR)/anolisa/agentsight.json
 	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
 		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \
 	else \
@@ -68,6 +71,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/agentsight
 	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
 	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
+	rm -f $(DESTDIR)$(SYSCONFDIR)/anolisa/agentsight.json
 
 # =============================================================================
 # TEST & QUALITY

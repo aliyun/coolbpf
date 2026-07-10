@@ -30,6 +30,10 @@
 - 禁止修改 BPF 程序而不验证 kernel >= 5.8 兼容性
 - BPF 变更必须在真实内核上测试，仅编译通过不够
 
+### 配置文件
+- 修改 `agentsight.json` 结构（新增/删除/重命名字段、改变语义）时，必须同步 bump `schema_version` 并更新 `config.rs` 中的 `CURRENT_SCHEMA_VERSION` 常量
+- 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
+
 ## 1. Quick Start
 
 ```bash
@@ -235,6 +239,19 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--config` 覆盖），格式参见项目根目录 `agentsight.json`。
 
 **重要：用户配置文件会完全替换（replace）内嵌的默认规则，而非追加（extend）。** 如果配置文件中缺少某个 Agent 的规则（如 `*claude*`），该 Agent 将不会被发现。修改配置前请确保包含所有需要监控的 Agent 规则。
+
+### schema_version 配置升级机制
+
+`agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
+
+- **版本缺失或过旧**（如从 0.6 升级到 0.7）：自动备份旧文件为 `.json.bak`，用内嵌默认配置覆盖
+- **版本一致**：保留用户自定义配置不动
+- **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
+
+**修改 `agentsight.json` 时的检查清单**：
+1. 是否新增/删除/重命名了字段？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
+2. 是否改变了字段语义（如默认值翻转）？→ bump `schema_version` + 更新 `CURRENT_SCHEMA_VERSION`
+3. 是否纯新增可选字段（旧配置完全兼容）？→ 无需 bump
 
 ### 功能开关（`features`）
 

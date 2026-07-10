@@ -137,6 +137,13 @@ pub enum HttpTarget {
 /// `cmdline.allow` entries with `rule` and `agent_name`.
 const DEFAULT_AGENTS_JSON: &str = include_str!("../agentsight.json");
 
+/// Current schema version of `agentsight.json`.
+///
+/// At startup the on-disk config's `schema_version` is compared against this
+/// value. If the on-disk version is missing or older, the config file is
+/// backed up (`.bak`) and overwritten with the embedded default.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
+
 // ==================== TCP Target Configuration ====================
 
 /// A single TCP traffic capture target.
@@ -276,6 +283,8 @@ struct JsonFullConfig {
     runtime_limits: Option<JsonRuntimeLimits>,
     #[serde(default)]
     server: Option<JsonServer>,
+    #[serde(default)]
+    schema_version: Option<u32>,
 }
 
 /// DeadLoop 检测配置区段
@@ -486,22 +495,59 @@ pub fn parse_json_rules(
     Ok(extract_rules(&parsed))
 }
 
-/// Ensure the agents configuration file exists at the given path.
+/// Ensure the agents configuration file exists and is up to date.
 ///
-/// If the file does not exist, creates it with the embedded default configuration.
+/// - If the file does not exist, creates it with the embedded default.
+/// - If the file exists but `schema_version` is missing or older than
+///   `CURRENT_SCHEMA_VERSION`, backs up the old file (`.bak`) and overwrites
+///   with the embedded default.
+/// - If the file exists and `schema_version` matches, leaves it untouched.
 pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
-    if path.exists() {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {parent:?}"))?;
+        }
+        std::fs::write(path, DEFAULT_AGENTS_JSON)
+            .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
+        log::info!("Generated default agents config at {path:?}");
         return Ok(());
     }
-    // Create parent directory if needed
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {parent:?}"))?;
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+    let on_disk_version = extract_schema_version(&content);
+
+    if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
+        return Ok(());
     }
+
+    let backup = path.with_extension("json.bak");
+    std::fs::rename(path, &backup)
+        .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
     std::fs::write(path, DEFAULT_AGENTS_JSON)
-        .with_context(|| format!("Failed to write default agents config to {path:?}"))?;
-    log::info!("Generated default agents config at {path:?}");
+        .with_context(|| format!("Failed to write updated agents config to {path:?}"))?;
+    log::info!(
+        "Config schema_version {:?} < {}, overwrote {path:?} (backup at {backup:?})",
+        on_disk_version,
+        CURRENT_SCHEMA_VERSION
+    );
     Ok(())
+}
+
+/// Extract `schema_version` from a JSON config string.
+///
+/// Returns `None` when the field is absent or the JSON is unparseable,
+/// which covers the old 0.6-era configs that have no version field.
+fn extract_schema_version(json: &str) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct VersionProbe {
+        #[serde(default)]
+        schema_version: Option<u32>,
+    }
+    serde_json::from_str::<VersionProbe>(json)
+        .ok()
+        .and_then(|p| p.schema_version)
 }
 
 /// Load default cmdline rules (embedded), without touching the filesystem.
@@ -946,6 +992,18 @@ impl AgentsightConfig {
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
         let mut parsed: JsonFullConfig =
             serde_json::from_str(json).map_err(|e| format!("JSON parse error: {e}"))?;
+
+        // Warn if the config's schema_version is older than expected. By this
+        // point ensure_default_agents_config should have already upgraded stale
+        // configs, so this is just a safety net for edge cases.
+        if let Some(v) = parsed.schema_version {
+            if v < CURRENT_SCHEMA_VERSION {
+                log::warn!(
+                    "Config schema_version {v} < {CURRENT_SCHEMA_VERSION}; \
+                     some features may not work as expected"
+                );
+            }
+        }
 
         if let Some(t) = parsed.trace_enabled {
             self.trace_enabled = t;
@@ -1880,5 +1938,104 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(!config.server_auth.enabled);
+    }
+
+    // ── schema_version / config upgrade ─────────────────────────────────
+
+    /// Helper: create a unique temp dir under std env temp.
+    fn unique_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extract_schema_version_returns_value_when_present() {
+        let json = r#"{"schema_version": 2, "features": {}}"#;
+        assert_eq!(extract_schema_version(json), Some(2));
+    }
+
+    #[test]
+    fn extract_schema_version_returns_none_when_absent() {
+        let json = r#"{"features": {}}"#;
+        assert_eq!(extract_schema_version(json), None);
+    }
+
+    #[test]
+    fn extract_schema_version_returns_none_on_invalid_json() {
+        assert_eq!(extract_schema_version("not json"), None);
+    }
+
+    #[test]
+    fn ensure_default_agents_config_creates_file_when_missing() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        assert!(!path.exists());
+        ensure_default_agents_config(&path).unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_upgrades_stale_config() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, r#"{"cmdline": {"allow": []}}"#).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let backup = path.with_extension("json.bak");
+        assert!(backup.exists());
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            r#"{"cmdline": {"allow": []}}"#
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_preserves_current_config() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let custom = format!(
+            r#"{{"schema_version": {}, "features": {{"token_stats": true}}}}"#,
+            CURRENT_SCHEMA_VERSION
+        );
+        std::fs::write(&path, &custom).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        assert!(!path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn ensure_default_agents_config_upgrades_old_schema_version() {
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        std::fs::write(&path, r#"{"schema_version": 1}"#).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        let backup = path.with_extension("json.bak");
+        assert!(backup.exists());
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            r#"{"schema_version": 1}"#
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            extract_schema_version(&content),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
     }
 }
