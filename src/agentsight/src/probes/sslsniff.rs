@@ -236,12 +236,9 @@ pub struct SslSniff {
     skel: Box<SslsniffSkel<'static>>,
     _links: Vec<Link>,
     traced_files: HashSet<u64>,
-    /// Maps pid -> inodes that were attached for this pid, with a flag
-    /// indicating whether the inode is a BoringSSL static binary (e.g. codex).
-    /// BoringSSL inodes are always removed on detach to force re-attach with
-    /// the new process's /proc path; shared library inodes use a still_used
-    /// check to avoid duplicate uprobe fds.
-    pid_inodes: HashMap<u32, Vec<(u64, bool)>>,
+    /// Maps pid -> inodes that were attached for this pid.
+    /// Used to clean up traced_files when the process exits.
+    pid_inodes: HashMap<u32, Vec<u64>>,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -318,27 +315,20 @@ impl SslSniff {
                 .collect::<Vec<_>>()
         );
 
-        let mut attached_inodes: Vec<(u64, bool)> = Vec::new();
+        let mut attached_inodes: Vec<u64> = Vec::new();
         for (path, inode, kind) in libs {
-            let is_boring = matches!(kind, SslLibKind::Boring);
             // Skip libraries whose inode we already traced.
-            // Now using pid=-1 for global attach, so each library only needs to be attached once.
-            // Exception: BoringSSL static binaries (codex) must always re-attach
-            // because libbpf's perf_event_open(pid=-1) only covers VMAs that
-            // existed at attach time — new processes need their own attach.
-            if !is_boring && !self.traced_files.insert(inode) {
+            // Uprobes are attached globally (pid=-1), and the kernel's
+            // uprobe_mmap mechanism automatically installs breakpoints for
+            // new processes that map an already-registered inode, so each
+            // library only needs to be attached once — including BoringSSL
+            // static binaries (codex, node, etc).
+            if !self.traced_files.insert(inode) {
                 log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
+                // Still record the pid→inode association so detach_process
+                // can track all pids referencing this inode.
+                attached_inodes.push(inode);
                 continue;
-            }
-            // For BoringSSL, still track inode to avoid duplicate attach for the
-            // SAME process (multiple libs from same binary), but allow re-attach
-            // for DIFFERENT processes.
-            if is_boring && !self.traced_files.insert(inode) {
-                // Same binary already attached for a different process —
-                // re-attach anyway for this new process's VMAs.
-                log::debug!(
-                    "[attach_process] pid={pid}: re-attaching BoringSSL {path} (new process VMA)"
-                );
             }
 
             log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
@@ -400,7 +390,7 @@ impl SslSniff {
             match result {
                 Ok(ls) => {
                     self._links.extend(ls);
-                    attached_inodes.push((inode, is_boring));
+                    attached_inodes.push(inode);
                 }
                 Err(e) => {
                     // Attach failed: remove inode from traced_files so retries can succeed
@@ -420,26 +410,25 @@ impl SslSniff {
 
     /// Detach SSL probes for a process and clean up traced inodes.
     ///
-    /// BoringSSL (static binary) inodes are always removed so the next process
-    /// re-attaches with its own /proc path. Shared library inodes use a
-    /// still_used check to avoid duplicate uprobe fds.
+    /// When a process exits, its inodes are removed from `traced_files` **only
+    /// if no other traced pid still references the same inode**.  Uprobes are
+    /// attached globally (`pid=-1`), so the link remains valid for other
+    /// processes using the same library; removing the inode prematurely would
+    /// cause the scanner to re-attach on the next sweep, producing duplicate
+    /// uprobe fds.
     pub fn detach_process(&mut self, pid: u32) {
         if let Some(inodes) = self.pid_inodes.remove(&pid) {
             let mut removed = 0;
-            for (inode, is_boring) in &inodes {
-                if *is_boring {
+            for inode in &inodes {
+                // Check whether another pid still maps this inode.
+                let still_used = self
+                    .pid_inodes
+                    .values()
+                    .flatten()
+                    .any(|other_inode| other_inode == inode);
+                if !still_used {
                     self.traced_files.remove(inode);
                     removed += 1;
-                } else {
-                    let still_used = self
-                        .pid_inodes
-                        .values()
-                        .flatten()
-                        .any(|(other_inode, _)| other_inode == inode);
-                    if !still_used {
-                        self.traced_files.remove(inode);
-                        removed += 1;
-                    }
                 }
             }
             log::debug!(
@@ -797,10 +786,10 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
                 format!("/proc/{pid}/exe")
             } else if matches!(kind, SslLibKind::Boring) {
                 // BoringSSL is typically a static binary (codex, node, etc).
-                // /proc/<pid>/exe is a kernel-maintained symlink that always
-                // resolves to the inode the kernel uses for uprobe matching.
-                // /proc/<pid>/root/<path> can resolve to a different inode
-                // in overlayfs containers and some host configurations.
+                // /proc/<pid>/exe is a kernel-maintained symlink that stays
+                // valid even when the backing file has been replaced or
+                // unlinked, which is common for npm-installed binaries that
+                // get updated while old processes are still running.
                 format!("/proc/{pid}/exe")
             } else {
                 format!("/proc/{pid}/root{path_str}")

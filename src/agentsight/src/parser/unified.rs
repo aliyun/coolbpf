@@ -95,13 +95,9 @@ impl Parser {
             const TERMINATOR: &[u8] = b"0\r\n\r\n";
 
             let terminator_pos = if buf.len() >= TERMINATOR.len() && buf.ends_with(TERMINATOR) {
-                // Buffer ends with `0\r\n\r\n` — could be standalone or
-                // appended to SSE data. Strip it and keep the prefix for SSE
-                // parsing.
                 Some(buf.len() - TERMINATOR.len())
             } else {
-                // Also handle the case where `0\r\n\r\n` is the entire buffer.
-                if buf == TERMINATOR { Some(0) } else { None }
+                None
             };
 
             if let Some(prefix_len) = terminator_pos {
