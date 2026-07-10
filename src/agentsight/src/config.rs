@@ -522,7 +522,13 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let backup = path.with_extension("json.bak");
+    let backup = {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        path.with_extension(format!("json.bak.{ts}"))
+    };
     std::fs::rename(path, &backup)
         .with_context(|| format!("Failed to back up {path:?} to {backup:?}"))?;
     std::fs::write(path, DEFAULT_AGENTS_JSON)
@@ -1993,10 +1999,20 @@ mod tests {
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"cmdline": {"allow": []}}"#).unwrap();
         ensure_default_agents_config(&path).unwrap();
-        let backup = path.with_extension("json.bak");
-        assert!(backup.exists());
+        // The old file should be backed up to a timestamped .bak.* file.
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup file");
         assert_eq!(
-            std::fs::read_to_string(&backup).unwrap(),
+            std::fs::read_to_string(backups[0].path()).unwrap(),
             r#"{"cmdline": {"allow": []}}"#
         );
         let content = std::fs::read_to_string(&path).unwrap();
@@ -2017,7 +2033,18 @@ mod tests {
         std::fs::write(&path, &custom).unwrap();
         ensure_default_agents_config(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
-        assert!(!path.with_extension("json.bak").exists());
+        // No backup should exist (config was not upgraded).
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(backups.is_empty(), "no backup expected for current schema");
     }
 
     #[test]
@@ -2026,10 +2053,19 @@ mod tests {
         let path = dir.join("agentsight.json");
         std::fs::write(&path, r#"{"schema_version": 1}"#).unwrap();
         ensure_default_agents_config(&path).unwrap();
-        let backup = path.with_extension("json.bak");
-        assert!(backup.exists());
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup file");
         assert_eq!(
-            std::fs::read_to_string(&backup).unwrap(),
+            std::fs::read_to_string(backups[0].path()).unwrap(),
             r#"{"schema_version": 1}"#
         );
         let content = std::fs::read_to_string(&path).unwrap();
