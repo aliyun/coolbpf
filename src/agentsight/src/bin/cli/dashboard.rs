@@ -16,7 +16,7 @@ pub struct DashboardCommand {
     #[structopt(long)]
     pub db: Option<String>,
 
-    /// Host the server is bound to
+    /// Host the server is bound to (use a specific IP/hostname to override the Network URL)
     #[structopt(long, default_value = "0.0.0.0")]
     pub host: String,
 
@@ -73,8 +73,6 @@ impl DashboardCommand {
             probe_ecs_metadata()
         };
 
-        let display_url = resolve_display_url(&ecs, &local_url, self.port);
-
         let storage_base = self
             .db
             .as_ref()
@@ -89,20 +87,70 @@ impl DashboardCommand {
 
         let auth_config = load_server_auth_config(&self.config);
         let auth = DashboardAuth::init(&auth_config, &storage_base);
+        let token = auth.read_token_from_file();
 
+        // When --host is a specific address (not wildcard), use it as override
+        let host_override = if self.host != "0.0.0.0" && self.host != "::" {
+            Some(self.host.clone())
+        } else {
+            None
+        };
+
+        // Resolve the primary display URL (ECS public IP > --host > LAN IP > localhost)
+        let display_url = resolve_display_url(&ecs, &host_override, &local_url, self.port);
+
+        // Build output lines
         let mut lines = Vec::new();
-        lines.push(format!("AgentSight Dashboard: {display_url}"));
-        if display_url != local_url {
-            lines.push(format!("  Local:   {local_url} (no auth required)"));
-        }
+        lines.push("AgentSight 仪表盘状态".to_string());
+        lines.push("=====================".to_string());
         lines.push(String::new());
 
-        if auth.enabled
-            && let Some(token) = auth.read_token_from_file()
-        {
-            lines.push("  Auth:      enabled".to_string());
-            lines.push(format!("  URL with token: {display_url}/?token={token}"));
+        if auth.enabled {
+            lines.push("  认证:    已启用".to_string());
+        } else {
+            lines.push("  认证:    已关闭".to_string());
+        }
+
+        // Localhost (loopback bypasses auth)
+        lines.push(format!(
+            "  本机:    {local_url}{}",
+            if auth.enabled { " (无需认证)" } else { "" }
+        ));
+
+        // LAN (private) IP
+        let lan_ip = host_override
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| local_addresses().into_iter().next());
+        if let Some(ref ip) = lan_ip {
+            lines.push(format_url("  局域网:", ip, self.port, token.as_deref()));
+        }
+
+        // Public IP (ECS metadata > curl detection > hint)
+        let public_ip = ecs
+            .as_ref()
+            .and_then(|m| m.public_ip().map(|s| s.to_string()))
+            .or_else(|| {
+                if host_override.is_none() {
+                    public_address()
+                } else {
+                    None
+                }
+            });
+        match public_ip {
+            Some(ref ip) => {
+                lines.push(format_url("  公网:", ip, self.port, token.as_deref()));
+            }
+            None => {
+                lines.push("  公网:    (无法检测 — 请使用 --host <公网IP> 指定)".to_string());
+            }
+        }
+
+        // Tip for --host usage
+        if auth.enabled && host_override.is_none() {
             lines.push(String::new());
+            lines.push("  提示: 使用 --host <IP> 可覆盖显示的网络地址,".to_string());
+            lines.push("        例如: agentsight dashboard --host <你的公网IP>".to_string());
         }
 
         let sg_message = build_sg_message(&ecs, self.skip_sg_guide, self.port);
@@ -123,19 +171,26 @@ struct DashboardOutput {
     sg_message: Option<String>,
 }
 
-/// Determine the display URL: ECS public IP > non-loopback local IP > localhost.
-fn resolve_display_url(ecs: &Option<EcsMetadata>, local_url: &str, port: u16) -> String {
-    if let Some(meta) = ecs {
-        meta.public_ip()
-            .map(|ip| format!("http://{ip}:{port}"))
-            .unwrap_or_else(|| local_url.to_string())
-    } else {
-        local_addresses()
-            .into_iter()
-            .next()
-            .map(|ip| format!("http://{ip}:{port}"))
-            .unwrap_or_else(|| local_url.to_string())
+/// Determine the display URL: ECS public IP > --host > LAN IP > localhost.
+fn resolve_display_url(
+    ecs: &Option<EcsMetadata>,
+    host_override: &Option<String>,
+    local_url: &str,
+    port: u16,
+) -> String {
+    if let Some(meta) = ecs
+        && let Some(ip) = meta.public_ip()
+    {
+        return format!("http://{ip}:{port}");
     }
+    if let Some(h) = host_override {
+        return format!("http://{h}:{port}");
+    }
+    local_addresses()
+        .into_iter()
+        .next()
+        .map(|ip| format!("http://{ip}:{port}"))
+        .unwrap_or_else(|| local_url.to_string())
 }
 
 /// Build the security group guide message, if applicable.
@@ -155,6 +210,34 @@ fn build_sg_message(ecs: &Option<EcsMetadata>, skip: bool, port: u16) -> Option<
         )),
         None => None,
     }
+}
+
+/// Format a URL line with optional token.
+fn format_url(label: &str, host: &str, port: u16, token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!("{label:<8} http://{host}:{port}/?token={t}"),
+        None => format!("{label:<8} http://{host}:{port}"),
+    }
+}
+
+/// Detect the public IP address via external service.
+///
+/// Uses `curl` with a 3-second timeout to query a lightweight IP echo service.
+/// Returns `None` if detection fails (no network, curl missing, timeout, etc.).
+fn public_address() -> Option<String> {
+    let output = std::process::Command::new("curl")
+        .args(["-s", "-m", "3", "--retry", "1", "https://ifconfig.me"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Validate that the response looks like an IP or hostname (not an HTML error page)
+    if ip.is_empty() || ip.len() > 64 || ip.contains('<') {
+        return None;
+    }
+    Some(ip)
 }
 
 /// Get non-loopback local IP addresses for URL display.
@@ -273,8 +356,19 @@ mod tests {
             eip: "1.2.3.4".to_string(),
             public_ipv4: String::new(),
         });
-        let url = resolve_display_url(&ecs, "http://127.0.0.1:7396", 7396);
+        let url = resolve_display_url(&ecs, &None, "http://127.0.0.1:7396", 7396);
         assert_eq!(url, "http://1.2.3.4:7396");
+    }
+
+    #[test]
+    fn resolve_display_url_with_host_override() {
+        let url = resolve_display_url(
+            &None,
+            &Some("8.8.8.8".to_string()),
+            "http://127.0.0.1:7396",
+            7396,
+        );
+        assert_eq!(url, "http://8.8.8.8:7396");
     }
 
     #[test]
@@ -285,13 +379,15 @@ mod tests {
             eip: String::new(),
             public_ipv4: String::new(),
         });
-        let url = resolve_display_url(&ecs, "http://127.0.0.1:7396", 7396);
-        assert_eq!(url, "http://127.0.0.1:7396");
+        let url = resolve_display_url(&ecs, &None, "http://127.0.0.1:7396", 7396);
+        // Without public IP, falls through to local_addresses() or localhost fallback
+        assert!(url.starts_with("http://"));
+        assert!(url.ends_with(":7396"));
     }
 
     #[test]
     fn resolve_display_url_without_ecs() {
-        let url = resolve_display_url(&None, "http://127.0.0.1:7396", 7396);
+        let url = resolve_display_url(&None, &None, "http://127.0.0.1:7396", 7396);
         // Should use local_addresses or fall back to localhost
         assert!(url.starts_with("http://"));
         assert!(url.ends_with(":7396"));
@@ -324,5 +420,22 @@ mod tests {
         let msg = msg.expect("should produce a message when not skipped");
         assert!(msg.contains("7396"));
         assert!(msg.contains("未检测到"));
+    }
+
+    #[test]
+    fn format_url_with_token() {
+        let line = format_url("  公网:", "1.2.3.4", 7396, Some("abc123"));
+        assert!(line.contains("1.2.3.4"));
+        assert!(line.contains("7396"));
+        assert!(line.contains("abc123"));
+        assert!(line.contains("公网"));
+    }
+
+    #[test]
+    fn format_url_without_token() {
+        let line = format_url("  局域网:", "10.0.0.1", 7396, None);
+        assert!(line.contains("10.0.0.1"));
+        assert!(line.contains("7396"));
+        assert!(!line.contains("token"));
     }
 }
