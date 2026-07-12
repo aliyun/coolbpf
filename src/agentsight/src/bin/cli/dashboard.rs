@@ -438,4 +438,164 @@ mod tests {
         assert!(line.contains("7396"));
         assert!(!line.contains("token"));
     }
+
+    // ─── build_output tests ─────────────────────────────────────────────────
+
+    /// Write a minimal agentsight config file and return its path.
+    fn write_temp_config(auth_enabled: bool, suffix: &str) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("agentsight_test_{}_{}", std::process::id(), suffix));
+        std::fs::create_dir_all(&dir).ok();
+        let config_path = dir.join("config.json");
+        let content = if auth_enabled {
+            r#"{"schema_version":2,"server":{"auth":{"enabled":true}}}"#
+        } else {
+            r#"{"schema_version":2,"server":{"auth":{"enabled":false}}}"#
+        };
+        std::fs::write(&config_path, content).unwrap();
+        config_path.to_string_lossy().to_string()
+    }
+
+    /// Return a unique temp storage directory for a given suffix.
+    fn temp_storage_dir(suffix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_test_storage_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        std::fs::create_dir_all(&dir).ok();
+        dir
+    }
+
+    #[test]
+    fn build_output_with_auth_disabled() {
+        let config = write_temp_config(false, "disabled");
+        let storage = temp_storage_dir("disabled");
+        let db_path = storage.join("test.db");
+        std::fs::write(&db_path, b"").ok();
+
+        let cmd = DashboardCommand {
+            db: Some(db_path.to_string_lossy().to_string()),
+            host: "0.0.0.0".to_string(),
+            port: 7396,
+            no_open: true,
+            skip_sg_guide: true,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        // Should contain Chinese auth status
+        assert!(output.lines.iter().any(|l| l.contains("已关闭")));
+        // Should contain localhost URL
+        assert!(output.lines.iter().any(|l| l.contains("127.0.0.1:7396")));
+        // No token in URLs (auth disabled)
+        assert!(!output.lines.iter().any(|l| l.contains("token=")));
+        // No tip (auth disabled)
+        assert!(!output.lines.iter().any(|l| l.contains("提示")));
+        // SG message should be None (skip_sg_guide = true)
+        assert!(output.sg_message.is_none());
+    }
+
+    #[test]
+    fn build_output_with_auth_enabled() {
+        let config = write_temp_config(true, "enabled");
+        let storage = temp_storage_dir("enabled");
+        let db_path = storage.join("test_auth.db");
+        std::fs::write(&db_path, b"").ok();
+
+        let cmd = DashboardCommand {
+            db: Some(db_path.to_string_lossy().to_string()),
+            host: "0.0.0.0".to_string(),
+            port: 7396,
+            no_open: true,
+            skip_sg_guide: true,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        // Should contain Chinese auth status
+        assert!(output.lines.iter().any(|l| l.contains("已启用")));
+        // Should contain localhost URL with "无需认证"
+        assert!(output.lines.iter().any(|l| l.contains("无需认证")));
+        // Should contain tip
+        assert!(output.lines.iter().any(|l| l.contains("提示")));
+    }
+
+    #[test]
+    fn build_output_with_host_override() {
+        let config = write_temp_config(true, "host");
+        let storage = temp_storage_dir("host");
+        let db_path = storage.join("test_host.db");
+        std::fs::write(&db_path, b"").ok();
+
+        let cmd = DashboardCommand {
+            db: Some(db_path.to_string_lossy().to_string()),
+            host: "8.8.8.8".to_string(),
+            port: 9999,
+            no_open: true,
+            skip_sg_guide: true,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        // Display URL should use the overridden host
+        assert!(output.display_url.contains("8.8.8.8"));
+        assert!(output.display_url.contains("9999"));
+        // LAN line should show the overridden host
+        assert!(output.lines.iter().any(|l| l.contains("8.8.8.8")));
+        // No tip (host_override is set)
+        assert!(!output.lines.iter().any(|l| l.contains("提示")));
+    }
+
+    #[test]
+    fn build_output_without_skip_sg_guide() {
+        let config = write_temp_config(false, "sg");
+        let storage = temp_storage_dir("sg");
+        let db_path = storage.join("test_sg.db");
+        std::fs::write(&db_path, b"").ok();
+
+        let cmd = DashboardCommand {
+            db: Some(db_path.to_string_lossy().to_string()),
+            host: "0.0.0.0".to_string(),
+            port: 7396,
+            no_open: true,
+            skip_sg_guide: false,
+            config,
+        };
+
+        let output = cmd.build_output();
+
+        // SG message should be present (not skipped, likely no ECS in CI)
+        assert!(output.sg_message.is_some());
+        let msg = output.sg_message.unwrap();
+        assert!(msg.contains("7396"));
+    }
+
+    // ─── public_address tests ───────────────────────────────────────────────
+
+    #[test]
+    fn public_address_returns_option_without_panicking() {
+        // This makes a real network call; in CI it may succeed or fail.
+        // The test just verifies the function doesn't panic and returns Option.
+        let result = public_address();
+        match &result {
+            Some(ip) => {
+                assert!(!ip.is_empty());
+                assert!(!ip.contains('<'));
+                assert!(ip.len() <= 64);
+            }
+            None => {}
+        }
+    }
+
+    // ─── try_open_browser tests ─────────────────────────────────────────────
+
+    #[test]
+    fn try_open_browser_does_not_panic() {
+        // Just verify it doesn't panic even if no browser opener exists.
+        try_open_browser("http://127.0.0.1:7396");
+    }
 }
