@@ -581,13 +581,10 @@ mod tests {
         // This makes a real network call; in CI it may succeed or fail.
         // The test just verifies the function doesn't panic and returns Option.
         let result = public_address();
-        match &result {
-            Some(ip) => {
-                assert!(!ip.is_empty());
-                assert!(!ip.contains('<'));
-                assert!(ip.len() <= 64);
-            }
-            None => {}
+        if let Some(ip) = &result {
+            assert!(!ip.is_empty());
+            assert!(!ip.contains('<'));
+            assert!(ip.len() <= 64);
         }
     }
 
