@@ -96,7 +96,7 @@ impl Aggregator {
 
     /// Process parse result
     pub fn process_result(&mut self, result: ParseResult) -> Vec<AggregatedResult> {
-        log::debug!(
+        log::trace!(
             "Aggregating parsed results({}): {}",
             result.messages.len(),
             result
@@ -176,5 +176,13 @@ impl Aggregator {
     /// Delegates to the HTTP aggregator's dead-PID drain.
     pub fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         self.http.drain_dead_pid_connections()
+    }
+
+    /// Snapshot in-flight HTTP connections that exceeded the idle timeout.
+    ///
+    /// Used to persist evidence for manually interrupted streams where the
+    /// agent process remains alive, so dead-PID draining would never run.
+    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        self.http.snapshot_idle_connections()
     }
 }

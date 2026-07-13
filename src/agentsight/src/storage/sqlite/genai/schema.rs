@@ -33,7 +33,7 @@ pub(super) fn get_prune_threshold() -> u64 {
 impl GenAISqliteStore {
     /// Initialize database tables
     pub(super) fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS genai_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +88,9 @@ impl GenAISqliteStore {
                 interruption_type TEXT,
                 -- Call kind classification (main/recap/web_search)
                 call_kind TEXT NOT NULL DEFAULT 'main',
+                -- Pending row provenance and reconciliation key
+                pending_origin TEXT NOT NULL DEFAULT 'request_capture',
+                pending_match_key TEXT,
                 -- Full event as JSON (fallback)
                 event_json TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -185,6 +188,16 @@ impl GenAISqliteStore {
             "idx_genai_call_kind"
         );
 
+        // v7: pending provenance for idle/drain lifecycle handling
+        ensure_col!(
+            "pending_origin",
+            "TEXT NOT NULL DEFAULT 'request_capture'",
+            "idx_genai_pending_origin"
+        );
+
+        // v8: stable key used to reconcile idle stream snapshots on completion
+        ensure_col!("pending_match_key", "TEXT", "idx_genai_pending_match_key");
+
         Ok(())
     }
 
@@ -261,7 +274,7 @@ impl GenAISqliteStore {
     ///
     /// Deletes a percentage of oldest records based on id.
     pub(super) fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // Get total count
         let count: i64 =
@@ -302,7 +315,7 @@ impl GenAISqliteStore {
     /// Note: VACUUM in WAL mode creates a new db file, so we need to
     /// re-enable WAL and checkpoint after VACUUM.
     pub(super) fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // VACUUM rebuilds the database (works better before checkpoint in WAL mode)
         conn.execute_batch("VACUUM;")?;
@@ -322,7 +335,7 @@ impl GenAISqliteStore {
     /// mirrors the sibling stores (token, http, audit) which do this via
     /// `connection::wal_checkpoint` in their own `checkpoint()` methods.
     pub fn wal_checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }

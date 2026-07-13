@@ -152,13 +152,13 @@ impl AgentSight {
         let mut config_load_ok = false;
         let mut config_load_err: Option<(PathBuf, anyhow::Error)> = None;
         if let Some(path) = config.config_path.clone() {
-            let load_result = if path.exists() {
-                config.load_from_file(&path)
-            } else {
-                match crate::config::ensure_default_agents_config(&path) {
-                    Ok(()) => config.load_from_file(&path),
-                    Err(e) => Err(e),
-                }
+            // ensure_default_agents_config handles both cases:
+            // - File missing: creates it with the embedded default.
+            // - File exists: checks schema_version; if outdated, backs up and
+            //   overwrites with the current default.
+            let load_result = match crate::config::ensure_default_agents_config(&path) {
+                Ok(()) => config.load_from_file(&path),
+                Err(e) => Err(e),
             };
             match load_result {
                 Ok(()) => config_load_ok = true,
@@ -584,15 +584,13 @@ impl AgentSight {
 
     /// Internal helper to attach SSL probes to a process
     fn attach_process_internal(probes: &mut Probes, pid: u32, agent_name: &str) {
-        log::debug!("Attaching to pid {pid}, agent name: {agent_name}");
         if let Err(e) = probes.add_traced_pid(pid) {
             log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
-        if let Err(e) = probes.attach_process(pid as i32) {
-            log::error!("Failed to attach SSL probe to pid {pid}: {e}");
-        } else {
-            log::info!("Attached to agent: {agent_name} (pid={pid})");
-        }
+        // attach_process logs WARN internally if SSL attach degrades to
+        // global-uprobe-only coverage; always succeeds for BPF map registration.
+        let _ = probes.attach_process(pid as i32);
+        log::info!("Attached to agent: {agent_name} (pid={pid})");
     }
 
     /// Detach SSL probes from a specific agent process
@@ -862,7 +860,7 @@ impl AgentSight {
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
-                    self.detach_process(*pid, &agent_name);
+                    self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name);
                 }
             }
@@ -909,6 +907,8 @@ impl AgentSight {
                 self.flush_expired_pending_genai();
                 // Drain orphaned connections from dead PIDs and persist as pending
                 self.drain_and_persist_dead_connections();
+                // Snapshot idle in-flight streams whose owning process is still alive.
+                self.drain_and_persist_idle_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
                 // Periodically purge old/oversized interruption DB entries
@@ -1274,6 +1274,58 @@ impl AgentSight {
                         "[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Snapshot idle in-flight streams and persist them as `pending` records.
+    ///
+    /// This covers manual output interruption where the agent process stays
+    /// alive, so dead-PID draining cannot discover the abandoned stream.
+    fn drain_and_persist_idle_connections(&mut self) {
+        let snapshots = self.aggregator.snapshot_idle_connections();
+        if snapshots.is_empty() {
+            return;
+        }
+
+        use crate::aggregator::ConnectionState;
+        use crate::storage::sqlite::PendingOrigin;
+
+        for (conn_id, state) in snapshots {
+            let (_state_name, request) = match state {
+                ConnectionState::RequestPending { request } => ("RequestPending", request),
+                ConnectionState::SseActive {
+                    request: Some(req), ..
+                } => ("SseActive", req),
+                _ => continue,
+            };
+
+            if let Some(mut pending) = self.genai_builder.build_pending_from_request(
+                &request,
+                &conn_id,
+                &self.pid_agent_name_cache,
+            ) {
+                pending.pending_origin = PendingOrigin::IdleDrain;
+                if let Some(ref store) = self.genai_sqlite_store {
+                    let call_id = pending.call_id.clone();
+                    if let Err(e) = store.insert_pending(&pending) {
+                        log::warn!("[IdleDrain] Failed to persist pending call: {e}");
+                        continue;
+                    }
+                    log::info!(
+                        "[IdleDrain] persisted idle in-flight call as pending: call_id={} pid={} path={}",
+                        call_id,
+                        conn_id.pid,
+                        request.path,
+                    );
+                }
+            } else {
+                log::debug!(
+                    "[IdleDrain] build_pending returned None: pid={} path={} body_len={}",
+                    conn_id.pid,
+                    request.path,
+                    request.body_len
+                );
             }
         }
     }
@@ -1991,6 +2043,8 @@ mod tests {
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
             call_kind: "main".to_string(),
+            pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+            pending_match_key: None,
         }
     }
 

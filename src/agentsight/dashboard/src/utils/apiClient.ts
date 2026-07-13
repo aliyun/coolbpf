@@ -73,8 +73,20 @@ export interface TraceEventDetail {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url, { credentials: 'same-origin' });
+class ApiRequestError extends Error {
+  readonly status: number;
+  readonly body: Record<string, unknown> | null;
+
+  constructor(url: string, status: number, text: string, body: Record<string, unknown> | null) {
+    super(`API ${url} -> ${status}: ${text}`);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, { ...init, credentials: 'same-origin' });
   if (res.status === 401) {
     // Session expired or invalid — redirect to login
     window.location.hash = '#/login';
@@ -82,7 +94,16 @@ async function apiFetch<T>(url: string): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`API ${url} -> ${res.status}: ${text}`);
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Error responses may be plain text.
+    }
+    throw new ApiRequestError(url, res.status, text, body);
   }
   return res.json() as Promise<T>;
 }
@@ -140,6 +161,142 @@ export async function fetchConversationDetail(conversationId: string): Promise<T
   return apiFetch<TraceEventDetail[]>(
     `${API_BASE}/api/conversations/${encodeURIComponent(conversationId)}`
   );
+}
+
+// ─── Grader APIs ─────────────────────────────────────────────────────────────
+
+export type EvaluationVerdict = 'pass' | 'warn' | 'fail';
+export type EvaluationRootCause =
+  | 'none'
+  | 'no_final_answer'
+  | 'interrupted_main_call'
+  | 'agent_crash'
+  | 'runtime_error'
+  | 'tool_failure'
+  | 'safety_risk'
+  | 'loop_detected'
+  | 'excessive_cost'
+  | 'partial_snapshot';
+
+export interface EvaluationTarget {
+  conversation_id: string;
+  trace_id?: string | null;
+  call_id?: string | null;
+  step_id?: string | null;
+}
+
+export interface EvaluationRef {
+  type: 'genai_event' | 'interruption' | 'security_event' | 'trace' | 'tool_call' | 'atif_step';
+  id: string;
+  label: string;
+  severity?: string | null;
+  target: EvaluationTarget;
+  deeplink?: {
+    route: string;
+    query: Record<string, unknown>;
+  } | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface EvaluationDimension {
+  name: string;
+  score: number;
+  verdict: EvaluationVerdict;
+  reason: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationFinding {
+  code: string;
+  severity: string;
+  message: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationMetadata {
+  evaluated_with_pending: boolean;
+  pending_call_count: number;
+  input_event_count: number;
+  grader_type: 'rule' | 'llm' | 'agent';
+  grader_version: string;
+  rubric_version: string | null;
+  judge_model: string | null;
+  prompt_hash: string | null;
+  confidence: number | null;
+}
+
+export interface EvaluationResult {
+  target_type: 'conversation';
+  target_id: string;
+  run_id: string;
+  input_hash: string;
+  verdict: EvaluationVerdict;
+  score: number;
+  summary: string;
+  root_cause: EvaluationRootCause;
+  recommended_action: string;
+  dimensions: EvaluationDimension[];
+  findings: EvaluationFinding[];
+  metadata: EvaluationMetadata;
+}
+
+export interface EvaluationResponse {
+  result: EvaluationResult;
+  reused_existing_run: boolean;
+}
+
+export class EvaluationNotReadyError extends Error {
+  readonly pendingCallCount: number;
+
+  constructor(message: string, pendingCallCount: number) {
+    super(message);
+    this.name = 'EvaluationNotReadyError';
+    this.pendingCallCount = pendingCallCount;
+  }
+}
+
+/**
+ * Fetch the latest persisted evaluation for a conversation.
+ */
+export async function fetchLatestEvaluation(conversationId: string): Promise<EvaluationResult | null> {
+  const params = new URLSearchParams({
+    target_type: 'conversation',
+    target_id: conversationId,
+  });
+  return apiFetch<EvaluationResult | null>(`${API_BASE}/api/grader/latest?${params.toString()}`);
+}
+
+/**
+ * Manually evaluate a conversation with the rule-based grader.
+ */
+export async function evaluateConversation(
+  conversationId: string,
+  force = false,
+): Promise<EvaluationResponse> {
+  try {
+    return await apiFetch<EvaluationResponse>(`${API_BASE}/api/grader/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_type: 'conversation',
+        target_id: conversationId,
+        force,
+      }),
+    });
+  } catch (error) {
+    if (
+      error instanceof ApiRequestError &&
+      error.status === 409 &&
+      error.body?.error === 'conversation_not_ready'
+    ) {
+      const message = error.body.message;
+      throw new EvaluationNotReadyError(
+        typeof message === 'string' ? message : 'Conversation still has pending LLM calls.',
+        Number(error.body.pending_call_count ?? 0),
+      );
+    }
+    throw error;
+  }
 }
 
 // ─── Agent-name & time-series APIs ───────────────────────────────────────────

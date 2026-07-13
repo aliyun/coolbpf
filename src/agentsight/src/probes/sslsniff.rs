@@ -316,12 +316,19 @@ impl SslSniff {
                 .collect::<Vec<_>>()
         );
 
-        let mut attached_inodes = Vec::new();
+        let mut attached_inodes: Vec<u64> = Vec::new();
         for (path, inode, kind) in libs {
             // Skip libraries whose inode we already traced.
-            // Now using pid=-1 for global attach, so each library only needs to be attached once.
+            // Uprobes are attached globally (pid=-1), and the kernel's
+            // uprobe_mmap mechanism automatically installs breakpoints for
+            // new processes that map an already-registered inode, so each
+            // library only needs to be attached once — including BoringSSL
+            // static binaries (codex, node, etc).
             if !self.traced_files.insert(inode) {
                 log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
+                // Still record the pid→inode association so detach_process
+                // can track all pids referencing this inode.
+                attached_inodes.push(inode);
                 continue;
             }
 
@@ -418,7 +425,8 @@ impl SslSniff {
                 let still_used = self
                     .pid_inodes
                     .values()
-                    .any(|other_inodes| other_inodes.contains(inode));
+                    .flatten()
+                    .any(|other_inode| other_inode == inode);
                 if !still_used {
                     self.traced_files.remove(inode);
                     removed += 1;
@@ -623,7 +631,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         hs_matches[0]
     } else {
         // Multiple matches: choose the one closest before read_off.
-        match hs_matches.iter().filter(|&&o| o < read_off).next_back() {
+        match hs_matches.iter().rfind(|&&o| o < read_off) {
             Some(&o) => o,
             None => {
                 if verbose {
@@ -719,6 +727,7 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
             | "chromium"
             | "google-chrome"
             | "google-chrome-stable"
+            | "claude"
             | "claude.exe"
     ) {
         return Some(SslLibKind::Boring);
@@ -776,6 +785,13 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             // it follows the process's mount namespace, making this safe for
             // both host and container processes.
             let path_str = if path_str.ends_with(" (deleted)") {
+                format!("/proc/{pid}/exe")
+            } else if matches!(kind, SslLibKind::Boring) {
+                // BoringSSL is typically a static binary (codex, node, etc).
+                // /proc/<pid>/exe is a kernel-maintained symlink that stays
+                // valid even when the backing file has been replaced or
+                // unlinked, which is common for npm-installed binaries that
+                // get updated while old processes are still running.
                 format!("/proc/{pid}/exe")
             } else {
                 format!("/proc/{pid}/root{path_str}")

@@ -85,6 +85,8 @@ pub struct HttpConnectionAggregator {
     last_appended_src_ptr: LruCache<ConnectionId, usize>,
     /// Last activity timestamp per connection, used for idle timeout eviction.
     last_activity: LruCache<ConnectionId, Instant>,
+    /// Connections already snapshotted after idle timeout.
+    idle_snapshotted: LruCache<ConnectionId, ()>,
     /// Maximum bytes buffered per connection (request body or compressed SSE).
     max_body_bytes: usize,
     /// Idle timeout before a connection state is forcibly dropped.
@@ -142,6 +144,7 @@ impl HttpConnectionAggregator {
             sse_continuation_buffers: LruCache::new(cap),
             last_appended_src_ptr: LruCache::new(cap),
             last_activity: LruCache::new(cap),
+            idle_snapshotted: LruCache::new(cap),
             max_body_bytes: max_body_bytes.max(1024),
             idle_timeout,
         }
@@ -173,11 +176,11 @@ impl HttpConnectionAggregator {
         }
     }
 
-    /// Evict connections that have been idle for longer than `self.idle_timeout`
-    /// or whose buffered body exceeds `self.max_body_bytes`.
+    /// Evict discardable connections that have been idle for longer than
+    /// `self.idle_timeout` or whose buffered body exceeds `self.max_body_bytes`.
     ///
-    /// Called periodically from the main event loop (via `UnifiedAggregator`)
-    /// to prevent stale or oversized connection states from accumulating.
+    /// In-flight request/response states are preserved here so callers can
+    /// drain and persist them instead of losing a manually interrupted stream.
     pub fn evict_idle_and_oversized(&mut self) {
         let now = Instant::now();
         let timeout = self.idle_timeout;
@@ -196,16 +199,21 @@ impl HttpConnectionAggregator {
             })
             .collect();
 
+        let mut evicted_idle = 0usize;
         for key in &to_evict {
-            self.connections.pop(key);
-            self.sse_continuation_buffers.pop(key);
-            self.last_appended_src_ptr.pop(key);
-            self.last_activity.pop(key);
+            if matches!(self.connections.peek(key), Some(ConnectionState::Idle)) {
+                self.connections.pop(key);
+                self.sse_continuation_buffers.pop(key);
+                self.last_appended_src_ptr.pop(key);
+                self.last_activity.pop(key);
+                self.idle_snapshotted.pop(key);
+                evicted_idle += 1;
+            }
         }
-        if !to_evict.is_empty() {
+        if evicted_idle > 0 {
             log::info!(
                 "[HttpAggregator] evicted {} idle connections (timeout={}s)",
-                to_evict.len(),
+                evicted_idle,
                 timeout.as_secs()
             );
         }
@@ -217,9 +225,6 @@ impl HttpConnectionAggregator {
             .filter_map(|(k, state)| {
                 let body_len = match state {
                     ConnectionState::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
-                    ConnectionState::SseActive {
-                        compressed_buffer, ..
-                    } => compressed_buffer.as_ref().map_or(0, |b| b.len()),
                     _ => 0,
                 };
                 if body_len > max_bytes { Some(*k) } else { None }
@@ -231,6 +236,7 @@ impl HttpConnectionAggregator {
             self.sse_continuation_buffers.pop(key);
             self.last_appended_src_ptr.pop(key);
             self.last_activity.pop(key);
+            self.idle_snapshotted.pop(key);
         }
         if !oversized.is_empty() {
             log::warn!(
@@ -239,6 +245,58 @@ impl HttpConnectionAggregator {
                 max_bytes
             );
         }
+    }
+
+    /// Snapshot non-idle connections that exceeded `idle_timeout`.
+    ///
+    /// These states can represent manually interrupted or abandoned LLM
+    /// streams. Returning cloned states lets the caller persist a pending GenAI
+    /// row while keeping the live connection available if the stream resumes.
+    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        let now = Instant::now();
+        let timeout = self.idle_timeout;
+        let keys: Vec<ConnectionId> = self
+            .last_activity
+            .iter()
+            .filter_map(|(k, ts)| {
+                if now.duration_since(*ts) > timeout {
+                    Some(*k)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut result = Vec::new();
+        for key in keys {
+            if self.idle_snapshotted.peek(&key).is_some() {
+                continue;
+            }
+            if let Some(state) = self.connections.peek(&key) {
+                match state.clone() {
+                    ConnectionState::Idle => {}
+                    state => {
+                        self.idle_snapshotted.push(key, ());
+                        result.push((key, state));
+                    }
+                }
+            }
+        }
+
+        if !result.is_empty() {
+            log::info!(
+                "[HttpAggregator] snapshotted {} idle in-flight connection(s) (timeout={}s)",
+                result.len(),
+                timeout.as_secs()
+            );
+        }
+
+        result
+    }
+
+    /// Backward-compatible alias for idle snapshots.
+    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        self.snapshot_idle_connections()
     }
 
     /// Record activity timestamp for a connection.
@@ -390,6 +448,7 @@ impl HttpConnectionAggregator {
     /// Process HTTP Request (from HTTP Parser)
     pub fn process_request(&mut self, request: ParsedRequest) {
         let connection_id = ConnectionId::from_ssl_event(&request.source_event);
+        self.idle_snapshotted.pop(&connection_id);
 
         // Check if body is complete by comparing with Content-Length
         let content_length: Option<usize> = request
@@ -802,15 +861,20 @@ impl HttpConnectionAggregator {
                 // Responses API — other providers emit usage in single
                 // small events. Dedup by source_event pointer so a single
                 // SSL_read producing multiple SSE events contributes only
-                // once.
+                // once — EXCEPT for the done event, which we always append
+                // because its source chunk carries usage data that must not
+                // be lost to dedup.
                 if needs_sse_continuation_buffer(request.as_ref()) {
                     const MAX_CONTINUATION_BYTES: usize = 1 << 20; // 1 MiB cap
                     let src = sse_event.source_event();
                     let src_ptr = src as *const _ as usize;
                     let src_buf_len = src.buf_size() as usize;
                     let last_ptr = self.last_appended_src_ptr.get(connection_id).copied();
-                    if last_ptr != Some(src_ptr) && src_buf_len > 0 && src_buf_len <= src.buf.len()
-                    {
+                    let should_append = is_done
+                        || (last_ptr != Some(src_ptr)
+                            && src_buf_len > 0
+                            && src_buf_len <= src.buf.len());
+                    if should_append && src_buf_len > 0 && src_buf_len <= src.buf.len() {
                         let buf = self
                             .sse_continuation_buffers
                             .get_or_insert_mut(*connection_id, Vec::new);
@@ -906,6 +970,10 @@ impl HttpConnectionAggregator {
     /// Clear all connections
     pub fn clear(&mut self) {
         self.connections.clear();
+        self.sse_continuation_buffers.clear();
+        self.last_appended_src_ptr.clear();
+        self.last_activity.clear();
+        self.idle_snapshotted.clear();
     }
 
     /// Drain all connections (for force complete)
@@ -915,7 +983,11 @@ impl HttpConnectionAggregator {
             .map(|(k, v)| (*k, v.clone()))
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|(k, _)| (k, self.connections.pop(&k).unwrap()))
+            .map(|(k, _)| {
+                self.last_activity.pop(&k);
+                self.idle_snapshotted.pop(&k);
+                (k, self.connections.pop(&k).unwrap())
+            })
             .collect()
     }
 
@@ -939,6 +1011,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.last_activity.pop(&key);
+                self.idle_snapshotted.pop(&key);
                 match state {
                     ConnectionState::Idle => {}
                     _ => {
@@ -999,6 +1073,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.last_activity.pop(&key);
+                self.idle_snapshotted.pop(&key);
                 match state {
                     ConnectionState::Idle => {
                         // Silently discard idle entries
@@ -2339,6 +2415,46 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_continuation_buffer_done_event_bypasses_dedup() {
+        // The done event's source chunk must always be appended to the
+        // continuation buffer, even when it shares the same source_event
+        // pointer as a prior event. Without this bypass, the usage data
+        // in the done event's chunk would be lost to dedup.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let conn_id = enter_uncompressed_responses_sse_active(&mut aggregator, 32, 0xE000);
+
+        // Two events sharing the same source SslEvent — first is non-done,
+        // second is done. The done event carries usage data in its source
+        // buffer that must not be skipped.
+        let payload = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}";
+        let usage_payload = b"data: {\"usage\":{\"input_tokens\":42,\"output_tokens\":7}}";
+
+        // Non-done event from a different source
+        let src1 = create_mock_ssl_event_with_buf(32, 0xE000, payload.to_vec(), 0);
+        let event1 = ParsedSseEvent::new(None, None, None, 0, payload.len(), src1);
+        let _ = aggregator.process_sse_event(&conn_id, event1);
+
+        // Done event sharing the SAME source pointer as event1 — its buffer
+        // contains usage data that differs from event1's payload.
+        let src_done = create_mock_ssl_event_with_buf(32, 0xE000, usage_payload.to_vec(), 0);
+        let done = ParsedSseEvent::new_done_marker(src_done);
+        let result = aggregator.process_sse_event(&conn_id, done);
+        let pair = match result {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+        let buf = pair
+            .response
+            .sse_continuation_bytes
+            .expect("continuation buffer should exist");
+        // The done event's payload must appear in the buffer despite dedup.
+        assert!(
+            buf.windows(usage_payload.len()).any(|w| w == usage_payload),
+            "done event source chunk must be in continuation buffer even with dedup"
+        );
+    }
+
+    #[test]
     fn test_with_limits_sets_fields() {
         let agg = HttpConnectionAggregator::with_limits(10, 4096, Duration::from_secs(30));
         assert_eq!(agg.max_body_bytes(), 4096);
@@ -2373,5 +2489,98 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         agg.evict_idle_and_oversized();
         assert!(agg.connections.peek(&conn_id).is_none());
+    }
+
+    #[test]
+    fn test_idle_snapshot_keeps_sse_active_for_resumed_stream() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 8192, Duration::from_millis(50));
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7000,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event.clone(),
+            reassembled_body: None,
+        };
+        agg.process_request(request);
+
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        assert!(agg.process_response(response).is_none());
+
+        std::thread::sleep(Duration::from_millis(60));
+        let snapshots = agg.snapshot_idle_connections();
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(matches!(snapshots[0].1, ConnectionState::SseActive { .. }));
+
+        let done_event = create_mock_ssl_event_with_buf(
+            conn_id.pid,
+            conn_id.ssl_ptr,
+            b"data: [DONE]\n\n".to_vec(),
+            0,
+        );
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = agg.process_sse_event(&conn_id, done);
+        assert!(
+            matches!(result, Some(AggregatedResult::SseComplete(_))),
+            "idle snapshot must not remove the in-flight stream state"
+        );
+    }
+
+    #[test]
+    fn test_oversized_request_body_pending_is_evicted() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7100,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(4096),
+                body_buffer: vec![b'x'; 2048],
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.sse_continuation_buffers
+            .push(conn_id, b"stale".to_vec());
+        agg.last_appended_src_ptr.push(conn_id, 42);
+
+        agg.evict_idle_and_oversized();
+
+        assert!(agg.connections.peek(&conn_id).is_none());
+        assert!(agg.last_activity.peek(&conn_id).is_none());
+        assert!(agg.sse_continuation_buffers.peek(&conn_id).is_none());
+        assert!(agg.last_appended_src_ptr.peek(&conn_id).is_none());
     }
 }

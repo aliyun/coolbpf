@@ -20,6 +20,9 @@ import {
   fetchAgentHealth,
   deleteAgentHealth,
   restartAgentHealth,
+  fetchLatestEvaluation,
+  evaluateConversation,
+  EvaluationNotReadyError,
   INTERRUPTION_TYPE_CN,
   fetchSkillMetrics,
   fetchSecurityStatus,
@@ -58,6 +61,11 @@ function mockErrorResponse(status: number, text: string) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  window.location.hash = '';
+});
+
+afterEach(() => {
+  window.location.hash = '';
 });
 
 describe('apiClient', () => {
@@ -81,7 +89,10 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce(mockJsonResponse([]));
       const result = await fetchSessions();
       expect(result).toEqual([]);
-      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/sessions'));
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/sessions'),
+        expect.objectContaining({ credentials: 'same-origin' }),
+      );
     });
 
     it('should add start_ns and end_ns params', async () => {
@@ -134,6 +145,67 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce(mockJsonResponse([]));
       await fetchConversationDetail('conv-1');
       expect(mockFetch.mock.calls[0][0]).toContain('/api/conversations/conv-1');
+    });
+  });
+
+  describe('Grader APIs', () => {
+    it('fetchLatestEvaluation should fetch latest conversation evaluation', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(null));
+      const result = await fetchLatestEvaluation('conv-1');
+
+      expect(result).toBeNull();
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('/api/grader/latest');
+      expect(url).toContain('target_type=conversation');
+      expect(url).toContain('target_id=conv-1');
+    });
+
+    it('evaluateConversation should post a manual evaluation request', async () => {
+      const response = { result: { target_id: 'conv-1', verdict: 'pass' }, reused_existing_run: false };
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(response));
+      const result = await evaluateConversation('conv-1', true);
+
+      expect(result).toEqual(response);
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/grader/evaluate');
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+      });
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        target_type: 'conversation',
+        target_id: 'conv-1',
+        force: true,
+      });
+    });
+
+    it('evaluateConversation should expose pending conflicts as EvaluationNotReadyError', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        error: 'conversation_not_ready',
+        pending_call_count: 2,
+        message: 'pending',
+      }, 409));
+
+      let caught: unknown;
+      try {
+        await evaluateConversation('conv-1');
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toMatchObject({
+        name: 'EvaluationNotReadyError',
+        pendingCallCount: 2,
+      });
+      expect(caught).toBeInstanceOf(EvaluationNotReadyError);
+    });
+
+    it('evaluateConversation should redirect to login after an unauthorized response', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({}, 401));
+
+      await expect(evaluateConversation('conv-1')).rejects.toThrow('Authentication required');
+
+      expect(window.location.hash).toBe('#/login');
     });
   });
 
@@ -264,7 +336,10 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('') });
       await resolveInterruption('int-1');
       expect(mockFetch.mock.calls[0][0]).toContain('/api/interruptions/int-1/resolve');
-      expect(mockFetch.mock.calls[0][1]).toEqual({ method: 'POST' });
+      expect(mockFetch.mock.calls[0][1]).toEqual({
+        method: 'POST',
+        credentials: 'same-origin',
+      });
     });
 
     it('should throw on error', async () => {
@@ -285,7 +360,10 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: () => Promise.resolve('') });
       await deleteAgentHealth(1234);
       expect(mockFetch.mock.calls[0][0]).toContain('/api/agent-health/1234');
-      expect(mockFetch.mock.calls[0][1]).toEqual({ method: 'DELETE' });
+      expect(mockFetch.mock.calls[0][1]).toEqual({
+        method: 'DELETE',
+        credentials: 'same-origin',
+      });
     });
 
     it('deleteAgentHealth error', async () => {
@@ -302,7 +380,10 @@ describe('apiClient', () => {
       });
       const result = await restartAgentHealth(1234);
       expect(result).toEqual(body);
-      expect(mockFetch.mock.calls[0][1]).toEqual({ method: 'POST' });
+      expect(mockFetch.mock.calls[0][1]).toEqual({
+        method: 'POST',
+        credentials: 'same-origin',
+      });
     });
 
     it('restartAgentHealth error', async () => {
@@ -447,7 +528,10 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce(mockJsonResponse(mockReport));
       const result = await fetchSkillMetrics();
       expect(result).toEqual(mockReport);
-      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('/api/skill-metrics'));
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/skill-metrics'),
+        expect.objectContaining({ credentials: 'same-origin' }),
+      );
     });
 
     it('should add start_ns and end_ns query params', async () => {

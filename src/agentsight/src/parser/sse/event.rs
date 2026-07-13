@@ -98,8 +98,12 @@ impl ParsedSseEvent {
     /// Recognizes:
     /// - OpenAI style: data is `[DONE]` or `[END]`
     /// - Anthropic style: event field is `message_stop`, or data is `{"type":"message_stop"}`
-    /// - OpenAI Responses API: event field is `response.completed`/`response.failed`/`response.incomplete`,
-    ///   or data is `{"type":"response.completed",...}`.
+    /// - OpenAI Responses API: data contains parseable JSON with
+    ///   `"type":"response.completed"` (or `.failed`/`.incomplete`).
+    ///   The `event:` field alone does NOT terminate — the data payload of
+    ///   `response.completed` routinely exceeds 16 KB and spans multiple TLS
+    ///   records, so the stream must stay open until the full JSON is available
+    ///   or the HTTP chunked terminator (`0\r\n\r\n`) fires a synthetic done.
     pub fn is_done(&self) -> bool {
         if self.is_synthetic_done {
             return true;
@@ -108,14 +112,13 @@ impl ParsedSseEvent {
         if self.event.as_deref() == Some("message_stop") {
             return true;
         }
-        // OpenAI Responses API: event field flags a terminal frame.
-        // Use this even when the data payload is too large to parse as JSON.
-        if matches!(
-            self.event.as_deref(),
-            Some("response.completed") | Some("response.failed") | Some("response.incomplete")
-        ) {
-            return true;
-        }
+        // OpenAI Responses API: do NOT terminate based on event field alone.
+        // The `response.completed` data field routinely exceeds 16KB (echoes
+        // instructions + tools + output), so the first TLS chunk only has
+        // the event header + truncated data. The stream must stay open to
+        // receive remaining chunks; it will terminate via the HTTP chunked
+        // end marker `0\r\n\r\n` (synthetic done) or when the data-field
+        // JSON is fully parseable (check below).
         let data = self.data();
         let text = String::from_utf8_lossy(data);
         let trimmed = text.trim();
@@ -573,6 +576,41 @@ mod tests {
         let ev = make_event(data);
         let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
         assert!(!parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_responses_api_event_field_alone_not_done() {
+        // The `event: response.completed` field alone must NOT terminate the
+        // stream — the data field may be truncated across TLS records and the
+        // full JSON (containing usage) has not arrived yet. The stream
+        // terminates via the HTTP chunked terminator `0\r\n\r\n`.
+        let data = b"{\"sequence_number\":10,\"type\":\"response.completed\",\"response\":{\"instructions\":\"trunc";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(
+            None,
+            Some("response.completed".to_string()),
+            None,
+            0,
+            data.len(),
+            ev,
+        );
+        assert!(!parsed.is_done());
+    }
+
+    #[test]
+    fn test_is_done_responses_api_complete_json_is_done() {
+        // When the full JSON IS available in data, is_done should fire.
+        let data = b"{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}";
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(
+            None,
+            Some("response.completed".to_string()),
+            None,
+            0,
+            data.len(),
+            ev,
+        );
+        assert!(parsed.is_done());
     }
 
     #[test]

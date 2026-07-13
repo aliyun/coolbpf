@@ -28,6 +28,21 @@ function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '\u2026' : id;
 }
 
+function highlightedSections(doc: AtifDocument, callId: string | null): Set<string> {
+  const sections = new Set<string>();
+  if (!callId) return sections;
+
+  for (const step of doc.steps ?? []) {
+    if (step.tool_calls?.some((toolCall) => toolCall.tool_call_id === callId)) {
+      sections.add(`${step.step_id}-toolcalls`);
+    }
+    if (step.observation?.results.some((result) => result.source_call_id === callId)) {
+      sections.add(`${step.step_id}-observation`);
+    }
+  }
+  return sections;
+}
+
 // ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
 
 const STRATEGY_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -354,6 +369,11 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
 export const AtifViewerPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const searchParamsRef = useRef(searchParams);
+
+  useEffect(() => {
+    searchParamsRef.current = searchParams;
+  }, [searchParams]);
 
   // Input state
   const [queryType, setQueryType] = useState<'session' | 'conversation'>(
@@ -392,7 +412,15 @@ export const AtifViewerPage: React.FC = () => {
     const i = id ?? queryId;
     if (!i.trim()) return;
 
-    setSearchParams({ type: t, id: i.trim() }, { replace: true });
+    const nextParams: Record<string, string> = { type: t, id: i.trim() };
+    const currentSearchParams = searchParamsRef.current;
+    if (currentSearchParams.get('id') === i.trim()) {
+      const highlightCallId = currentSearchParams.get('highlight_call_id');
+      const interruptionId = currentSearchParams.get('interruption_id');
+      if (highlightCallId) nextParams.highlight_call_id = highlightCallId;
+      if (interruptionId) nextParams.interruption_id = interruptionId;
+    }
+    setSearchParams(nextParams, { replace: true });
     setLoading(true);
     setError(null);
     setDoc(null);
@@ -406,6 +434,7 @@ export const AtifViewerPage: React.FC = () => {
         data = await fetchAtifBySession(i.trim());
       }
       setDoc(data);
+      setExpandedSections(highlightedSections(data, nextParams.highlight_call_id ?? null));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -467,10 +496,11 @@ export const AtifViewerPage: React.FC = () => {
   }, [doc]);
 
   // Compute metrics (fallback when final_metrics is partial)
+  const steps = doc?.steps ?? [];
   const computedMetrics = doc ? (() => {
     const fm = doc.final_metrics;
     let promptSum = 0, completionSum = 0, cachedSum = 0;
-    for (const s of doc.steps) {
+    for (const s of steps) {
       if (s.metrics) {
         promptSum += s.metrics.prompt_tokens ?? 0;
         completionSum += s.metrics.completion_tokens ?? 0;
@@ -478,7 +508,7 @@ export const AtifViewerPage: React.FC = () => {
       }
     }
     return {
-      steps: fm?.total_steps ?? doc.steps.length,
+      steps: fm?.total_steps ?? steps.length,
       prompt: fm?.total_prompt_tokens ?? promptSum,
       completion: fm?.total_completion_tokens ?? completionSum,
       cached: fm?.total_cached_tokens ?? cachedSum,
@@ -683,11 +713,11 @@ export const AtifViewerPage: React.FC = () => {
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
                 交互轨迹
                 <span className="ml-2 text-sm font-normal text-gray-400">
-                  共 {doc.steps.length} 步
+                  共 {steps.length} 步
                 </span>
               </h2>
 
-              {doc.steps.length === 0 ? (
+              {steps.length === 0 ? (
                 <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
                   <p className="text-4xl text-gray-300 mb-2">--</p>
                   <p className="text-gray-400">该轨迹暂无步骤数据</p>
@@ -697,7 +727,7 @@ export const AtifViewerPage: React.FC = () => {
                   {/* Vertical line */}
                   <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
 
-                  {doc.steps.map(step => (
+                  {steps.map(step => (
                     <StepCard
                       key={step.step_id}
                       step={step}

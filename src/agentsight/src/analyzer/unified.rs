@@ -1502,6 +1502,18 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
     }
 
     #[test]
+    fn test_extract_token_from_sse_continuation_no_usage_returns_none() {
+        // Continuation buffer with no parseable token data at all.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"response.output_text.delta\"}",
+        )];
+        let continuation = b"event: response.completed\ndata: {\"id\":\"resp_001\"}\n\n";
+        let result = analyzer.extract_token_from_sse(&events, Some(continuation), 1234, "test");
+        assert!(result.is_none(), "should return None when no usage found");
+    }
+
+    #[test]
     fn test_analyze_aggregated_response_only_with_sse() {
         use crate::aggregator::{AggregatedResponse, ConnectionId};
         use crate::parser::http::ParsedResponse;
