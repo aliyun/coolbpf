@@ -786,4 +786,479 @@ mod tests {
         let event = make_event("conv-poison", InterruptionType::DeadLoop);
         store.insert(&event).unwrap();
     }
+
+    // ── insert / get_by_id ──────────────────────────────────────────────────
+
+    #[test]
+    fn insert_and_get_by_id() {
+        let store = temp_store();
+        let mut event = make_event("conv-ins", InterruptionType::LlmError);
+        event.interruption_id = "int-get-1".to_string();
+        event.detail = Some(r#"{"error":"bad request"}"#.to_string());
+        store.insert(&event).unwrap();
+
+        let row = store
+            .get_by_id("int-get-1")
+            .unwrap()
+            .expect("row should exist");
+        assert_eq!(row.interruption_id, "int-get-1");
+        assert_eq!(row.interruption_type, "llm_error");
+        assert_eq!(row.severity, "critical");
+        assert!(!row.resolved);
+        assert_eq!(row.detail.as_deref(), Some(r#"{"error":"bad request"}"#));
+    }
+
+    #[test]
+    fn insert_duplicate_ignored() {
+        let store = temp_store();
+        let event = make_event("conv-dup", InterruptionType::RateLimit);
+        // First insert
+        store.insert(&event).unwrap();
+        // Second insert with same interruption_id is silently ignored
+        store.insert(&event).unwrap();
+
+        let records = store
+            .list(0, i64::MAX, None, None, None, None, 100)
+            .unwrap();
+        assert_eq!(records.len(), 1, "duplicate should be ignored");
+    }
+
+    #[test]
+    fn insert_batch_inserts_multiple() {
+        let store = temp_store();
+        let events: Vec<_> = (0..3)
+            .map(|i| {
+                let mut e = make_event("conv-batch", InterruptionType::SseTruncated);
+                e.interruption_id = format!("int-batch-{i}");
+                e
+            })
+            .collect();
+        store.insert_batch(&events).unwrap();
+
+        let records = store
+            .list(0, i64::MAX, None, None, None, None, 100)
+            .unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    // ── resolve ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_existing_event() {
+        let store = temp_store();
+        let mut event = make_event("conv-resolve", InterruptionType::AuthError);
+        event.interruption_id = "int-resolve-1".to_string();
+        store.insert(&event).unwrap();
+
+        assert!(store.resolve("int-resolve-1").unwrap());
+
+        let row = store.get_by_id("int-resolve-1").unwrap().unwrap();
+        assert!(row.resolved);
+    }
+
+    #[test]
+    fn resolve_nonexistent_returns_false() {
+        let store = temp_store();
+        assert!(!store.resolve("no-such-id").unwrap());
+    }
+
+    // ── list with filters ────────────────────────────────────────────────────
+
+    #[test]
+    fn list_filters_by_agent_name_type_severity_resolved() {
+        let store = temp_store();
+        let mut e1 = make_event("conv-f1", InterruptionType::RateLimit);
+        e1.interruption_id = "int-f1".to_string();
+        e1.agent_name = Some("Agent-A".to_string());
+        e1.severity = crate::interruption::types::Severity::Medium;
+        store.insert(&e1).unwrap();
+
+        let mut e2 = make_event("conv-f2", InterruptionType::AuthError);
+        e2.interruption_id = "int-f2".to_string();
+        e2.agent_name = Some("Agent-B".to_string());
+        e2.severity = crate::interruption::types::Severity::High;
+        store.insert(&e2).unwrap();
+
+        // Filter by agent_name
+        let rows = store
+            .list(0, i64::MAX, Some("Agent-A"), None, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interruption_id, "int-f1");
+
+        // Filter by type
+        let rows = store
+            .list(0, i64::MAX, None, Some("auth_error"), None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interruption_id, "int-f2");
+
+        // Filter by severity
+        let rows = store
+            .list(0, i64::MAX, None, None, Some("medium"), None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interruption_id, "int-f1");
+
+        // Filter by resolved=false (both unresolved)
+        let rows = store
+            .list(0, i64::MAX, None, None, None, Some(false), 100)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+
+        // Resolve one, then filter resolved=true
+        store.resolve("int-f1").unwrap();
+        let rows = store
+            .list(0, i64::MAX, None, None, None, Some(true), 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interruption_id, "int-f1");
+    }
+
+    #[test]
+    fn list_respects_time_range_and_limit() {
+        let store = temp_store();
+        for i in 0..5 {
+            let mut e = make_event("conv-tr", InterruptionType::LlmError);
+            e.interruption_id = format!("int-tr-{i}");
+            e.occurred_at_ns = 1_000_000_000 + i * 1_000_000_000;
+            store.insert(&e).unwrap();
+        }
+
+        // Time range: only events at 2B and 3B ns
+        let rows = store
+            .list(2_000_000_000, 3_000_000_000, None, None, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+
+        // Limit 2 (most recent first)
+        let rows = store.list(0, i64::MAX, None, None, None, None, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].occurred_at_ns >= rows[1].occurred_at_ns,
+            "should be DESC order"
+        );
+    }
+
+    // ── list_by_session / list_by_conversation ───────────────────────────────
+
+    #[test]
+    fn list_by_session_returns_matching_rows() {
+        let store = temp_store();
+        let mut e1 = make_event("conv-ls", InterruptionType::DeadLoop);
+        e1.interruption_id = "int-ls-1".to_string();
+        e1.session_id = Some("sess-A".to_string());
+        store.insert(&e1).unwrap();
+
+        let mut e2 = make_event("conv-ls2", InterruptionType::RetryStorm);
+        e2.interruption_id = "int-ls-2".to_string();
+        e2.session_id = Some("sess-B".to_string());
+        store.insert(&e2).unwrap();
+
+        let rows = store.list_by_session("sess-A").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].interruption_id, "int-ls-1");
+    }
+
+    #[test]
+    fn list_by_conversation_returns_matching_rows() {
+        let store = temp_store();
+        let mut e1 = make_event("conv-lc", InterruptionType::TokenLimit);
+        e1.interruption_id = "int-lc-1".to_string();
+        store.insert(&e1).unwrap();
+
+        let rows = store.list_by_conversation("conv-lc").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].conversation_id.as_deref(), Some("conv-lc"));
+    }
+
+    // ── stats ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stats_groups_by_type() {
+        let store = temp_store();
+        for i in 0..2 {
+            let mut e = make_event("conv-st", InterruptionType::RateLimit);
+            e.interruption_id = format!("int-st-rl-{i}");
+            e.occurred_at_ns = 5_000_000_000;
+            store.insert(&e).unwrap();
+        }
+        let mut e = make_event("conv-st2", InterruptionType::AgentCrash);
+        e.interruption_id = "int-st-crash".to_string();
+        e.occurred_at_ns = 5_000_000_000;
+        store.insert(&e).unwrap();
+
+        let stats = store.stats(0, i64::MAX).unwrap();
+        // rate_limit should have count=2, agent_crash count=1
+        let rl = stats
+            .iter()
+            .find(|s| s.interruption_type == "rate_limit")
+            .unwrap();
+        assert_eq!(rl.count, 2);
+        let crash = stats
+            .iter()
+            .find(|s| s.interruption_type == "agent_crash")
+            .unwrap();
+        assert_eq!(crash.count, 1);
+    }
+
+    // ── count_unresolved_by_session/conversation_detailed ─────────────────────
+
+    #[test]
+    fn count_unresolved_by_session_detailed_groups_correctly() {
+        let store = temp_store();
+        let mut e1 = make_event("conv-csd1", InterruptionType::DeadLoop);
+        e1.interruption_id = "int-csd-1".to_string();
+        e1.session_id = Some("sess-X".to_string());
+        store.insert(&e1).unwrap();
+
+        // Resolved event should be excluded
+        let mut e2 = make_event("conv-csd2", InterruptionType::DeadLoop);
+        e2.interruption_id = "int-csd-2".to_string();
+        e2.session_id = Some("sess-X".to_string());
+        store.insert(&e2).unwrap();
+        store.resolve("int-csd-2").unwrap();
+
+        let rows = store
+            .count_unresolved_by_session_detailed(0, i64::MAX)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "only unresolved rows should appear");
+        assert_eq!(rows[0].0, "sess-X");
+        assert_eq!(rows[0].3, 1, "count should be 1 (resolved excluded)");
+    }
+
+    #[test]
+    fn count_unresolved_by_conversation_detailed_groups_correctly() {
+        let store = temp_store();
+        let mut e = make_event("conv-ccd", InterruptionType::LlmError);
+        e.interruption_id = "int-ccd-1".to_string();
+        store.insert(&e).unwrap();
+
+        let rows = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "conv-ccd");
+    }
+
+    // ── OOM dedup ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oom_event_exists_and_latest_oom_event_ns() {
+        let store = temp_store();
+        let mut event = make_event("conv-oom", InterruptionType::AgentCrash);
+        event.interruption_id = "int-oom-1".to_string();
+        event.pid = Some(9999);
+        event.occurred_at_ns = 7_000_000_000;
+        event.detail = Some(r#"{"oom":true,"reason":"out of memory"}"#.to_string());
+        store.insert(&event).unwrap();
+
+        assert!(store.oom_event_exists(9999, 7_000_000_000));
+        assert!(!store.oom_event_exists(9999, 8_000_000_000));
+        assert!(!store.oom_event_exists(1111, 7_000_000_000));
+        assert_eq!(store.latest_oom_event_ns(), 7_000_000_000);
+    }
+
+    #[test]
+    fn latest_oom_event_ns_returns_zero_when_no_oom() {
+        let store = temp_store();
+        assert_eq!(store.latest_oom_event_ns(), 0);
+    }
+
+    // ── exists_for_call ──────────────────────────────────────────────────────
+
+    #[test]
+    fn exists_for_call_dedup() {
+        let store = temp_store();
+        let mut event = make_event("conv-efc", InterruptionType::SseTruncated);
+        event.interruption_id = "int-efc-1".to_string();
+        event.call_id = Some("call-abc".to_string());
+        store.insert(&event).unwrap();
+
+        assert!(store.exists_for_call("call-abc", &InterruptionType::SseTruncated));
+        assert!(!store.exists_for_call("call-abc", &InterruptionType::RateLimit));
+        assert!(!store.exists_for_call("call-xyz", &InterruptionType::SseTruncated));
+    }
+
+    // ── exists_for_conversation ──────────────────────────────────────────────
+
+    #[test]
+    fn exists_for_conversation_no_filter_matches_any() {
+        let store = temp_store();
+        let mut e = make_event("conv-efn", InterruptionType::RetryStorm);
+        e.interruption_id = "int-efn-1".to_string();
+        store.insert(&e).unwrap();
+
+        // No error_msg filter: any unresolved row with same conv+type matches
+        assert!(store.exists_for_conversation("conv-efn", &InterruptionType::RetryStorm, None));
+        assert!(!store.exists_for_conversation("conv-efn", &InterruptionType::DeadLoop, None));
+    }
+
+    #[test]
+    fn exists_for_conversation_resolved_not_matched() {
+        let store = temp_store();
+        let mut e = make_event("conv-efr", InterruptionType::LlmError);
+        e.interruption_id = "int-efr-1".to_string();
+        store.insert(&e).unwrap();
+        store.resolve("int-efr-1").unwrap();
+
+        // Resolved rows should not match (resolved=0 filter in SQL)
+        assert!(!store.exists_for_conversation("conv-efr", &InterruptionType::LlmError, None));
+    }
+
+    #[test]
+    fn exists_for_conversation_json_error_matching() {
+        let store = temp_store();
+        let mut e = make_event("conv-efj", InterruptionType::LlmError);
+        e.interruption_id = "int-efj-1".to_string();
+        e.detail = Some(r#"{"error":"rate limit exceeded"}"#.to_string());
+        store.insert(&e).unwrap();
+
+        // Same error substring should match
+        assert!(store.exists_for_conversation(
+            "conv-efj",
+            &InterruptionType::LlmError,
+            Some("rate limit exceeded")
+        ));
+        // Unrelated error should not match
+        assert!(!store.exists_for_conversation(
+            "conv-efj",
+            &InterruptionType::LlmError,
+            Some("completely different error")
+        ));
+    }
+
+    // ── agent_crash_exists_recent ────────────────────────────────────────────
+
+    #[test]
+    fn agent_crash_exists_recent_finds_recent_crash() {
+        let store = temp_store();
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let mut e = make_event("conv-acer", InterruptionType::AgentCrash);
+        e.interruption_id = "int-acer-1".to_string();
+        e.pid = Some(5555);
+        e.occurred_at_ns = now_ns;
+        store.insert(&e).unwrap();
+
+        assert!(store.agent_crash_exists_recent(5555, 60));
+        assert!(!store.agent_crash_exists_recent(6666, 60));
+    }
+
+    // ── purge ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn purge_before_deletes_old_rows() {
+        let store = temp_store();
+        let mut e1 = make_event("conv-pb1", InterruptionType::LlmError);
+        e1.interruption_id = "int-pb-1".to_string();
+        e1.occurred_at_ns = 1_000;
+        store.insert(&e1).unwrap();
+
+        let mut e2 = make_event("conv-pb2", InterruptionType::LlmError);
+        e2.interruption_id = "int-pb-2".to_string();
+        e2.occurred_at_ns = 10_000_000_000;
+        store.insert(&e2).unwrap();
+
+        let deleted = store.purge_before(5_000_000_000).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining = store
+            .list(0, i64::MAX, None, None, None, None, 100)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].interruption_id, "int-pb-2");
+    }
+
+    #[test]
+    fn purge_old_and_oversized_age_based() {
+        let store = temp_store();
+        let mut e = make_event("conv-poo", InterruptionType::LlmError);
+        e.interruption_id = "int-poo-1".to_string();
+        e.occurred_at_ns = 1; // very old
+        store.insert(&e).unwrap();
+
+        let deleted = store.purge_old_and_oversized(1, 0).unwrap();
+        assert_eq!(
+            deleted, 1,
+            "very old row should be purged with 1-day retention"
+        );
+    }
+
+    // ── pure helper functions ────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_error_key_plain_string() {
+        assert_eq!(
+            normalize_error_key("Rate Limit Exceeded"),
+            "rate limit exceeded"
+        );
+    }
+
+    #[test]
+    fn normalize_error_key_json_message() {
+        let json = r#"{"error":{"message":"model overloaded"}}"#;
+        assert_eq!(normalize_error_key(json), "model overloaded");
+    }
+
+    #[test]
+    fn normalize_error_key_top_level_message() {
+        let json = r#"{"message":"bad request"}"#;
+        assert_eq!(normalize_error_key(json), "bad request");
+    }
+
+    #[test]
+    fn normalize_error_key_embedded_json() {
+        let raw = r#"curl error: {"error":{"message":"connection refused"}}"#;
+        assert_eq!(normalize_error_key(raw), "connection refused");
+    }
+
+    #[test]
+    fn extract_message_from_json_nested_error() {
+        let json = r#"{"error":{"message":"nested msg"}}"#;
+        assert_eq!(
+            extract_message_from_json(json),
+            Some("nested msg".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_message_from_json_top_level() {
+        let json = r#"{"message":"top msg"}"#;
+        assert_eq!(extract_message_from_json(json), Some("top msg".to_string()));
+    }
+
+    #[test]
+    fn extract_message_from_json_no_message() {
+        let json = r#"{"error":"just a string"}"#;
+        assert_eq!(extract_message_from_json(json), None);
+    }
+
+    #[test]
+    fn extract_message_from_json_invalid() {
+        assert_eq!(extract_message_from_json("not json"), None);
+    }
+
+    #[test]
+    fn errors_match_identical() {
+        assert!(errors_match("rate limit", "rate limit"));
+    }
+
+    #[test]
+    fn errors_match_case_insensitive() {
+        assert!(errors_match("Rate Limit", "rate limit"));
+    }
+
+    #[test]
+    fn errors_match_substring_containment() {
+        assert!(errors_match("rate limit exceeded", "rate limit"));
+        assert!(errors_match("rate limit", "rate limit exceeded"));
+    }
+
+    #[test]
+    fn errors_match_unrelated() {
+        assert!(!errors_match("rate limit", "auth error"));
+    }
 }
