@@ -30,6 +30,7 @@ describe('security dashboard verdict utilities', () => {
   it.each([
     ['tampered', 'risk', 'bg-red-100'],
     ['drifted', 'warning', 'bg-amber-100'],
+    ['unmanaged', 'warning', 'bg-amber-100'],
   ] as const)('classifies %s as %s', (verdict, tone, badgeClass) => {
     expect(verdictTone(verdict)).toBe(tone);
     expect(verdictBadgeClasses(verdict)).toContain(badgeClass);

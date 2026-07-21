@@ -190,6 +190,7 @@ export function verdictTone(value: string | null | undefined): VerdictTone {
   }
   if (
     v === 'drifted'
+    || v === 'unmanaged'
     || v.includes('warn')
     || v.includes('review')
     || v.includes('caution')

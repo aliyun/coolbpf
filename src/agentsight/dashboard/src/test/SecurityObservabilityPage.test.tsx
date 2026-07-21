@@ -232,10 +232,10 @@ describe('SecurityObservabilityPage', () => {
     mockFetchSecuritySummary.mockResolvedValueOnce({
       state: 'ok',
       data: {
-        total: 2,
-        by_category: { skill_ledger: 2 },
-        by_event_type: { skill_ledger_show: 2 },
-        by_result: { succeeded: 2 },
+        total: 3,
+        by_category: { skill_ledger: 3 },
+        by_event_type: { skill_ledger_show: 3 },
+        by_result: { succeeded: 3 },
         affected_sessions: 0,
         affected_runs: 0,
         latest_events: [summaryEvent],
@@ -246,7 +246,11 @@ describe('SecurityObservabilityPage', () => {
       data: {
         group_by: groupBy,
         items: groupBy === 'verdict'
-          ? [{ value: 'tampered', count: 1 }, { value: 'drifted', count: 1 }]
+          ? [
+            { value: 'tampered', count: 1 },
+            { value: 'drifted', count: 1 },
+            { value: 'unmanaged', count: 1 },
+          ]
           : defaultSecurityCountItems(groupBy),
       },
     }));
@@ -261,10 +265,12 @@ describe('SecurityObservabilityPage', () => {
       expect(within(recentEventsCard!).getByText('tampered')).toHaveClass('bg-red-100');
     });
     expect(await screen.findByText('存在 1 个风险 verdict')).toBeInTheDocument();
-    expect(screen.getByText('风险 1 / Warning 1')).toBeInTheDocument();
-    const driftedBadge = screen.getAllByText('drifted')
-      .find((element) => element.classList.contains('bg-amber-100'));
-    expect(driftedBadge).toBeDefined();
+    expect(screen.getByText('风险 1 / Warning 2')).toBeInTheDocument();
+    for (const verdict of ['drifted', 'unmanaged']) {
+      const warningBadge = screen.getAllByText(verdict)
+        .find((element) => element.classList.contains('bg-amber-100'));
+      expect(warningBadge).toBeDefined();
+    }
   });
 
   it('uses exact verdict counts instead of the overview event sample', async () => {
