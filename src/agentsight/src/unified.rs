@@ -1045,6 +1045,27 @@ impl AgentSight {
     /// column on the corresponding `genai_events` row when SQLite is in use.
     fn detect_and_store_interruptions(&self, events: &[GenAISemanticEvent]) {
         if let Some(ref istore) = self.interruption_store {
+            // Build a call_id → (session_id, conversation_id) lookup from
+            // LLMCall events in this batch, so ToolUse events can inherit
+            // the conversation context of their parent call.
+            let call_context: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+                events
+                    .iter()
+                    .filter_map(|e| {
+                        if let GenAISemanticEvent::LLMCall(c) = e {
+                            Some((
+                                c.call_id.clone(),
+                                (
+                                    c.metadata.get("session_id").cloned(),
+                                    c.metadata.get("conversation_id").cloned(),
+                                ),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
             for event in events {
                 if let GenAISemanticEvent::LLMCall(llm_call) = event {
                     let interruptions = self.interruption_detector.detect(llm_call);
@@ -1188,6 +1209,47 @@ impl AgentSight {
                                 }
                             }
                         }
+                    }
+                } else if let GenAISemanticEvent::ToolUse(tool) = event {
+                    // ── Tool failure detection ──────────────────────────────
+                    let (session_id, conversation_id) = tool
+                        .parent_llm_call_id
+                        .as_ref()
+                        .and_then(|cid| call_context.get(cid))
+                        .cloned()
+                        .unwrap_or((None, None));
+                    let interruptions = self.interruption_detector.detect_tool_use(
+                        tool,
+                        session_id,
+                        conversation_id,
+                    );
+                    for ie in &interruptions {
+                        // Deduplicate against unresolved interruptions already recorded
+                        // for this conversation, mirroring the LLMCall path above: a
+                        // tool that keeps failing the same way in a loop should not
+                        // flood the store with one row per attempt.
+                        if let Some(ref cid) = ie.conversation_id {
+                            let error_msg = tool.error.as_deref();
+                            if istore.exists_for_conversation(cid, &ie.interruption_type, error_msg)
+                            {
+                                log::debug!(
+                                    "Skipping duplicate {:?} for conversation_id={} tool={}",
+                                    ie.interruption_type,
+                                    cid,
+                                    tool.tool_name
+                                );
+                                continue;
+                            }
+                        }
+                        if let Err(e) = istore.insert(ie) {
+                            log::warn!("Failed to store tool_failure interruption: {e}");
+                        }
+                        crate::genai::logtail::export_interruption_events(std::slice::from_ref(ie));
+                        log::warn!(
+                            "ToolFailure detected: tool={} error={:?}",
+                            tool.tool_name,
+                            tool.error
+                        );
                     }
                 }
             }

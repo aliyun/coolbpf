@@ -597,6 +597,12 @@ export const INTERRUPTION_TYPE_CN: Record<string, string> = {
   safety_filter: '安全过滤',
   retry_storm: '重试风暴',
   dead_loop: '死循环',
+  tool_failure: '工具调用失败',
+  empty_response: '空响应',
+  resource_exhaustion: '资源耗尽',
+  slow_response: '响应过慢',
+  state_machine_error: '状态机异常',
+  unauthorized_action: '未授权操作',
 };
 
 /**
