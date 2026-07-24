@@ -87,6 +87,15 @@ pub async fn auth_verify(data: web::Data<AppState>, req: actix_web::HttpRequest)
         return HttpResponse::Ok().json(json!({"authenticated": true}));
     }
 
+    // Loopback requests are trusted — consistent with AuthMiddleware bypass.
+    let is_loopback = req
+        .peer_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
+    if is_loopback {
+        return HttpResponse::Ok().json(json!({"authenticated": true}));
+    }
+
     // Check session cookie
     let authenticated = req
         .cookie("agentsight_session")
@@ -1071,6 +1080,7 @@ mod tests {
             evaluation_store: Arc::clone(&evaluation_store),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         });
         let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
 
@@ -1275,6 +1285,7 @@ mod tests {
             interruption_store: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1402,6 +1413,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
+            optimize: None,
         })
     }
 
@@ -1499,6 +1511,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1635,6 +1648,7 @@ mod tests {
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1656,6 +1670,7 @@ mod tests {
             ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
+            optimize: None,
         })
     }
 
@@ -1840,6 +1855,7 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
                 }))
                 .service(metrics),
         )
@@ -2269,6 +2285,7 @@ mod tests {
                         timeout_ms: 0,
                     },
                     auth,
+                    optimize: None,
                 }))
                 .service(list_sessions)
                 .service(list_agent_names)
