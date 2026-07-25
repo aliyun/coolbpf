@@ -98,6 +98,8 @@ eBPF Probes → Event → Parser → ParsedMessage → Aggregator → Aggregated
 | **Unified** | `src/unified.rs` | 主编排器 | `AgentSight` |
 | **Opt** | `crates/agentsight-opt/` | 三维优化分析（准确性/性能/成本），workspace 成员 crate | `AnalyzePipeline`, `LlmClient`, `Trajectory` |
 | **OptStore** | `crates/agentsight-opt-store/` | 优化结果 SQLite 持久化（optimization.db） | `OptimizationStore`, `Dimension` |
+| **Atif (v1.7)** | `crates/agentsight-atif/` | ATIF v1.7 公共 schema 叶子 crate（采集链路使用；主 crate `src/atif` 仍为 v1.6 导出链路） | `AtifTrajectory`, `Step`, `ATIF_SCHEMA_VERSION` |
+| **TrajectoryCollector** | `crates/agentsight-trajectory-collector/` | 定时扫描 Qoder/QoderWork 会话目录，JSONL → ATIF v1.7 入库（trajectories.db，仅 trace 模式，默认关闭）；serve 侧经 `/api/trajectories` 只读查询 | `CollectorConfig`, `run_collector_loop`, `TrajectoryStore` |
 
 ## 5. Critical Code Paths
 
@@ -230,6 +232,9 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy`（后三者需 LLM 配置，10–60s） |
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
 
 ## 9. Frontend
 
@@ -272,6 +277,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | 审计 | `features.audit` | `true` | LLM 调用审计持久化 |
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
+| 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
 
 ### 运行时资源上限（`runtime_limits`）
 
