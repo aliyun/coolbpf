@@ -64,6 +64,35 @@ pub struct AppState {
     pub trajectory_store: Option<Arc<TrajectoryStore>>,
 }
 
+impl AppState {
+    /// Return a trajectory store if collection has produced `trajectories.db`.
+    ///
+    /// `serve` is commonly started before `trace`; in that case the DB does not
+    /// exist at server startup. Re-checking on demand lets the UI show newly
+    /// collected log sessions without requiring a server restart.
+    pub fn trajectory_store(&self) -> Option<Arc<TrajectoryStore>> {
+        if let Some(store) = &self.trajectory_store {
+            return Some(Arc::clone(store));
+        }
+
+        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        if !db_path.exists() {
+            return None;
+        }
+
+        match TrajectoryStore::new_with_path(&db_path) {
+            Ok(store) => {
+                log::info!("Trajectory store opened lazily at {db_path:?}");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                log::warn!("Failed to lazily open trajectory store: {e}");
+                None
+            }
+        }
+    }
+}
+
 // ─── Static file handler ─────────────────────────────────────────────────────
 
 /// Serve embedded frontend files.

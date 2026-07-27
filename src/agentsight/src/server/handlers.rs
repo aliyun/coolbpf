@@ -74,6 +74,18 @@ pub async fn auth_login(
 pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(json!({
         "auth_enabled": data.auth.enabled,
+        "mode": "linux",
+        "capabilities": [
+            "agent_observability",
+            "sessions",
+            "token_savings",
+            "optimization",
+            "skills",
+            "security",
+            "atif",
+            "settings",
+            "agent_health"
+        ],
     }))
 }
 
@@ -3250,7 +3262,7 @@ pub async fn list_trajectories(
     data: web::Data<AppState>,
     query: web::Query<TrajectoryQuery>,
 ) -> impl Responder {
-    let Some(ref tstore) = data.trajectory_store else {
+    let Some(tstore) = data.trajectory_store() else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
     // Normalize: <= 0 falls back to default; cap at hard upper bound to
@@ -3279,7 +3291,7 @@ pub async fn list_trajectories(
 /// dropdowns. Must be registered before `/trajectories/{session_id}`.
 #[get("/trajectories/filters")]
 pub async fn trajectory_filters(data: web::Data<AppState>) -> impl Responder {
-    let Some(ref tstore) = data.trajectory_store else {
+    let Some(tstore) = data.trajectory_store() else {
         return HttpResponse::Ok().json(serde_json::json!({
             "projects": [], "sources": [], "agent_names": []
         }));
@@ -3303,7 +3315,7 @@ pub async fn get_trajectory_detail(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let Some(ref tstore) = data.trajectory_store else {
+    let Some(tstore) = data.trajectory_store() else {
         return HttpResponse::NotFound().json(
             serde_json::json!({"error": "not_found", "message": "Trajectory store not available"}),
         );

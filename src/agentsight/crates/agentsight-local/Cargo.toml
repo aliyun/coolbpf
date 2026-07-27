@@ -1,0 +1,23 @@
+[package]
+name = "agentsight-local"
+version = "0.1.0"
+edition.workspace = true
+description = "Cross-platform local AI agent trajectory viewer — discover JSONL session files and display as ATIF trajectories. No eBPF, no SQLite."
+
+[dependencies]
+agentsight-atif = { path = "../agentsight-atif" }
+agentsight-opt = { path = "../agentsight-opt" }
+agentsight-opt-store = { path = "../agentsight-opt-store" }
+agentsight-trajectory-collector = { path = "../agentsight-trajectory-collector" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = "6"
+actix-web = "4"
+actix-cors = "0.7"
+include_dir = "0.7"
+log = "0.4"
+sysinfo = "0.33"
+
+[dev-dependencies]
+actix-web = { version = "4", features = ["macros"] }

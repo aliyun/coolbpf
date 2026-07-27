@@ -4,6 +4,8 @@
 
 eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. AgentSight is an observability component of [ANOLISA](../../README.md).
 
+> **macOS support**: On macOS, AgentSight compiles as a lightweight binary with `agentsight serve` (Agent Dashboard + local session viewer) but without eBPF tracing. The same source tree produces a full-featured binary on Linux and a viewer-only binary on macOS via OS-conditional compilation.
+
 ## Features
 
 - **Zero-Intrusion Monitoring** — eBPF kernel probes capture events without modifying agent code or configurations.
@@ -69,6 +71,8 @@ agentsight/
 
 ## CLI Commands
 
+> Commands `trace`, `token`, `audit`, `discover`, `metrics`, `interruption`, `skill-metrics`, and `summary` require Linux eBPF and are not available on macOS. Only `serve` works cross-platform.
+
 ### `agentsight trace`
 
 Start eBPF-based tracing of AI agent activity.
@@ -120,6 +124,8 @@ agentsight audit --summary
 ### `agentsight serve`
 
 Start the HTTP API server and serve the embedded Dashboard UI.
+
+> **macOS**: Runs a lightweight server (Agent Dashboard + local session viewer) without SQLite or eBPF. The `--db` and `--config` flags are Linux-only.
 
 ```bash
 # Start with default settings (binds to 127.0.0.1:7396)
@@ -258,11 +264,50 @@ cd src/agentsight
 # Verify dependencies (optional but recommended)
 ./scripts/check-deps.sh
 
-# Build
-cargo build --release
+# Build frontend and Rust binary with embedded Dashboard UI
+make build-all
 ```
 
 The binary is output to `target/release/agentsight`.
+
+> `cargo build --release` only compiles Rust. It does not rebuild the embedded Dashboard UI, so use `make build-all` for user-facing builds.
+
+### Build on macOS
+
+macOS builds the lightweight `agentsight serve` local viewer. It does not require libbpf, clang/llvm, kernel headers, root, or Linux BPF capabilities.
+
+**Prerequisites:**
+
+| Component | Version | Required for |
+|-----------|---------|-------------|
+| Rust | >= 1.80 | Compile Rust code |
+| Node.js | >= 16 | Frontend build |
+| npm | >= 8 | Frontend dependency management |
+
+**Build steps:**
+
+```bash
+cd src/agentsight
+
+# Build the agentsight-local frontend and the macOS serve-only binary
+make build-mac
+```
+
+The binary is output to `target/release/agentsight`.
+
+**Usage on macOS:**
+
+```bash
+# Start the Agent Dashboard + local session viewer
+target/release/agentsight serve
+
+# Bind to a custom host/port
+target/release/agentsight serve --host 0.0.0.0 --port 8080
+```
+
+Open `http://127.0.0.1:7396` to view the Agent Dashboard. The macOS server scans running AI agent processes and reads local ATIF trajectory files from `~/.agentsight/sessions/`.
+
+> **macOS limitations**: eBPF tracing commands (`trace`, `discover`, `token`, `audit`, `metrics`, `interruption`, `skill-metrics`, `summary`) are Linux-only and not available on macOS. The `--db` and `--config` flags are also Linux-only because macOS `serve` uses the lightweight `agentsight-local` server without SQLite-backed trace storage.
 
 ### Install via RPM
 

@@ -4,6 +4,8 @@
 
 基于 eBPF 的 AI Agent 可观测性工具，在 Linux 系统上提供零侵入式的 LLM API 调用监控、Token 用量统计、进程行为追踪和 SSL/TLS 流量捕获。AgentSight 是 [ANOLISA](../../README_zh.md) 的可观测性组件。
 
+> **macOS 支持**：在 macOS 上，AgentSight 会编译为轻量级 `agentsight serve` 本地查看器（Agent Dashboard + 本地会话查看），不包含 eBPF 追踪能力。同一份源码通过操作系统条件编译，在 Linux 上生成完整功能二进制，在 macOS 上生成仅查看器二进制。
+
 ## 特性
 
 - **零侵入式监控** — 通过 eBPF 内核探针捕获事件，无需修改 Agent 代码或配置。
@@ -69,6 +71,8 @@ agentsight/
 
 ## CLI 命令
 
+> `trace`、`token`、`audit`、`discover`、`metrics`、`interruption`、`skill-metrics`、`summary` 依赖 Linux eBPF，在 macOS 上不可用。macOS 仅支持 `serve` 本地查看器。
+
 ### `agentsight trace`
 
 启动基于 eBPF 的 AI Agent 活动追踪。
@@ -121,6 +125,8 @@ agentsight audit --summary
 
 启动 HTTP API 服务器，同时提供嵌入式 Dashboard UI。
 
+> **macOS**：启动轻量级 `agentsight-local` 服务器，用于 Agent Dashboard 和本地会话查看，不使用 eBPF 或 SQLite；`--db` 和 `--config` 参数仅 Linux 可用。
+
 ```bash
 # 使用默认配置启动（绑定到 127.0.0.1:7396）
 agentsight serve
@@ -128,7 +134,7 @@ agentsight serve
 # 绑定到所有网络接口并指定端口
 agentsight serve --host 0.0.0.0 --port 8080
 
-# 指定数据库文件路径
+# 指定数据库文件路径（仅 Linux）
 agentsight serve --db /path/to/genai_events.db
 ```
 
@@ -252,6 +258,43 @@ cargo build --release
 ```
 
 二进制文件输出至 `target/release/agentsight`。
+
+### macOS 构建
+
+macOS 构建的是轻量级 `agentsight serve` 本地查看器，不需要 libbpf、clang/llvm、内核头文件、root 权限或 Linux BPF capabilities。
+
+**依赖要求：**
+
+| 组件 | 版本 | 用途 |
+|------|------|------|
+| Rust | >= 1.80 | 编译 Rust 代码 |
+| Node.js | >= 16 | 前端构建 |
+| npm | >= 8 | 前端依赖管理 |
+
+**构建步骤：**
+
+```bash
+cd src/agentsight
+
+# 构建 agentsight-local 前端和 macOS serve-only 二进制
+make build-mac
+```
+
+二进制文件输出至 `target/release/agentsight`。
+
+**macOS 使用：**
+
+```bash
+# 启动 Agent Dashboard + 本地会话查看器
+target/release/agentsight serve
+
+# 自定义 host/port
+target/release/agentsight serve --host 0.0.0.0 --port 8080
+```
+
+打开 `http://127.0.0.1:7396` 查看 Dashboard。macOS 服务器会扫描本机运行中的 AI Agent 进程，并读取 `~/.agentsight/sessions/` 下的本地 ATIF 轨迹文件。
+
+> **macOS 限制**：`trace`、`discover`、`token`、`audit`、`metrics`、`interruption`、`skill-metrics`、`summary` 等 eBPF 追踪命令仅 Linux 可用。`--db` 和 `--config` 参数也仅 Linux 可用，因为 macOS `serve` 使用不带 SQLite 追踪存储的轻量级 `agentsight-local` 服务器。
 
 ### 通过 RPM 安装
 
