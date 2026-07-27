@@ -1078,6 +1078,75 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_system_text_string() {
+        let system = serde_json::json!("You are helpful");
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&system),
+            Some("You are helpful".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_system_text_empty_string() {
+        let system = serde_json::json!("");
+        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+    }
+
+    #[test]
+    fn test_extract_system_text_array() {
+        let system = serde_json::json!([
+            {"type": "text", "text": "Part 1"},
+            {"type": "text", "text": "Part 2"}
+        ]);
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&system),
+            Some("Part 1\nPart 2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_system_text_empty_array() {
+        let system = serde_json::json!([]);
+        assert_eq!(GenAIBuilder::extract_system_text(&system), None);
+    }
+
+    #[test]
+    fn test_extract_system_text_non_text() {
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&serde_json::json!(123)),
+            None
+        );
+        assert_eq!(
+            GenAIBuilder::extract_system_text(&serde_json::Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_messages_view_anthropic_system() {
+        let body = serde_json::json!({
+            "model": "claude-3",
+            "system": "You are helpful",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions.as_deref(), Some("You are helpful"));
+    }
+
+    #[test]
+    fn test_extract_messages_view_anthropic_system_array() {
+        let body = serde_json::json!({
+            "model": "claude-3",
+            "system": [{"type": "text", "text": "sys prompt"}],
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(instructions.as_deref(), Some("sys prompt"));
+    }
+
+    #[test]
     fn test_extract_message_text_string() {
         let msg = serde_json::json!({"role": "user", "content": "hello"});
         assert_eq!(

@@ -744,8 +744,9 @@ mod tests {
     };
     use crate::analyzer::message::types::{
         AnthropicContentBlock, AnthropicMessage as AnthMsg, AnthropicMessageContent,
-        AnthropicRequest, AnthropicResponse, AnthropicUsage, MessageRole, OpenAIChatMessage,
-        OpenAIChoice, OpenAIContent, OpenAIRequest, OpenAIResponse,
+        AnthropicRequest, AnthropicResponse, AnthropicSystemBlock, AnthropicSystemPrompt,
+        AnthropicUsage, MessageRole, OpenAIChatMessage, OpenAIChoice, OpenAIContent, OpenAIRequest,
+        OpenAIResponse,
     };
     use crate::analyzer::{AnalysisResult, HttpRecord, ParsedApiMessage, TokenRecord};
     use crate::response_map::ResponseSessionMapper;
@@ -1115,6 +1116,83 @@ mod tests {
         );
         assert!(!call.request.stream);
         assert!(call.request.tools.is_some());
+    }
+
+    #[test]
+    fn test_build_request_anthropic_with_system_text() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![AnthMsg {
+                role: MessageRole::User,
+                content: AnthropicMessageContent::Text("Hi".to_string()),
+            }],
+            max_tokens: 200,
+            system: Some(AnthropicSystemPrompt::Text("You are helpful".to_string())),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .unwrap();
+        assert_eq!(call.request.messages.len(), 2);
+        assert_eq!(call.request.messages[0].role, "system");
+        assert_eq!(call.request.messages[1].role, "user");
+    }
+
+    #[test]
+    fn test_build_request_anthropic_with_system_blocks() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![],
+            max_tokens: 200,
+            system: Some(AnthropicSystemPrompt::Blocks(vec![
+                AnthropicSystemBlock {
+                    type_: "text".to_string(),
+                    text: Some("Part 1".to_string()),
+                    cache_control: None,
+                },
+                AnthropicSystemBlock {
+                    type_: "text".to_string(),
+                    text: Some("Part 2".to_string()),
+                    cache_control: None,
+                },
+            ])),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .unwrap();
+        assert_eq!(call.request.messages.len(), 1);
+        assert_eq!(call.request.messages[0].role, "system");
     }
 
     #[test]
