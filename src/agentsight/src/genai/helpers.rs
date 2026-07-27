@@ -251,11 +251,7 @@ impl GenAIBuilder {
                     .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
+                if text.is_empty() { None } else { Some(text) }
             }
             _ => None,
         }

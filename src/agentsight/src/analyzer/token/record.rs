@@ -42,7 +42,8 @@ pub struct TokenRecord {
 impl TokenRecord {
     /// Total tokens (input + output + cache)
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens
+            + self.output_tokens
             + self.cache_creation_tokens.unwrap_or(0)
             + self.cache_read_tokens.unwrap_or(0)
     }
