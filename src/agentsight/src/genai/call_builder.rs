@@ -66,12 +66,15 @@ impl GenAIBuilder {
         let response = self.build_response(&parsed_message, &http, &token_record);
 
         // Build token usage from TokenRecord
-        let token_usage = token_record.as_ref().map(|t| TokenUsage {
-            input_tokens: t.input_tokens as u32,
-            output_tokens: t.output_tokens as u32,
-            total_tokens: (t.input_tokens + t.output_tokens) as u32,
-            cache_creation_input_tokens: t.cache_creation_tokens.map(|v| v as u32),
-            cache_read_input_tokens: t.cache_read_tokens.map(|v| v as u32),
+        let token_usage = token_record.as_ref().map(|t| {
+            let cache = t.cache_creation_tokens.unwrap_or(0) + t.cache_read_tokens.unwrap_or(0);
+            TokenUsage {
+                input_tokens: t.input_tokens as u32,
+                output_tokens: t.output_tokens as u32,
+                total_tokens: (t.input_tokens + t.output_tokens + cache) as u32,
+                cache_creation_input_tokens: t.cache_creation_tokens.map(|v| v as u32),
+                cache_read_input_tokens: t.cache_read_tokens.map(|v| v as u32),
+            }
         });
 
         // Determine provider and model
@@ -326,18 +329,30 @@ impl GenAIBuilder {
             }
             Some(ParsedApiMessage::AnthropicMessage { request, .. }) => {
                 if let Some(req) = request.as_ref() {
-                    let msgs = req
-                        .messages
-                        .iter()
-                        .map(|m| {
-                            let role = format!("{:?}", m.role).to_lowercase();
-                            InputMessage {
-                                role,
-                                parts: Self::anthropic_message_content_to_parts(&m.content),
+                    let mut msgs: Vec<InputMessage> = Vec::new();
+                    // Anthropic carries the system prompt at the top-level
+                    // "system" field, not in the messages array. Inject it
+                    // as a synthetic system-role message so downstream
+                    // system_instructions extraction (SQLite storage, SLS
+                    // upload, call classification) picks it up.
+                    if let Some(system) = req.system.as_ref() {
+                        let text = system.as_text();
+                        if !text.is_empty() {
+                            msgs.push(InputMessage {
+                                role: "system".to_string(),
+                                parts: vec![MessagePart::Text { content: text }],
                                 name: None,
-                            }
-                        })
-                        .collect();
+                            });
+                        }
+                    }
+                    msgs.extend(req.messages.iter().map(|m| {
+                        let role = format!("{:?}", m.role).to_lowercase();
+                        InputMessage {
+                            role,
+                            parts: Self::anthropic_message_content_to_parts(&m.content),
+                            name: None,
+                        }
+                    }));
                     return LLMRequest {
                         messages: msgs,
                         temperature: req.temperature,
@@ -1009,7 +1024,7 @@ mod tests {
         let tu = call.token_usage.unwrap();
         assert_eq!(tu.input_tokens, 10);
         assert_eq!(tu.output_tokens, 20);
-        assert_eq!(tu.total_tokens, 30);
+        assert_eq!(tu.total_tokens, 38);
         assert_eq!(tu.cache_creation_input_tokens, Some(5));
         assert_eq!(tu.cache_read_input_tokens, Some(3));
     }
