@@ -584,4 +584,33 @@ mod tests {
             "qoder"
         );
     }
+
+    #[test]
+    fn test_default_scan_roots_uses_home_dir() {
+        // default_scan_roots() now uses dirs::home_dir() instead of /root + /home/*.
+        // Verify it returns roots under the current user's home directory.
+        let home = dirs::home_dir().expect("home_dir should be available");
+        let roots = default_scan_roots();
+
+        // If any roots exist, they must be under the home directory.
+        for root in &roots {
+            assert!(
+                root.dir.starts_with(&home),
+                "scan root {} should be under home {}",
+                root.dir.display(),
+                home.display()
+            );
+        }
+
+        // discover_sessions(None) should not panic and should return a Vec.
+        let sessions = discover_sessions(None);
+        for session in &sessions {
+            assert!(
+                session.path.starts_with(&home),
+                "discovered session {} should be under home {}",
+                session.path.display(),
+                home.display()
+            );
+        }
+    }
 }

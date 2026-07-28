@@ -41,7 +41,7 @@ impl TraceCommand {
 
         #[cfg(not(target_os = "linux"))]
         {
-            self.execute_local();
+            agentsight::local::trace::run_local_trace();
         }
     }
 }
@@ -131,55 +131,3 @@ impl TraceCommand {
         // `sight` drops here → Storage::drop → checkpoint
     }
 }
-
-// ─── macOS: trajectory collector only (no eBPF) ──────────────────────────────
-
-#[cfg(not(target_os = "linux"))]
-impl TraceCommand {
-    fn execute_local(&self) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let db_path = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("agentsight")
-            .join("trajectories.db");
-
-        if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let store = match agentsight_trajectory_collector::TrajectoryStore::new_with_path(&db_path)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to open trajectory store at {db_path:?}: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let scan_dirs = agentsight::local::server::local_trajectory_scan_dirs();
-        let config = agentsight_trajectory_collector::CollectorConfig {
-            scan_interval_secs: 300,
-            scan_dirs,
-            db_path: db_path.clone(),
-        };
-
-        // Run one immediate scan.
-        agentsight_trajectory_collector::scan_once(&store, &config);
-
-        let stop = Arc::new(AtomicBool::new(true));
-        let stop_clone = Arc::clone(&stop);
-
-        ctrlc::set_handler(move || {
-            println!("\nShutting down trajectory collector...");
-            stop_clone.store(false, Ordering::SeqCst);
-        })
-        .ok();
-
-        println!("Trajectory collector running. Press Ctrl+C to stop.");
-        agentsight_trajectory_collector::run_collector_loop(&config, &stop);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-use std::sync::Arc;
