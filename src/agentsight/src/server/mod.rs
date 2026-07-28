@@ -415,7 +415,7 @@ mod tests {
 
     use super::auth::DashboardAuth;
     use super::{
-        AppState, SecurityObservabilityConfig, configure_routes, serve_frontend,
+        AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes, serve_frontend,
         serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
@@ -425,6 +425,44 @@ mod tests {
         let config = SecurityObservabilityConfig::default();
 
         assert_eq!(config.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn trajectory_store_returns_some_when_already_set() {
+        let store = TrajectoryStore::new_with_path(std::path::Path::new(":memory:")).unwrap();
+        let state = test_app_state_with_trajectory_store(store);
+
+        assert!(state.trajectory_store().is_some());
+    }
+
+    #[test]
+    fn trajectory_store_returns_none_when_not_set_and_db_missing() {
+        let state = test_app_state(0);
+        // The default db path (/var/log/sysak/.agentsight/trajectories.db)
+        // should not exist in CI, so lazy loading returns None.
+        if crate::storage::sqlite::sibling_db_path("trajectories.db").exists() {
+            return; // db exists, can't test the "missing" path
+        }
+
+        assert!(state.trajectory_store().is_none());
+    }
+
+    #[test]
+    fn trajectory_store_lazily_opens_when_db_appears() {
+        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        let dir = db_path.parent().unwrap();
+        if std::fs::create_dir_all(dir).is_err() {
+            return; // no permission to create directory (CI without root)
+        }
+
+        // Create a valid trajectories.db, then drop the connection.
+        let _ = TrajectoryStore::new_with_path(&db_path).unwrap();
+
+        let state = test_app_state(0);
+        assert!(state.trajectory_store().is_some());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[actix_web::test]
@@ -483,6 +521,27 @@ mod tests {
             auth,
             optimize: None,
             trajectory_store: None,
+        })
+    }
+
+    fn test_app_state_with_trajectory_store(store: TrajectoryStore) -> web::Data<AppState> {
+        let auth_config = ServerAuthConfig { enabled: false };
+        let auth = Arc::new(DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
+            security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+            optimize: None,
+            trajectory_store: Some(Arc::new(store)),
         })
     }
 }
