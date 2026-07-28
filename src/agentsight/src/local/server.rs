@@ -10,16 +10,15 @@ mod trajectories;
 
 use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
-use agentsight_trajectory_collector::{CollectorConfig, TrajectoryStore, run_collector_loop};
+use agentsight_trajectory_collector::TrajectoryStore;
 use include_dir::{Dir, include_dir};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// Embedded frontend static files (built from dashboard/ via `npm run build:embed`)
 /// Output goes to the agentsight crate root's `frontend-dist/` directory.
 /// When absent (e.g. first build before running npm), include_dir! embeds an
 /// empty dir and the server prints a warning.
-static FRONTEND: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend-dist");
+static FRONTEND: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/frontend-dist");
 
 // ─── Static file handler ─────────────────────────────────────────────────────
 
@@ -226,7 +225,7 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
+pub fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
     let home = dirs::home_dir()?;
     Some(vec![
         home.join(".claude/projects"),
@@ -247,12 +246,12 @@ fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
 pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!(
-        "agentsight-local server listening on http://{}:{}",
+        "agentsight local server listening on http://{}:{}",
         host,
         port
     );
     eprintln!(
-        "agentsight-local server listening on http://{}:{}",
+        "agentsight local server listening on http://{}:{}",
         host, port
     );
     if has_frontend {
@@ -263,37 +262,17 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
         );
     }
 
-    // Initialize trajectory store and run a collection scan
+    // Open trajectory store for reading (collection is handled by `agentsight trace`).
     let db_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("agentsight")
         .join("trajectories.db");
-    if let Some(parent) = db_path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        log::warn!(
-            "Failed to create trajectory DB directory {}: {e}",
-            parent.display()
-        );
-    }
-    let store = TrajectoryStore::new_with_path(&db_path).ok();
-
-    if let Some(ref s) = store {
-        let config = CollectorConfig {
-            scan_interval_secs: 300,
-            scan_dirs: local_trajectory_scan_dirs(),
-            db_path: db_path.clone(),
-        };
-        agentsight_trajectory_collector::scan_once(s, &config);
-        eprintln!("Trajectory scan complete. DB: {}", db_path.display());
-
-        // Background periodic scan
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        std::thread::spawn(move || {
-            run_collector_loop(&config, &stop_clone);
-        });
-    }
+    let store = if db_path.exists() {
+        TrajectoryStore::new_with_path(&db_path).ok()
+    } else {
+        log::debug!("Trajectory DB not found at {db_path:?}; run `agentsight trace` to collect");
+        None
+    };
 
     let store_data = web::Data::new(store.map(Arc::new));
     let optimize_state = optimize::OptimizeState::init(

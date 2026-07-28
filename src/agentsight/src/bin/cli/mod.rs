@@ -1,8 +1,8 @@
 //! CLI subcommand modules for agentsight binary
 //!
-//! Linux-only subcommands: token, trace, audit, discover, interruption,
+//! Linux-only subcommands: token, audit, discover, interruption,
 //! metrics, skill-metrics, summary, dashboard
-//! Cross-platform: serve (branches internally on OS)
+//! Cross-platform: serve, trace (branches internally on OS)
 
 #[cfg(target_os = "linux")]
 pub mod audit;
@@ -22,7 +22,7 @@ pub mod skill_metrics;
 pub mod summary;
 #[cfg(target_os = "linux")]
 pub mod token;
-#[cfg(target_os = "linux")]
+#[cfg(feature = "server")]
 pub mod trace;
 
 /// Default configuration file path (shared by trace / serve / dashboard).

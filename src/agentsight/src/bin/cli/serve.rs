@@ -1,7 +1,7 @@
 //! Serve subcommand — start the API server
 //!
 //! Linux: full eBPF server with SQLite, auth, health routes.
-//! macOS: delegates to agentsight_local::server (lightweight, no SQLite).
+//! macOS: delegates to agentsight::local::server (trajectory viewer).
 
 use structopt::StructOpt;
 
@@ -56,7 +56,7 @@ impl ServeCommand {
         #[cfg(not(target_os = "linux"))]
         {
             actix_web::rt::System::new().block_on(async move {
-                if let Err(e) = agentsight_local::server::run_server(&host, port).await {
+                if let Err(e) = agentsight::local::server::run_server(&host, port).await {
                     eprintln!("Server error: {e}");
                     std::process::exit(1);
                 }

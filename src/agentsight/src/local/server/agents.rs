@@ -338,10 +338,10 @@ fn match_agents(processes: &[ProcessInfo]) -> Vec<AgentInfo> {
     let mut found: HashMap<&str, Vec<&ProcessInfo>> = HashMap::new();
 
     for proc in processes {
-        // Skip our own agentsight-local process
+        // Skip our own agentsight process
         let comm_lower = proc.comm.to_lowercase();
         let cmdline_lower = proc.cmdline.to_lowercase();
-        if comm_lower.contains("agentsight-local") || cmdline_lower.contains("agentsight-local") {
+        if comm_lower.contains("agentsight") || cmdline_lower.contains("agentsight") {
             continue;
         }
 
@@ -484,7 +484,7 @@ mod tests {
         // "qoder-server" or "qoderwork"
         assert!(!contains_word("qoder-server", "qoder"));
         assert!(!contains_word("qoderwork", "qoder"));
-        assert!(!contains_word("agentsight-local", "agentsight"));
+        assert!(!contains_word("agentsight-serve", "agentsight"));
     }
 
     #[test]
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn match_agents_skip_self() {
-        let procs = vec![make_proc(1, "agentsight-local", "agentsight-local serve")];
+        let procs = vec![make_proc(1, "agentsight", "agentsight serve")];
         let agents = match_agents(&procs);
         assert!(agents.is_empty());
     }

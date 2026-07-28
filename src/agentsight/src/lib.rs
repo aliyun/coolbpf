@@ -17,8 +17,8 @@
 //! - Process lifecycle monitoring
 //!
 //! On Linux: full eBPF observability pipeline.
-//! On macOS: cross-platform modules only (config, tokenizer, grader, etc.).
-//! The `agentsight serve` command delegates to `agentsight_local::server` on macOS.
+//! On macOS: cross-platform modules + local trajectory viewer under `local/`.
+//! The `agentsight serve` command delegates to `local::server` on macOS.
 
 // ─── Cross-platform modules (always compiled) ───────────────────────────────
 
@@ -70,6 +70,11 @@ pub mod skill_metrics;
 pub mod storage;
 #[cfg(target_os = "linux")]
 mod unified;
+
+// ─── macOS local modules (trajectory viewer without eBPF) ────────────────────
+
+#[cfg(all(feature = "server", not(target_os = "linux")))]
+pub mod local;
 
 // ─── Re-exports ─────────────────────────────────────────────────────────────
 

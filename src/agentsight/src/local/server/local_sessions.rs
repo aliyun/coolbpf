@@ -8,7 +8,9 @@
 use actix_web::{HttpResponse, Responder, get, web};
 use serde::Deserialize;
 
-use crate::collector::{LocalSessionsResponse, convert_jsonl_to_atif, discover_local_sessions};
+use crate::local::collector::{
+    LocalSessionsResponse, convert_jsonl_to_atif, discover_local_sessions,
+};
 
 /// List all discovered local agent session files.
 #[get("/api/local-sessions")]

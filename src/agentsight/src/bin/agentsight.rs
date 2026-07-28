@@ -1,7 +1,7 @@
 //! AgentSight CLI - AI Agent observability tool
 //!
 //! Linux: full eBPF observability (trace, discover, token, audit, etc.)
-//! macOS: local session viewer (serve only, delegates to agentsight-local)
+//! macOS: trajectory collection (trace) + local viewer (serve)
 use structopt::StructOpt;
 
 mod cli;
@@ -9,11 +9,13 @@ mod cli;
 use cli::dashboard::DashboardCommand;
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
+#[cfg(feature = "server")]
+use cli::trace::TraceCommand;
 #[cfg(target_os = "linux")]
 use cli::{
     audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
     metrics::MetricsCommand, skill_metrics::SkillMetricsCommand, summary::SummaryCommand,
-    token::TokenCommand, trace::TraceCommand,
+    token::TokenCommand,
 };
 
 #[derive(Debug, StructOpt)]
@@ -28,7 +30,7 @@ use cli::{
     not(target_os = "linux"),
     structopt(
         name = "agentsight",
-        about = "Local AI agent trajectory viewer - serve local sessions without eBPF tracing"
+        about = "AI agent trajectory collector and viewer - trace local sessions and serve dashboard"
     )
 )]
 pub enum Command {
@@ -36,7 +38,7 @@ pub enum Command {
     #[cfg(target_os = "linux")]
     Token(TokenCommand),
     /// Trace agent activity (default)
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "server")]
     Trace(TraceCommand),
     /// Query audit events
     #[cfg(target_os = "linux")]
@@ -71,7 +73,7 @@ fn main() {
     match cmd {
         #[cfg(target_os = "linux")]
         Command::Token(token_cmd) => token_cmd.execute(),
-        #[cfg(target_os = "linux")]
+        #[cfg(feature = "server")]
         Command::Trace(trace_cmd) => trace_cmd.execute(),
         #[cfg(target_os = "linux")]
         Command::Audit(audit_cmd) => audit_cmd.execute(),

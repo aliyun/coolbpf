@@ -1,7 +1,8 @@
-//! Trace subcommand - eBPF-based agent activity tracing
+//! Trace subcommand - agent activity tracing
+//!
+//! Linux: full eBPF-based tracing (probes → parser → aggregator → storage).
+//! macOS: trajectory collection only (JSONL file scanning → ATIF → SQLite).
 
-use agentsight::{AgentSight, AgentsightConfig};
-use daemonize::Daemonize;
 use structopt::StructOpt;
 
 /// Trace subcommand
@@ -11,25 +12,45 @@ pub struct TraceCommand {
     #[structopt(short, long)]
     pub verbose: bool,
 
-    /// Run as daemon in background
+    /// Run as daemon in background (Linux only)
+    #[cfg(target_os = "linux")]
     #[structopt(long)]
     pub daemon: bool,
-    /// PID file path for daemon mode
+    /// PID file path for daemon mode (Linux only)
+    #[cfg(target_os = "linux")]
     #[structopt(long, default_value = "/tmp/agentsight.pid")]
     pub pid_file: String,
 
     /// Enable file watch probe (monitors .jsonl file opens from traced processes)
+    #[cfg(target_os = "linux")]
     #[structopt(long)]
     pub enable_filewatch: bool,
 
-    /// Path to JSON configuration file
+    /// Path to JSON configuration file (Linux only)
+    #[cfg(target_os = "linux")]
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
 }
 
 impl TraceCommand {
     pub fn execute(&self) {
-        // Daemonize if requested
+        #[cfg(target_os = "linux")]
+        {
+            self.execute_linux();
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.execute_local();
+        }
+    }
+}
+
+// ─── Linux: eBPF + trajectory collector ──────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+impl TraceCommand {
+    fn execute_linux(&self) {
         if self.daemon {
             self.run_as_daemon();
             return;
@@ -40,6 +61,8 @@ impl TraceCommand {
 
     /// Run as daemon process
     fn run_as_daemon(&self) {
+        use daemonize::Daemonize;
+
         println!("Starting agentsight in daemon mode...");
         println!("PID file: {}", self.pid_file);
 
@@ -50,7 +73,6 @@ impl TraceCommand {
 
         match daemonize.start() {
             Ok(_) => {
-                // We're now in the daemon process
                 self.run_tracing();
             }
             Err(e) => {
@@ -62,6 +84,8 @@ impl TraceCommand {
 
     /// Run the actual tracing logic using AgentSight
     fn run_tracing(&self) {
+        use agentsight::{AgentSight, AgentsightConfig};
+
         // Build AgentSight config (empty target_pids means trace all processes).
         // Note: `traceEnabled=false` from agentsight.json does NOT stop the agent
         // — token consumption (LLM call) data must always be collected by default.
@@ -107,3 +131,55 @@ impl TraceCommand {
         // `sight` drops here → Storage::drop → checkpoint
     }
 }
+
+// ─── macOS: trajectory collector only (no eBPF) ──────────────────────────────
+
+#[cfg(not(target_os = "linux"))]
+impl TraceCommand {
+    fn execute_local(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let db_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("agentsight")
+            .join("trajectories.db");
+
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let store = match agentsight_trajectory_collector::TrajectoryStore::new_with_path(&db_path)
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to open trajectory store at {db_path:?}: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let scan_dirs = agentsight::local::server::local_trajectory_scan_dirs();
+        let config = agentsight_trajectory_collector::CollectorConfig {
+            scan_interval_secs: 300,
+            scan_dirs,
+            db_path: db_path.clone(),
+        };
+
+        // Run one immediate scan.
+        agentsight_trajectory_collector::scan_once(&store, &config);
+
+        let stop = Arc::new(AtomicBool::new(true));
+        let stop_clone = Arc::clone(&stop);
+
+        ctrlc::set_handler(move || {
+            println!("\nShutting down trajectory collector...");
+            stop_clone.store(false, Ordering::SeqCst);
+        })
+        .ok();
+
+        println!("Trajectory collector running. Press Ctrl+C to stop.");
+        agentsight_trajectory_collector::run_collector_loop(&config, &stop);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+use std::sync::Arc;

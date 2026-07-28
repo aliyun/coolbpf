@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     ".",
-    "crates/agentsight-local",
     "crates/agentsight-atif",
     "crates/agentsight-opt",
     "crates/agentsight-opt-store",
@@ -16,7 +15,6 @@ edition = "2024"
 # reference these via `{ workspace = true }`; the root crate is being
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
-agentsight-local = { path = "crates/agentsight-local" }
 anyhow = "1.0.86"
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -51,7 +49,6 @@ crate-type = ["cdylib", "rlib"]
 
 # Cross-platform dependencies (compile on all OSes)
 [dependencies]
-agentsight-local = { workspace = true }
 agentsight-atif = { path = "crates/agentsight-atif" }
 agentsight-opt = { path = "crates/agentsight-opt", optional = true }
 agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
@@ -81,6 +78,15 @@ notify = "6"
 actix-web = { version = "4", optional = true }
 actix-cors = { version = "0.7", optional = true }
 include_dir = { version = "0.7", optional = true }
+
+# macOS / non-Linux dependencies (local trajectory viewer + collector)
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+ctrlc = "3.4"
+dirs = "6"
+sysinfo = "0.33"
+
+[dev-dependencies]
+actix-web = { version = "4", features = ["macros"] }
 
 # Linux-only dependencies (eBPF, process inspection, HTTP parsing, etc.)
 [target.'cfg(target_os = "linux")'.dependencies]

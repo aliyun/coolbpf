@@ -84,7 +84,7 @@ pub struct DiscoveredSession {
 ///
 /// `scan_dirs` overrides the default scan roots. Each entry is interpreted by
 /// path (`.qoderwork`, `.qoder`, `.claude`, `.codex`, `.cursor`) to choose the
-/// source label and layout. When `None`, `/root` and every `/home/*` entry are
+/// source label and layout. When `None`, the current user's home directory is
 /// probed for all known roots.
 pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession> {
     let roots = match scan_dirs {
@@ -116,27 +116,20 @@ struct ScanRoot {
     scan_subdirs: &'static [&'static str],
 }
 
-/// Default session roots: `/root` + `/home/*`, each probed for known layouts.
+/// Default session roots: current user's home directory, probed for known layouts.
 fn default_scan_roots() -> Vec<ScanRoot> {
-    let mut homes = vec![PathBuf::from("/root")];
-    if let Ok(entries) = std::fs::read_dir("/home") {
-        for entry in entries.flatten() {
-            homes.push(entry.path());
-        }
-    }
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
     let mut roots = Vec::new();
-    for home in homes {
-        for root in SESSION_ROOTS {
-            let dir = home.join(root.rel_dir);
-            if dir.exists() {
-                roots.push(ScanRoot {
-                    dir,
-                    source: root.source.to_string(),
-                    layout: root.layout,
-                    scan_subdirs: root.scan_subdirs,
-                });
-            }
+    for root in SESSION_ROOTS {
+        let dir = home.join(root.rel_dir);
+        if dir.exists() {
+            roots.push(ScanRoot {
+                dir,
+                source: root.source.to_string(),
+                layout: root.layout,
+                scan_subdirs: root.scan_subdirs,
+            });
         }
     }
     roots
