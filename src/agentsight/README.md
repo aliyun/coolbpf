@@ -4,7 +4,7 @@
 
 eBPF-based observability tool for AI Agents on Linux, providing zero-intrusion monitoring of LLM API calls, token consumption, process behavior, and SSL/TLS traffic. AgentSight is an observability component of [ANOLISA](../../README.md).
 
-> **macOS support**: On macOS, AgentSight compiles as a lightweight binary with `agentsight serve` (Agent Dashboard + local session viewer) but without eBPF tracing. The same source tree produces a full-featured binary on Linux and a viewer-only binary on macOS via OS-conditional compilation.
+> **macOS support**: On macOS, AgentSight compiles with two commands — `agentsight trace` (trajectory collector, scans local JSONL session files → ATIF → SQLite, no eBPF) and `agentsight serve` (Dashboard UI + trajectory viewer). The same source tree produces a full-featured eBPF binary on Linux and a trajectory-only binary on macOS via OS-conditional compilation.
 
 ## Features
 
@@ -60,6 +60,7 @@ agentsight/
 │   ├── storage/        # SQLite-backed stores (audit, token, HTTP, GenAI)
 │   ├── discovery/      # AI agent process scanner (/proc + eBPF)
 │   ├── tokenizer/      # HuggingFace tokenizer integration for token counting
+│   ├── local/          # macOS-only: trajectory viewer server + collector dispatch
 │   ├── bin/            # CLI entry points (agentsight, cli subcommands)
 │   ├── unified.rs      # Main pipeline orchestrator
 │   ├── config.rs       # Unified configuration management
@@ -71,11 +72,15 @@ agentsight/
 
 ## CLI Commands
 
-> Commands `trace`, `token`, `audit`, `discover`, `metrics`, `interruption`, `skill-metrics`, and `summary` require Linux eBPF and are not available on macOS. Only `serve` works cross-platform.
+> Commands `token`, `audit`, `discover`, `metrics`, `interruption`, `skill-metrics`, and `summary` require Linux eBPF and are not available on macOS. `trace` and `serve` work cross-platform: on Linux `trace` runs the full eBPF pipeline, on macOS it runs the trajectory collector only (no eBPF).
 
 ### `agentsight trace`
 
-Start eBPF-based tracing of AI agent activity.
+Start tracing of AI agent activity.
+
+**Linux**: Full eBPF-based tracing (probes → parser → aggregator → storage). Also runs trajectory collector if `features.trajectory_collection.enabled` is set.
+
+**macOS**: Trajectory collection only — scans local JSONL session files (Claude Code, Qoder, Codex, Cursor), converts to ATIF v1.7, and stores in `trajectories.db`. No eBPF.
 
 ```bash
 # Foreground mode
@@ -125,7 +130,7 @@ agentsight audit --summary
 
 Start the HTTP API server and serve the embedded Dashboard UI.
 
-> **macOS**: Runs a lightweight server (Agent Dashboard + local session viewer) without SQLite or eBPF. The `--db` and `--config` flags are Linux-only.
+> **macOS**: Reads from `trajectories.db` (populated by `agentsight trace`). The `--db` and `--config` flags are Linux-only.
 
 ```bash
 # Start with default settings (binds to 127.0.0.1:7396)
@@ -174,6 +179,8 @@ make build-all
 
 ### Scenario 1 — Collect data and view the Dashboard simultaneously
 
+**Linux** (eBPF + trajectory collector):
+
 Run the tracer and the API server in two separate terminals:
 
 ```bash
@@ -181,6 +188,16 @@ Run the tracer and the API server in two separate terminals:
 sudo agentsight trace
 
 # Terminal 2: start the API server (reads from the same SQLite)
+agentsight serve
+```
+
+**macOS** (trajectory collector only):
+
+```bash
+# Terminal 1: start trajectory collection (scans JSONL → trajectories.db)
+agentsight trace
+
+# Terminal 2: start the API server (reads from trajectories.db)
 agentsight serve
 ```
 
@@ -274,7 +291,7 @@ The binary is output to `target/release/agentsight`.
 
 ### Build on macOS
 
-macOS builds the lightweight `agentsight serve` local viewer. It does not require libbpf, clang/llvm, kernel headers, root, or Linux BPF capabilities.
+macOS builds `agentsight trace` (trajectory collector) and `agentsight serve` (Dashboard viewer). It does not require libbpf, clang/llvm, kernel headers, root, or Linux BPF capabilities.
 
 **Prerequisites:**
 
@@ -289,7 +306,7 @@ macOS builds the lightweight `agentsight serve` local viewer. It does not requir
 ```bash
 cd src/agentsight
 
-# Build the agentsight-local frontend and the macOS serve-only binary
+# Build the frontend and the macOS binary
 make build-mac
 ```
 
@@ -298,16 +315,19 @@ The binary is output to `target/release/agentsight`.
 **Usage on macOS:**
 
 ```bash
-# Start the Agent Dashboard + local session viewer
-target/release/agentsight serve
+# Terminal 1: collect trajectories (scans JSONL → trajectories.db)
+agentsight trace
 
-# Bind to a custom host/port
-target/release/agentsight serve --host 0.0.0.0 --port 8080
+# Terminal 2: start the Dashboard + trajectory viewer
+agentsight serve
+
+# Or bind to a custom host/port
+agentsight serve --host 0.0.0.0 --port 8080
 ```
 
-Open `http://127.0.0.1:7396` to view the Agent Dashboard. The macOS server scans running AI agent processes and reads local ATIF trajectory files from `~/.agentsight/sessions/`.
+Open `http://127.0.0.1:7396` to view the Agent Dashboard. `trace` scans local AI agent session files (Claude Code, Qoder, Codex, Cursor) and stores them as ATIF trajectories in `trajectories.db`. `serve` reads from the same database.
 
-> **macOS limitations**: eBPF tracing commands (`trace`, `discover`, `token`, `audit`, `metrics`, `interruption`, `skill-metrics`, `summary`) are Linux-only and not available on macOS. The `--db` and `--config` flags are also Linux-only because macOS `serve` uses the lightweight `agentsight-local` server without SQLite-backed trace storage.
+> **macOS limitations**: eBPF-dependent commands (`discover`, `token`, `audit`, `metrics`, `interruption`, `skill-metrics`, `summary`) are Linux-only. The `--db` and `--config` flags are also Linux-only. On macOS, `trace` collects trajectories only (no eBPF), and `serve` reads from `trajectories.db`.
 
 ### Install via RPM
 
