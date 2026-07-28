@@ -12,7 +12,58 @@ use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use agentsight_trajectory_collector::TrajectoryStore;
 use include_dir::{Dir, include_dir};
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
+/// Shared state for the macOS local server.
+///
+/// `trajectory_store` is wrapped in `RwLock` so handlers can lazily open
+/// the DB when `trace` starts writing after `serve` has already started.
+pub struct LocalState {
+    pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
+    pub db_path: PathBuf,
+}
+
+impl LocalState {
+    /// Return a trajectory store, lazily opening the DB if needed.
+    pub fn trajectory_store(&self) -> Option<Arc<TrajectoryStore>> {
+        // Fast path: already opened
+        {
+            let guard = self
+                .trajectory_store
+                .read()
+                .expect("trajectory_store lock poisoned");
+            if let Some(store) = guard.as_ref() {
+                return Some(Arc::clone(store));
+            }
+        }
+
+        if !self.db_path.exists() {
+            return None;
+        }
+
+        match TrajectoryStore::new_with_path(&self.db_path) {
+            Ok(store) => {
+                let mut guard = self
+                    .trajectory_store
+                    .write()
+                    .expect("trajectory_store lock poisoned");
+                if let Some(existing) = guard.as_ref() {
+                    Some(Arc::clone(existing))
+                } else {
+                    let arc = Arc::new(store);
+                    *guard = Some(Arc::clone(&arc));
+                    log::info!("Trajectory store opened lazily at {:?}", self.db_path);
+                    Some(arc)
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to lazily open trajectory store: {e}");
+                None
+            }
+        }
+    }
+}
 
 /// Embedded frontend static files (built from dashboard/ via `npm run build:embed`)
 /// Output goes to the agentsight crate root's `frontend-dist/` directory.
@@ -263,26 +314,41 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
     }
 
     // Open trajectory store for reading (collection is handled by `agentsight trace`).
+    // Uses lazy opening: if the DB doesn't exist at startup, handlers will
+    // re-check on each request so data appears once `trace` starts writing.
     let db_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("agentsight")
         .join("trajectories.db");
-    let store = if db_path.exists() {
-        TrajectoryStore::new_with_path(&db_path).ok()
+    let initial_store: Option<Arc<TrajectoryStore>> = if db_path.exists() {
+        match TrajectoryStore::new_with_path(&db_path) {
+            Ok(store) => {
+                log::info!("Trajectory store initialized at {db_path:?}");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                log::warn!("Failed to open trajectory store: {e}");
+                None
+            }
+        }
     } else {
         log::debug!("Trajectory DB not found at {db_path:?}; run `agentsight trace` to collect");
         None
     };
 
-    let store_data = web::Data::new(store.map(Arc::new));
+    let local_state = web::Data::new(LocalState {
+        trajectory_store: Arc::new(RwLock::new(initial_store)),
+        db_path,
+    });
     let optimize_state = optimize::OptimizeState::init(
-        db_path
+        local_state
+            .db_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new(".")),
     );
     let optimize_data = web::Data::new(optimize::OptimizeAppState {
         optimize: optimize_state,
-        trajectory_store: store_data.get_ref().clone(),
+        local_state: local_state.clone(),
     });
 
     HttpServer::new(move || {
@@ -294,7 +360,7 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
 
         App::new()
             .wrap(cors)
-            .app_data(store_data.clone())
+            .app_data(local_state.clone())
             .app_data(optimize_data.clone())
             // Trajectory collection API
             .service(trajectories::list_trajectories)

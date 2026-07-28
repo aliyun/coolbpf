@@ -1094,7 +1094,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         });
         let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
 
@@ -1300,7 +1300,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1429,7 +1429,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1528,7 +1528,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1666,7 +1666,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1689,7 +1689,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1750,7 +1750,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: store,
+            trajectory_store: Arc::new(RwLock::new(store)),
         })
     }
 
@@ -2057,7 +2057,7 @@ mod tests {
                     },
                     auth,
                     optimize: None,
-                    trajectory_store: None,
+                    trajectory_store: Arc::new(RwLock::new(None)),
                 }))
                 .service(metrics),
         )
@@ -2507,7 +2507,7 @@ mod tests {
                     },
                     auth,
                     optimize: None,
-                    trajectory_store: None,
+                    trajectory_store: Arc::new(RwLock::new(None)),
                 }))
                 .service(list_sessions)
                 .service(list_agent_names)

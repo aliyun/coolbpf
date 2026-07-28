@@ -253,27 +253,38 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
 
         // Parse JSON only for the first user message to extract first_message
         if is_user && !parsed_first_user {
-            parsed_first_user = true;
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 if session_id.is_empty()
                     && let Some(sid) = event.get("sessionId").and_then(|v| v.as_str())
                 {
                     session_id = sid.to_string();
                 }
-                if let Some(content_arr) =
-                    event.pointer("/message/content").and_then(|c| c.as_array())
-                {
-                    for block in content_arr {
-                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if block_type == "text" {
-                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                            if !text.is_empty() && first_message.is_empty() {
-                                first_message = strip_system_context(text);
-                                first_message = truncate(&first_message, 200);
+                // message.content can be a string (Claude Code transcripts)
+                // or an array of content blocks (Qoder/QoderWork).
+                if let Some(content) = event.pointer("/message/content") {
+                    if let Some(text) = content.as_str() {
+                        if !text.is_empty() && first_message.is_empty() {
+                            first_message = strip_system_context(text);
+                            first_message = truncate(&first_message, 200);
+                        }
+                        has_human_text = true;
+                    } else if let Some(content_arr) = content.as_array() {
+                        for block in content_arr {
+                            let block_type =
+                                block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if block_type == "text" {
+                                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                if !text.is_empty() && first_message.is_empty() {
+                                    first_message = strip_system_context(text);
+                                    first_message = truncate(&first_message, 200);
+                                }
+                                has_human_text = true;
                             }
-                            has_human_text = true;
                         }
                     }
+                }
+                if has_human_text {
+                    parsed_first_user = true;
                 }
             }
         }
@@ -289,19 +300,28 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
             }
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if event_type == "user"
-                    && let Some(content_arr) =
-                        event.pointer("/message/content").and_then(|c| c.as_array())
-                {
-                    for block in content_arr {
-                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if block_type == "text" {
-                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if event_type == "user" {
+                    if let Some(content) = event.pointer("/message/content") {
+                        if let Some(text) = content.as_str() {
                             if !text.is_empty() && first_message.is_empty() {
                                 first_message = strip_system_context(text);
                                 first_message = truncate(&first_message, 200);
                             }
                             has_human_text = true;
+                        } else if let Some(content_arr) = content.as_array() {
+                            for block in content_arr {
+                                let block_type =
+                                    block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                if block_type == "text" {
+                                    let text =
+                                        block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                    if !text.is_empty() && first_message.is_empty() {
+                                        first_message = strip_system_context(text);
+                                        first_message = truncate(&first_message, 200);
+                                    }
+                                    has_human_text = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -341,18 +361,21 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
 /// `/` with `-` and prefixing with `-`:
 ///   `-Users-john-projects-myapp` → `myapp`
 ///   `-data-skillopt` → `skillopt`
+///   `-Users-john-projects-my-app` → `my-app`
 fn decode_project_dir(dir: &Path, _root: &Path) -> String {
     let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    // Strip leading dash
-    let stripped = name.strip_prefix('-').unwrap_or(name);
-    let parts: Vec<&str> = stripped.split('-').collect();
+    if !name.starts_with('-') {
+        return name.to_string();
+    }
+
+    let parts: Vec<&str> = name.split('-').filter(|s| !s.is_empty()).collect();
 
     if parts.is_empty() {
         return name.to_string();
     }
 
-    // Look for known parent markers and return the segment after the last match
+    // Look for known parent markers and return all segments after the last match
     const MARKERS: &[&str] = &[
         "code",
         "coding",
@@ -367,14 +390,14 @@ fn decode_project_dir(dir: &Path, _root: &Path) -> String {
 
     let mut last_match_idx: Option<usize> = None;
     for (i, part) in parts.iter().enumerate() {
-        if MARKERS.contains(part) {
+        if MARKERS.contains(&part.to_lowercase().as_str()) {
             last_match_idx = Some(i);
         }
     }
 
     match last_match_idx {
-        Some(idx) if idx + 1 < parts.len() => parts[idx + 1].to_string(),
-        _ => parts.last().unwrap_or(&"unknown").to_string(),
+        Some(idx) if idx + 1 < parts.len() => parts[idx + 1..].join("-"),
+        _ => parts.join("-"),
     }
 }
 
@@ -421,7 +444,14 @@ mod tests {
     fn test_decode_project_dir_no_marker() {
         let path = Path::new("-data-skillopt");
         let root = Path::new("/root/.qoder/projects");
-        assert_eq!(decode_project_dir(path, root), "skillopt");
+        assert_eq!(decode_project_dir(path, root), "data-skillopt");
+    }
+
+    #[test]
+    fn test_decode_project_dir_hyphenated_name() {
+        let path = Path::new("-Users-alice-projects-my-app");
+        let root = Path::new("/home/alice/.qoder/projects");
+        assert_eq!(decode_project_dir(path, root), "my-app");
     }
 
     #[test]

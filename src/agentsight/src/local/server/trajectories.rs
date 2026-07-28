@@ -11,6 +11,8 @@ use actix_web::{HttpResponse, Responder, get, web};
 use agentsight_trajectory_collector::TrajectoryStore;
 use serde::Deserialize;
 
+use super::LocalState;
+
 /// Default and hard-cap for the trajectory list `limit` parameter.
 const TRAJECTORY_DEFAULT_LIMIT: i64 = 200;
 const TRAJECTORY_MAX_LIMIT: i64 = 1000;
@@ -26,10 +28,10 @@ pub struct TrajectoryQuery {
 /// GET /api/trajectories
 #[get("/api/trajectories")]
 pub async fn list_trajectories(
-    store: web::Data<Option<Arc<TrajectoryStore>>>,
+    state: web::Data<LocalState>,
     query: web::Query<TrajectoryQuery>,
 ) -> impl Responder {
-    let Some(tstore) = store.get_ref().as_ref() else {
+    let Some(tstore) = state.trajectory_store() else {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     };
     let limit = match query.limit {
@@ -51,8 +53,8 @@ pub async fn list_trajectories(
 
 /// GET /api/trajectories/filters
 #[get("/api/trajectories/filters")]
-pub async fn trajectory_filters(store: web::Data<Option<Arc<TrajectoryStore>>>) -> impl Responder {
-    let Some(tstore) = store.get_ref().as_ref() else {
+pub async fn trajectory_filters(state: web::Data<LocalState>) -> impl Responder {
+    let Some(tstore) = state.trajectory_store() else {
         return HttpResponse::Ok().json(serde_json::json!({
             "projects": [], "sources": [], "agent_names": []
         }));
@@ -68,10 +70,10 @@ pub async fn trajectory_filters(store: web::Data<Option<Arc<TrajectoryStore>>>) 
 /// GET /api/trajectories/{session_id}
 #[get("/api/trajectories/{session_id}")]
 pub async fn get_trajectory_detail(
-    store: web::Data<Option<Arc<TrajectoryStore>>>,
+    state: web::Data<LocalState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    let Some(tstore) = store.get_ref().as_ref() else {
+    let Some(tstore) = state.trajectory_store() else {
         return HttpResponse::NotFound().json(
             serde_json::json!({"error": "not_found", "message": "Trajectory store not available"}),
         );
@@ -113,13 +115,32 @@ pub async fn get_trajectory_detail(
 mod tests {
     use super::*;
     use actix_web::{App, test};
+    use std::path::PathBuf;
+    use std::sync::RwLock;
+
+    fn make_state(store: Option<Arc<TrajectoryStore>>) -> web::Data<LocalState> {
+        web::Data::new(LocalState {
+            trajectory_store: Arc::new(RwLock::new(store)),
+            db_path: PathBuf::from("/nonexistent/trajectories.db"),
+        })
+    }
+
+    fn make_state_with_store(
+        store: Arc<TrajectoryStore>,
+        db_path: PathBuf,
+    ) -> web::Data<LocalState> {
+        web::Data::new(LocalState {
+            trajectory_store: Arc::new(RwLock::new(Some(store))),
+            db_path,
+        })
+    }
 
     #[actix_web::test]
     async fn test_list_trajectories_no_store() {
-        let store: Option<Arc<TrajectoryStore>> = None;
+        let state = make_state(None);
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(store))
+                .app_data(state)
                 .service(list_trajectories)
                 .service(trajectory_filters)
                 .service(get_trajectory_detail),
@@ -151,10 +172,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let store = Arc::new(TrajectoryStore::new_with_path(&tmp.join("trajectories.db")).unwrap());
+        let db_path = tmp.join("trajectories.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        let state = make_state_with_store(store, db_path);
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(Some(store)))
+                .app_data(state)
                 .service(list_trajectories)
                 .service(trajectory_filters),
         )
@@ -181,13 +204,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let store = Arc::new(TrajectoryStore::new_with_path(&tmp.join("trajectories.db")).unwrap());
-        let app = test::init_service(
-            App::new()
-                .app_data(web::Data::new(Some(store)))
-                .service(get_trajectory_detail),
-        )
-        .await;
+        let db_path = tmp.join("trajectories.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
+        let state = make_state_with_store(store, db_path);
+        let app =
+            test::init_service(App::new().app_data(state).service(get_trajectory_detail)).await;
 
         let req = test::TestRequest::get()
             .uri("/api/trajectories/missing-session")
@@ -204,7 +225,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let store = Arc::new(TrajectoryStore::new_with_path(&tmp.join("trajectories.db")).unwrap());
+        let db_path = tmp.join("trajectories.db");
+        let store = Arc::new(TrajectoryStore::new_with_path(&db_path).unwrap());
         let atif = r#"{"schema_version":"ATIF-v1.7","session_id":"sess-found","steps":[]}"#;
         let record = agentsight_trajectory_collector::TrajectoryRecord {
             session_id: "sess-found".to_string(),
@@ -228,9 +250,10 @@ mod tests {
         };
         store.upsert_trajectory(&record).unwrap();
 
+        let state = make_state_with_store(store, db_path);
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(Some(store)))
+                .app_data(state)
                 .service(get_trajectory_detail)
                 .service(list_trajectories)
                 .service(trajectory_filters),

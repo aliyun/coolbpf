@@ -135,7 +135,7 @@ impl OptimizeState {
 
 pub struct OptimizeAppState {
     pub optimize: Arc<OptimizeState>,
-    pub trajectory_store: Option<Arc<TrajectoryStore>>,
+    pub local_state: web::Data<super::LocalState>,
 }
 
 fn parse_dimension(raw: &str) -> Option<Dimension> {
@@ -211,8 +211,8 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_collected_trajectory(data.trajectory_store.as_deref(), &session_id)
-    {
+    let tstore = data.local_state.trajectory_store();
+    let trajectory = match load_collected_trajectory(tstore.as_deref(), &session_id) {
         Ok(trajectory) => trajectory,
         Err(response) => return response,
     };

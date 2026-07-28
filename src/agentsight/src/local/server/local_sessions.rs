@@ -86,27 +86,73 @@ pub struct FileQuery {
 pub async fn read_local_session_file(query: web::Query<FileQuery>) -> impl Responder {
     let path = query.path.as_str();
 
-    if !is_safe_jsonl_path(path) {
-        return HttpResponse::BadRequest()
-            .body("Invalid file path: must be a .jsonl or .json file");
+    if !is_safe_session_path(path) {
+        return HttpResponse::BadRequest().body(
+            "Invalid file path: must be a .jsonl/.json file under a known session directory",
+        );
     }
 
-    match std::fs::read_to_string(path) {
-        Ok(content) => HttpResponse::Ok()
+    // Block on file I/O to avoid blocking the async runtime.
+    let path_owned = path.to_string();
+    match web::block(move || std::fs::read_to_string(&path_owned)).await {
+        Ok(Ok(content)) => HttpResponse::Ok()
             .content_type("application/jsonl; charset=utf-8")
             .body(content),
-        Err(e) => {
+        Ok(Err(e)) => {
             log::error!("Failed to read {}: {}", path, e);
             HttpResponse::NotFound().body(format!("File not found: {}", e))
+        }
+        Err(e) => {
+            log::error!("File read task failed: {}", e);
+            HttpResponse::InternalServerError().body("Internal error")
         }
     }
 }
 
-/// Validate that the path points to a .jsonl or .json file.
-fn is_safe_jsonl_path(path: &str) -> bool {
+/// Validate that the path is a .jsonl/.json file under a known session directory.
+///
+/// Canonicalizes the path and ensures it starts with the user's home directory
+/// joined with one of the known session root subdirs (e.g. `.claude/projects`).
+fn is_safe_session_path(path: &str) -> bool {
     let p = std::path::Path::new(path);
-    p.extension()
+
+    // Must have .jsonl or .json extension
+    if !p
+        .extension()
         .is_some_and(|ext| ext == "jsonl" || ext == "json")
+    {
+        return false;
+    }
+
+    // Canonicalize to resolve symlinks and `..` traversal
+    let canonical = match p.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Must be under $HOME/<known-session-root>
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return false,
+    };
+
+    let known_roots = [
+        ".claude/projects",
+        ".qoder/projects",
+        ".qoderwork/projects",
+        ".codex/sessions",
+        ".codex/archived_sessions",
+        ".cursor/projects",
+    ];
+
+    for root in &known_roots {
+        let base = home.join(root);
+        if canonical.starts_with(&base) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -114,19 +160,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_safe_jsonl_path_valid() {
-        assert!(is_safe_jsonl_path("/tmp/session.jsonl"));
-        assert!(is_safe_jsonl_path("/home/user/data.json"));
-        assert!(is_safe_jsonl_path("relative/path.jsonl"));
+    fn test_is_safe_session_path_rejects_bad_ext() {
+        assert!(!is_safe_session_path("/tmp/session.txt"));
+        assert!(!is_safe_session_path("/tmp/session.csv"));
+        assert!(!is_safe_session_path("/tmp/noext"));
+        assert!(!is_safe_session_path("/tmp/session"));
+        assert!(!is_safe_session_path(""));
     }
 
     #[test]
-    fn test_is_safe_jsonl_path_invalid() {
-        assert!(!is_safe_jsonl_path("/tmp/session.txt"));
-        assert!(!is_safe_jsonl_path("/tmp/session.csv"));
-        assert!(!is_safe_jsonl_path("/tmp/noext"));
-        assert!(!is_safe_jsonl_path("/tmp/session"));
-        assert!(!is_safe_jsonl_path(""));
+    fn test_is_safe_session_path_rejects_non_session_dir() {
+        // /tmp is not under any known session root
+        assert!(!is_safe_session_path("/tmp/session.jsonl"));
+        assert!(!is_safe_session_path("/etc/passwd.json"));
+    }
+
+    #[test]
+    fn test_is_safe_session_path_rejects_relative() {
+        assert!(!is_safe_session_path("relative/path.jsonl"));
+        assert!(!is_safe_session_path("../../etc/secrets.jsonl"));
     }
 
     #[actix_web::test]
@@ -153,24 +205,6 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn test_convert_local_to_atif_valid_path() {
-        let tmp = std::env::temp_dir().join("agentsight_atif_test.jsonl");
-        std::fs::write(
-            &tmp,
-            r#"{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#,
-        )
-        .unwrap();
-        let app =
-            actix_web::test::init_service(actix_web::App::new().service(convert_local_to_atif))
-                .await;
-        let uri = format!("/api/local-session/atif?path={}", tmp.to_string_lossy());
-        let req = actix_web::test::TestRequest::get().uri(&uri).to_request();
-        let resp = actix_web::test::call_service(&app, req).await;
-        assert!(resp.status().is_success());
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[actix_web::test]
     async fn test_read_local_session_file_not_found() {
         let app =
             actix_web::test::init_service(actix_web::App::new().service(read_local_session_file))
@@ -179,21 +213,8 @@ mod tests {
             .uri("/api/local-session/file?path=/tmp/nonexistent_file.jsonl")
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
-        assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
-    }
-
-    #[actix_web::test]
-    async fn test_read_local_session_file_valid() {
-        let tmp = std::env::temp_dir().join("agentsight_read_test.jsonl");
-        std::fs::write(&tmp, r#"{"type":"user","message":"hi"}"#).unwrap();
-        let app =
-            actix_web::test::init_service(actix_web::App::new().service(read_local_session_file))
-                .await;
-        let uri = format!("/api/local-session/file?path={}", tmp.to_string_lossy());
-        let req = actix_web::test::TestRequest::get().uri(&uri).to_request();
-        let resp = actix_web::test::call_service(&app, req).await;
-        assert!(resp.status().is_success());
-        let _ = std::fs::remove_file(&tmp);
+        // /tmp is not under a known session root → BadRequest (not NotFound)
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]

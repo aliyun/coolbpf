@@ -61,7 +61,10 @@ pub struct AppState {
     /// Optimization analysis state (LLM config + result store)
     pub optimize: Option<Arc<optimize::OptimizeState>>,
     /// Read-only store over collected trajectories (`trajectories.db`)
-    pub trajectory_store: Option<Arc<TrajectoryStore>>,
+    ///
+    /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
+    /// (write once when the DB first appears, read on every subsequent call).
+    pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
 }
 
 impl AppState {
@@ -71,19 +74,39 @@ impl AppState {
     /// exist at server startup. Re-checking on demand lets the UI show newly
     /// collected log sessions without requiring a server restart.
     pub fn trajectory_store(&self) -> Option<Arc<TrajectoryStore>> {
-        if let Some(store) = &self.trajectory_store {
-            return Some(Arc::clone(store));
+        // Fast path: already opened
+        {
+            let guard = self
+                .trajectory_store
+                .read()
+                .expect("trajectory_store lock poisoned");
+            if let Some(store) = guard.as_ref() {
+                return Some(Arc::clone(store));
+            }
         }
 
+        // Check if DB exists
         let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
         if !db_path.exists() {
             return None;
         }
 
+        // Try to open; upgrade to write lock to memoize
         match TrajectoryStore::new_with_path(&db_path) {
             Ok(store) => {
-                log::info!("Trajectory store opened lazily at {db_path:?}");
-                Some(Arc::new(store))
+                let mut guard = self
+                    .trajectory_store
+                    .write()
+                    .expect("trajectory_store lock poisoned");
+                // Double-check: another thread may have opened it while we waited
+                if let Some(existing) = guard.as_ref() {
+                    Some(Arc::clone(existing))
+                } else {
+                    let arc = Arc::new(store);
+                    *guard = Some(Arc::clone(&arc));
+                    log::info!("Trajectory store opened lazily at {db_path:?}");
+                    Some(arc)
+                }
             }
             Err(e) => {
                 log::warn!("Failed to lazily open trajectory store: {e}");
@@ -360,7 +383,7 @@ pub async fn run_server(
         security_observability,
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
-        trajectory_store,
+        trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -502,7 +525,7 @@ mod tests {
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
-            trajectory_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -523,7 +546,7 @@ mod tests {
             security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: Some(Arc::new(store)),
+            trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }
 }
