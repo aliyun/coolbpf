@@ -116,20 +116,42 @@ struct ScanRoot {
     scan_subdirs: &'static [&'static str],
 }
 
-/// Default session roots: current user's home directory, probed for known layouts.
+/// Default session roots.
+///
+/// On Linux: scans `/root` + `/home/*` (all users, as before).
+/// On non-Linux: scans only the current user's home directory.
 fn default_scan_roots() -> Vec<ScanRoot> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let mut homes: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        homes.push(PathBuf::from("/root"));
+        if let Ok(entries) = std::fs::read_dir("/home") {
+            for entry in entries.flatten() {
+                homes.push(entry.path());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(home) = dirs::home_dir() {
+            homes.push(home);
+        }
+    }
 
     let mut roots = Vec::new();
-    for root in SESSION_ROOTS {
-        let dir = home.join(root.rel_dir);
-        if dir.exists() {
-            roots.push(ScanRoot {
-                dir,
-                source: root.source.to_string(),
-                layout: root.layout,
-                scan_subdirs: root.scan_subdirs,
-            });
+    for home in homes {
+        for root in SESSION_ROOTS {
+            let dir = home.join(root.rel_dir);
+            if dir.exists() {
+                roots.push(ScanRoot {
+                    dir,
+                    source: root.source.to_string(),
+                    layout: root.layout,
+                    scan_subdirs: root.scan_subdirs,
+                });
+            }
         }
     }
     roots
@@ -586,31 +608,70 @@ mod tests {
     }
 
     #[test]
-    fn test_default_scan_roots_uses_home_dir() {
-        // default_scan_roots() now uses dirs::home_dir() instead of /root + /home/*.
-        // Verify it returns roots under the current user's home directory.
-        let home = dirs::home_dir().expect("home_dir should be available");
+    fn test_default_scan_roots_enumerates_linux_homes() {
+        // On Linux, default_scan_roots() must include /root and all /home/*
+        // users (multi-user collection). On other platforms it uses the
+        // current user's home directory only.
         let roots = default_scan_roots();
 
-        // If any roots exist, they must be under the home directory.
-        for root in &roots {
-            assert!(
-                root.dir.starts_with(&home),
-                "scan root {} should be under home {}",
-                root.dir.display(),
-                home.display()
-            );
+        #[cfg(target_os = "linux")]
+        {
+            let mut homes = vec![PathBuf::from("/root")];
+            if let Ok(entries) = std::fs::read_dir("/home") {
+                for entry in entries.flatten() {
+                    homes.push(entry.path());
+                }
+            }
+            let root_dirs: Vec<_> = roots.iter().map(|r| &r.dir).collect();
+            for home in &homes {
+                if !home.exists() {
+                    continue;
+                }
+                // Only assert if this home actually has session dirs;
+                // not every /home/* user will have .claude/.qoder etc.
+                let has_session_dir = SESSION_ROOTS.iter().any(|r| home.join(r.rel_dir).exists());
+                if has_session_dir {
+                    assert!(
+                        root_dirs.iter().any(|d| d.starts_with(home)),
+                        "scan roots should include entries under {}",
+                        home.display()
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let home = dirs::home_dir().expect("home_dir should be available");
+            for root in &roots {
+                assert!(
+                    root.dir.starts_with(&home),
+                    "scan root {} should be under home {}",
+                    root.dir.display(),
+                    home.display(),
+                );
+            }
         }
 
         // discover_sessions(None) should not panic and should return a Vec.
         let sessions = discover_sessions(None);
-        for session in &sessions {
-            assert!(
-                session.path.starts_with(&home),
-                "discovered session {} should be under home {}",
-                session.path.display(),
-                home.display()
-            );
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let home = dirs::home_dir().expect("home_dir should be available");
+            for session in &sessions {
+                assert!(
+                    session.path.starts_with(&home),
+                    "discovered session {} should be under home {}",
+                    session.path.display(),
+                    home.display(),
+                );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = sessions; // just ensure it doesn't panic
         }
     }
 }

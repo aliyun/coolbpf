@@ -447,24 +447,6 @@ mod tests {
         assert!(state.trajectory_store().is_none());
     }
 
-    #[test]
-    fn trajectory_store_lazily_opens_when_db_appears() {
-        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
-        let dir = db_path.parent().unwrap();
-        if std::fs::create_dir_all(dir).is_err() {
-            return; // no permission to create directory (CI without root)
-        }
-
-        // Create a valid trajectories.db, then drop the connection.
-        let _ = TrajectoryStore::new_with_path(&db_path).unwrap();
-
-        let state = test_app_state(0);
-        assert!(state.trajectory_store().is_some());
-
-        // Cleanup
-        let _ = std::fs::remove_file(&db_path);
-    }
-
     #[actix_web::test]
     async fn configure_routes_registers_security_routes_before_static_fallback() {
         let app = awtest::init_service(

@@ -9,7 +9,7 @@ mod cli;
 use cli::dashboard::DashboardCommand;
 #[cfg(feature = "server")]
 use cli::serve::ServeCommand;
-#[cfg(feature = "server")]
+#[cfg(any(target_os = "linux", feature = "server"))]
 use cli::trace::TraceCommand;
 #[cfg(target_os = "linux")]
 use cli::{
@@ -38,7 +38,7 @@ pub enum Command {
     #[cfg(target_os = "linux")]
     Token(TokenCommand),
     /// Trace agent activity (default)
-    #[cfg(feature = "server")]
+    #[cfg(any(target_os = "linux", feature = "server"))]
     Trace(TraceCommand),
     /// Query audit events
     #[cfg(target_os = "linux")]
@@ -73,7 +73,7 @@ fn main() {
     match cmd {
         #[cfg(target_os = "linux")]
         Command::Token(token_cmd) => token_cmd.execute(),
-        #[cfg(feature = "server")]
+        #[cfg(any(target_os = "linux", feature = "server"))]
         Command::Trace(trace_cmd) => trace_cmd.execute(),
         #[cfg(target_os = "linux")]
         Command::Audit(audit_cmd) => audit_cmd.execute(),

@@ -22,7 +22,7 @@ pub mod skill_metrics;
 pub mod summary;
 #[cfg(target_os = "linux")]
 pub mod token;
-#[cfg(feature = "server")]
+#[cfg(any(target_os = "linux", feature = "server"))]
 pub mod trace;
 
 /// Default configuration file path (shared by trace / serve / dashboard).
