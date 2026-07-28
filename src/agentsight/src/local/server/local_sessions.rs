@@ -52,8 +52,10 @@ pub struct AtifQuery {
 pub async fn convert_local_to_atif(query: web::Query<AtifQuery>) -> impl Responder {
     let path = query.path.clone();
 
-    if !is_safe_jsonl_path(&path) {
-        return HttpResponse::BadRequest().body("Invalid file path: must be a .jsonl file");
+    if !is_safe_session_path(&path) {
+        return HttpResponse::BadRequest().body(
+            "Invalid file path: must be a .jsonl/.json file under a known session directory",
+        );
     }
 
     let path_for_log = path.clone();

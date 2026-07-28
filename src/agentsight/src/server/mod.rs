@@ -79,7 +79,7 @@ impl AppState {
             let guard = self
                 .trajectory_store
                 .read()
-                .expect("trajectory_store lock poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(store) = guard.as_ref() {
                 return Some(Arc::clone(store));
             }
@@ -97,7 +97,7 @@ impl AppState {
                 let mut guard = self
                     .trajectory_store
                     .write()
-                    .expect("trajectory_store lock poisoned");
+                    .unwrap_or_else(|e| e.into_inner());
                 // Double-check: another thread may have opened it while we waited
                 if let Some(existing) = guard.as_ref() {
                     Some(Arc::clone(existing))

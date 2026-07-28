@@ -263,22 +263,26 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
                 // or an array of content blocks (Qoder/QoderWork).
                 if let Some(content) = event.pointer("/message/content") {
                     if let Some(text) = content.as_str() {
-                        if !text.is_empty() && first_message.is_empty() {
-                            first_message = strip_system_context(text);
-                            first_message = truncate(&first_message, 200);
+                        let stripped = strip_system_context(text);
+                        if !stripped.is_empty() {
+                            if first_message.is_empty() {
+                                first_message = truncate(&stripped, 200);
+                            }
+                            has_human_text = true;
                         }
-                        has_human_text = true;
                     } else if let Some(content_arr) = content.as_array() {
                         for block in content_arr {
                             let block_type =
                                 block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             if block_type == "text" {
                                 let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                if !text.is_empty() && first_message.is_empty() {
-                                    first_message = strip_system_context(text);
-                                    first_message = truncate(&first_message, 200);
+                                let stripped = strip_system_context(text);
+                                if !stripped.is_empty() {
+                                    if first_message.is_empty() {
+                                        first_message = truncate(&stripped, 200);
+                                    }
+                                    has_human_text = true;
                                 }
-                                has_human_text = true;
                             }
                         }
                     }
@@ -303,11 +307,13 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
                 if event_type == "user" {
                     if let Some(content) = event.pointer("/message/content") {
                         if let Some(text) = content.as_str() {
-                            if !text.is_empty() && first_message.is_empty() {
-                                first_message = strip_system_context(text);
-                                first_message = truncate(&first_message, 200);
+                            let stripped = strip_system_context(text);
+                            if !stripped.is_empty() {
+                                if first_message.is_empty() {
+                                    first_message = truncate(&stripped, 200);
+                                }
+                                has_human_text = true;
                             }
-                            has_human_text = true;
                         } else if let Some(content_arr) = content.as_array() {
                             for block in content_arr {
                                 let block_type =
@@ -315,11 +321,13 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
                                 if block_type == "text" {
                                     let text =
                                         block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                    if !text.is_empty() && first_message.is_empty() {
-                                        first_message = strip_system_context(text);
-                                        first_message = truncate(&first_message, 200);
+                                    let stripped = strip_system_context(text);
+                                    if !stripped.is_empty() {
+                                        if first_message.is_empty() {
+                                            first_message = truncate(&stripped, 200);
+                                        }
+                                        has_human_text = true;
                                     }
-                                    has_human_text = true;
                                 }
                             }
                         }
