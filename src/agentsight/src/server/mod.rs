@@ -6,6 +6,7 @@
 pub mod auth;
 mod handlers;
 pub mod optimize;
+mod secret;
 mod token_savings;
 
 use std::path::PathBuf;

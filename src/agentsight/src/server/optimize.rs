@@ -2,8 +2,10 @@
 //! `agentsight-opt` accuracy/perf/cost analyzers.
 //!
 //! LLM credentials are configured at runtime from the Dashboard settings page
-//! and persisted to `optimization_config.json` next to the databases. Analysis
-//! results are persisted per session via `agentsight-opt-store`.
+//! and persisted to `optimization_config.json` next to the databases. The API
+//! key is sealed with machine-bound encryption (see [`super::secret`]) before
+//! it reaches disk. Analysis results are persisted per session via
+//! `agentsight-opt-store`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -18,11 +20,20 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 use uuid::Uuid;
 
 use super::AppState;
+use super::secret;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
 const DB_FILE_NAME: &str = "optimization.db";
 const TRAJECTORIES_DIR_NAME: &str = "opt-trajectories";
+
+/// Directory holding the config file — where the sealing salt lives too.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
 
 // ─── LLM configuration ───────────────────────────────────────────────────────
 
@@ -38,18 +49,48 @@ pub struct OptLlmConfig {
 }
 
 impl OptLlmConfig {
-    fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
+    /// Load from disk, unsealing the API key.
+    ///
+    /// The second value is true when the file held a legacy plaintext key
+    /// that must be resealed so the plaintext leaves the disk.
+    fn load(path: &Path) -> (Self, bool) {
+        let mut config: Self = match std::fs::read_to_string(path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => return (Self::default(), false),
+        };
+        let mut needs_reseal = false;
+        if let Some(stored) = config.api_key.take() {
+            if secret::is_sealed(&stored) {
+                match secret::unseal(&stored, &config_dir(path)) {
+                    Some(plain) => config.api_key = Some(plain),
+                    // Salt or machine-id changed (e.g. config copied from
+                    // another host) — treat as unconfigured, never as a key.
+                    None => log::warn!(
+                        "Cannot decrypt the stored optimization API key; \
+                         re-enter it in the dashboard settings"
+                    ),
+                }
+            } else {
+                // Pre-encryption config: keep the key usable and reseal at
+                // startup so the plaintext copy is overwritten.
+                config.api_key = Some(stored);
+                needs_reseal = true;
+            }
         }
+        (config, needs_reseal)
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Never persist the API key as plaintext — 0o600 does not survive
+        // backups, snapshots, or root compromise (see super::secret).
+        let mut on_disk = self.clone();
+        if let Some(ref key) = on_disk.api_key {
+            on_disk.api_key = Some(secret::seal(key, &config_dir(path))?);
+        }
+        let json = serde_json::to_string_pretty(&on_disk)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)?;
-        // Config contains an API key — restrict to owner.
+        // Defense in depth: keep the sealed config owner-only as well.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -110,7 +151,15 @@ impl OptimizeState {
     /// Initialize from the storage base directory (where the .db files live).
     pub fn init(base_dir: &Path) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
-        let config = OptLlmConfig::load(&config_path);
+        let (config, needs_reseal) = OptLlmConfig::load(&config_path);
+        if needs_reseal {
+            // One-shot migration of pre-encryption configs: rewrite the file
+            // so the plaintext API key no longer exists on disk.
+            match config.save(&config_path) {
+                Ok(()) => log::info!("Migrated optimization API key to encrypted storage"),
+                Err(e) => log::warn!("Failed to encrypt stored optimization API key: {e}"),
+            }
+        }
         let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -832,6 +881,75 @@ mod tests {
 
         assert_eq!(config.effective_api_key().as_deref(), Some("short"));
         assert_eq!(config.masked_api_key().as_deref(), Some("••••••"));
+    }
+
+    /// The API key must reach disk sealed (issue: plaintext key protected
+    /// only by 0o600 leaks via backups/snapshots/root compromise).
+    #[test]
+    fn save_seals_api_key_and_load_restores_it() {
+        let dir = tmp_dir("sealed-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let config = OptLlmConfig {
+            api_key: Some("sk-super-secret-key".into()),
+            base_url: Some("http://localhost/v1".into()),
+            model: Some("test-model".into()),
+        };
+        config.save(&path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-super-secret-key"), "plaintext on disk");
+        assert!(raw.contains("enc:v1:"), "api_key must be sealed");
+        // Non-sensitive fields stay readable for debugging.
+        assert!(raw.contains("http://localhost/v1"));
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(loaded.api_key.as_deref(), Some("sk-super-secret-key"));
+        assert_eq!(loaded.model.as_deref(), Some("test-model"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Legacy plaintext configs stay usable and are flagged for resealing.
+    #[test]
+    fn load_flags_legacy_plaintext_key_for_reseal() {
+        let dir = tmp_dir("legacy-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&path, r#"{"api_key":"sk-legacy-plain","model":"m"}"#).unwrap();
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(needs_reseal);
+        assert_eq!(loaded.api_key.as_deref(), Some("sk-legacy-plain"));
+
+        // The migration path: saving removes the plaintext copy.
+        loaded.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-legacy-plain"));
+        let (reloaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(reloaded.api_key.as_deref(), Some("sk-legacy-plain"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An undecryptable envelope (foreign host / lost salt) must degrade to
+    /// "not configured" instead of surfacing ciphertext as an API key.
+    #[test]
+    fn load_drops_undecryptable_key() {
+        let dir = tmp_dir("undecryptable-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"api_key":"enc:v1:AAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","model":"m"}"#,
+        )
+        .unwrap();
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(loaded.api_key, None);
+        assert_eq!(loaded.model.as_deref(), Some("m"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
