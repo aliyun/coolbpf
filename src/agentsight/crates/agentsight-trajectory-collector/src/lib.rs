@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod codex;
 pub mod discovery;
 pub mod qoder;
 pub mod store;
@@ -130,7 +131,15 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         anyhow::bail!("no valid JSONL events");
     }
 
-    let mut trajectory = atif::convert_qoder_events(&events, &session.source)?;
+    // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
+    // that needs a dedicated converter; everything else shares the
+    // Claude-style converter.
+    let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let mut trajectory = if is_codex {
+        codex::convert_codex_events(&events, &session.source)?
+    } else {
+        atif::convert_qoder_events(&events, &session.source)?
+    };
     if trajectory.steps.is_empty() {
         let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!(
@@ -142,10 +151,21 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     // canonical per-file identity; keep the ATIF document aligned with the
     // primary-key column so both always agree.
     trajectory.session_id = Some(session.session_id.clone());
-    // Qoder-private info (cwd, message counts, project) rides in `extra`.
-    let private = qoder::extract_private_metadata(&events, &session.project);
+    // Agent-private info (cwd, message counts, project) rides in `extra`.
+    let private = if is_codex {
+        codex::extract_private_metadata(&events, &session.project)
+    } else {
+        qoder::extract_private_metadata(&events, &session.project)
+    };
     let extra = trajectory.extra.get_or_insert_with(Default::default);
     extra.extend(private);
+    // Codex's flat layout has no per-project directories; use the project
+    // derived from the session cwd instead of the "(default)" placeholder.
+    let project = extra
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| session.project.clone());
 
     let atif_json = serde_json::to_string(&trajectory.to_json_value()?)?;
     // Derived preview columns reuse the same extractor as the legacy-row
@@ -176,7 +196,7 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         first_user_message,
         last_user_message,
         atif_json,
-        project: session.project.clone(),
+        project,
         source: session.source.clone(),
         is_subagent: session.is_subagent,
         file_path,
