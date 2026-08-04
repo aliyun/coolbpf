@@ -595,6 +595,44 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_call_variants() {
+        // function_call carries a JSON-string `arguments`; local_shell_call
+        // has an `action` object and no name (defaults to "shell");
+        // function_call_output may be a plain string; local_shell_call_output
+        // may carry only `id` instead of `call_id`.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T10:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"fc_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/a\\\"}\"}}\n",
+            "{\"timestamp\":\"2026-08-03T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"fc_1\",\"output\":\"file contents\"}}\n",
+            "{\"timestamp\":\"2026-08-03T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"local_shell_call\",\"call_id\":\"lsc_1\",\"action\":{\"type\":\"exec\",\"command\":[\"ls\",\"-l\"]}}}\n",
+            "{\"timestamp\":\"2026-08-03T10:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"local_shell_call_output\",\"id\":\"lsc_1\",\"output\":\"total 0\\n\"}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+
+        assert_eq!(traj.steps.len(), 1);
+        let tcs = traj.steps[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 2);
+        assert_eq!(tcs[0].function_name, "read_file");
+        assert_eq!(tcs[0].arguments["path"], "/tmp/a");
+        assert_eq!(tcs[1].function_name, "shell");
+        assert_eq!(tcs[1].tool_call_id, "lsc_1");
+        assert_eq!(tcs[1].arguments["command"][0], "ls");
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 2);
+        assert_eq!(obs.results[0].source_call_id.as_deref(), Some("fc_1"));
+        assert_eq!(
+            obs.results[0].content,
+            Some(serde_json::Value::String("file contents".into()))
+        );
+        // Shell output resolves its source id from `id` when `call_id` is absent.
+        assert_eq!(obs.results[1].source_call_id.as_deref(), Some("lsc_1"));
+        assert_eq!(
+            obs.results[1].content,
+            Some(serde_json::Value::String("total 0".into()))
+        );
+    }
+
+    #[test]
     fn test_extract_private_metadata() {
         let events = fixture_events();
         let extra = extract_private_metadata(&events, "(default)");
