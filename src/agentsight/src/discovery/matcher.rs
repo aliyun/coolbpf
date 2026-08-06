@@ -422,4 +422,20 @@ mod tests {
             Some("QwenCode")
         );
     }
+
+    #[test]
+    fn test_default_rules_capture_qwencode_node_with_expose_gc() {
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "/root/.local/lib/qwen-code/node/bin/node",
+                    "--expose-gc",
+                    "/root/.local/lib/qwen-code/lib/cli.js",
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("QwenCode")
+        );
+    }
 }

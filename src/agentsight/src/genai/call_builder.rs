@@ -102,6 +102,9 @@ impl GenAIBuilder {
         let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
         let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
 
+        // Classify call kind (main / recap / web_search) from request content
+        let call_kind = super::helpers::classify_call_kind(&request).as_str();
+
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
         // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
@@ -287,6 +290,8 @@ impl GenAIBuilder {
                     meta.insert("session_id".to_string(), sid.clone());
                 }
                 meta.insert("pending_match_key".to_string(), pending_match_key);
+                // call_kind: main / recap / web_search
+                meta.insert("call_kind".to_string(), call_kind.to_string());
                 meta
             },
         })
@@ -1656,5 +1661,61 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert!(call.request.messages.is_empty());
         assert!(!call.request.stream);
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_main() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "hello"}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_recap_memory_subagent() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "system", "content": "You are now acting as the managed memory extraction subagent."},
+                {"role": "user", "content": "Managed memory has TWO directories. Choose which one to write each memory into."}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("recap")
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_recap_suggestion_subagent() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "user", "content": "[SUGGESTION MODE: Suggest what the user might naturally type next.]"}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("recap")
+        );
     }
 }
