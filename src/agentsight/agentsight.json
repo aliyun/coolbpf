@@ -88,7 +88,8 @@
       {"rule": ["*node*", "*claude*"], "agent_name": "Claude"},
       {"rule": ["qwen*"], "agent_name": "QwenCode"},
       {"rule": ["*/qwen*"], "agent_name": "QwenCode"},
-      {"rule": ["*node*", "*qwen*"], "agent_name": "QwenCode"}
+      {"rule": ["*node*", "*qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"}
     ]
   },
   "codex_offsets": {
