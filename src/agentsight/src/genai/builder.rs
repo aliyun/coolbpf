@@ -289,64 +289,73 @@ impl GenAIBuilder {
         // 正常响应到达后 `complete_pending` 仍会用 `IdResolver::resolve_*`
         // 重新计算并 UPDATE 正常 ID，只有 crash 路径才会保留这里写入的
         // peek/fallback 值。
-        let (user_query, input_messages, system_instructions, first_user_text, last_user_text) =
-            if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
-                let (messages, instructions_text) = view;
+        let (
+            user_query,
+            input_messages,
+            system_instructions,
+            first_user_text,
+            last_user_text,
+            user_message_count,
+        ) = if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+            let (messages, instructions_text) = view;
 
-                // First user message raw text — used as `session_key` material
-                // for IdResolver peek / crash fallback.
-                let first_user_text = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                    .find_map(Self::extract_message_text)
-                    .unwrap_or_default();
+            // First user message raw text — used as `session_key` material
+            // for IdResolver peek / crash fallback.
+            let first_user_text = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text)
+                .unwrap_or_default();
 
-                // Last user message raw text — used for user_query (display text)
-                // 以及 conversation_key (peek / crash fallback)。
-                let last_user_raw = messages
-                    .iter()
-                    .rev()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                    .find_map(Self::extract_message_text);
-                let last_user_text = last_user_raw.clone().unwrap_or_default();
+            // Last user message raw text — used for user_query (display text)
+            // 以及 conversation_key (peek / crash fallback)。
+            let last_user_raw = messages
+                .iter()
+                .rev()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text);
+            let last_user_text = last_user_raw.clone().unwrap_or_default();
 
-                // user_query: last user message text, stripped of metadata prefix
-                let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
+            let user_message_count = Self::count_real_user_messages_from_json(&messages);
 
-                // Serialise message subsets for the pending record
-                let sys: Vec<_> = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                    .collect();
-                let non_sys: Vec<_> = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-                    .collect();
+            // user_query: last user message text, stripped of metadata prefix
+            let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
 
-                let input_messages = if non_sys.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&non_sys).ok()
-                };
-                let system_instructions = if sys.is_empty() {
-                    // Responses API carries the system prompt at the top level
-                    // via "instructions". Fall back to that when the messages
-                    // array has no system role.
-                    instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
-                } else {
-                    serde_json::to_string(&sys).ok()
-                };
+            // Serialise message subsets for the pending record
+            let sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .collect();
+            let non_sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                .collect();
 
-                (
-                    user_query,
-                    input_messages,
-                    system_instructions,
-                    first_user_text,
-                    last_user_text,
-                )
+            let input_messages = if non_sys.is_empty() {
+                None
             } else {
-                (None, None, None, String::new(), String::new())
+                serde_json::to_string(&non_sys).ok()
             };
+            let system_instructions = if sys.is_empty() {
+                // Responses API carries the system prompt at the top level
+                // via "instructions". Fall back to that when the messages
+                // array has no system role.
+                instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
+            } else {
+                serde_json::to_string(&sys).ok()
+            };
+
+            (
+                user_query,
+                input_messages,
+                system_instructions,
+                first_user_text,
+                last_user_text,
+                user_message_count,
+            )
+        } else {
+            (None, None, None, String::new(), String::new(), 0)
+        };
 
         // Classify call_kind from request content
         let call_kind =
@@ -414,17 +423,19 @@ impl GenAIBuilder {
                     agent_name_str,
                     pid_i32,
                     &first_user_text,
+                    0,
                 ))
             });
         let conversation_id = self
             .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text)
+            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
                     agent_name_str,
                     pid_i32,
                     &last_user_text,
+                    user_message_count,
                 ))
             });
 
@@ -434,8 +445,12 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver
-            .finish_conversation(agent_name_str, pid_i32, &last_user_text);
+        self.id_resolver.finish_conversation(
+            agent_name_str,
+            pid_i32,
+            &last_user_text,
+            user_message_count,
+        );
 
         Some(PendingCallInfo {
             call_id,
@@ -560,6 +575,22 @@ impl GenAIBuilder {
             input_tokens,
             output_tokens,
         })
+    }
+
+    /// Count "real" user messages from a raw JSON messages array.
+    ///
+    /// A real user message has `role="user"` AND content that is either a
+    /// non-empty string, or an array containing at least one item with type
+    /// `"text"`, `"input_text"`, or `"output_text"` and non-empty text.
+    /// Mirrors the text detection logic from `extract_message_text`.
+    fn count_real_user_messages_from_json(messages: &[serde_json::Value]) -> usize {
+        messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    && Self::extract_message_text(m).is_some()
+            })
+            .count()
     }
 
     /// Generate globally unique ID (unique across restarts)
@@ -720,7 +751,7 @@ mod tests {
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1")
+            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
@@ -731,7 +762,7 @@ mod tests {
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2")
+            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,

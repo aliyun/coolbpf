@@ -101,6 +101,7 @@ impl GenAIBuilder {
         let user_query = Self::extract_last_user_query(&request);
         let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
         let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
+        let user_message_count = Self::count_real_user_messages(&request);
 
         // Classify call kind (main / recap / web_search) from request content
         let call_kind = super::helpers::classify_call_kind(&request).as_str();
@@ -144,6 +145,7 @@ impl GenAIBuilder {
             pid_i32,
             &last_user_raw,
             &response_id,
+            user_message_count,
         );
 
         // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
@@ -175,8 +177,12 @@ impl GenAIBuilder {
                     })
                     .unwrap_or(false);
                 if !has_tool_call {
-                    self.id_resolver
-                        .finish_conversation(&agent_name, pid_i32, &last_user_raw);
+                    self.id_resolver.finish_conversation(
+                        &agent_name,
+                        pid_i32,
+                        &last_user_raw,
+                        user_message_count,
+                    );
                 }
             }
         }
