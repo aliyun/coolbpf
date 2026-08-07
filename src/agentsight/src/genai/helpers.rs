@@ -456,6 +456,25 @@ impl GenAIBuilder {
             })
     }
 
+    /// 统计请求中"真正的用户消息"条数：role=user 且包含至少一个非空 Text 部分。
+    ///
+    /// 仅含 `ToolCallResponse` 部分的 user message（Anthropic 风格的工具返回）不计入。
+    /// 同一轮工具调用循环内该值不变（工具结果是 role=tool 或仅含 tool_result 的
+    /// role=user），用户发送新消息时必然 +1，用于 conversation bucket key 的
+    /// 结构性去重。
+    pub(super) fn count_real_user_messages(request: &LLMRequest) -> usize {
+        request
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == "user"
+                    && m.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { content } if !content.is_empty()))
+            })
+            .count()
+    }
+
     /// 提取清理后的 user query（去除 metadata 前缀，用于展示）
     pub(super) fn extract_last_user_query(request: &LLMRequest) -> Option<String> {
         Self::extract_last_user_raw(request).map(|raw| Self::strip_user_query_prefix(&raw))
@@ -947,6 +966,142 @@ mod tests {
         assert_eq!(
             GenAIBuilder::extract_last_user_query(&req),
             Some("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn test_count_real_user_messages_empty() {
+        let req = LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(GenAIBuilder::count_real_user_messages(&req), 0);
+    }
+
+    #[test]
+    fn test_count_real_user_messages_single_user() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "hello".to_string(),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(GenAIBuilder::count_real_user_messages(&req), 1);
+    }
+
+    #[test]
+    fn test_count_real_user_messages_tool_result_only() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tool-1".to_string()),
+                    response: serde_json::json!({"result": "ok"}),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(
+            GenAIBuilder::count_real_user_messages(&req),
+            0,
+            "tool-result-only user messages should not count"
+        );
+    }
+
+    #[test]
+    fn test_count_real_user_messages_mixed() {
+        let req = LLMRequest {
+            messages: vec![
+                InputMessage {
+                    role: "system".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "sys".to_string(),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "first question".to_string(),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::ToolCall {
+                        id: Some("tc-1".to_string()),
+                        name: "search".to_string(),
+                        arguments: None,
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::ToolCallResponse {
+                        id: Some("tc-1".to_string()),
+                        response: serde_json::json!({"data": "result"}),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "second question".to_string(),
+                    }],
+                    name: None,
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(
+            GenAIBuilder::count_real_user_messages(&req),
+            2,
+            "2 text-bearing user msgs, 1 tool-result-only, should count 2"
         );
     }
 
