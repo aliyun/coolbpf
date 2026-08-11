@@ -1,11 +1,25 @@
 # Changelog
 
-## 0.9.1
+## 0.10.0
 
 ### Features
 - Add case containment lifecycle with policy handoff, no-gap replacement, dedicated API, and dashboard views.
 - Add system audit protocol, event storage, dashboard, and extract audit service into a dedicated crate.
 - Add ActPlane risk enforcement with enforcer service, hardened file controls, secure lifecycle, and risk enforcement dashboard.
+- Convert Codex rollout JSONL to ATIF and cover Codex routing and tool calls with tests.
+- Report process metadata on raw HTTPS events and carry it in the generic envelope.
+
+### Fixes
+- Keep turn open on tool-call stop and add user_message_count to turn.id bucket key.
+- Treat pause_turn as a normal SSE finish. (#2320)
+- Stream-decode fragmented zstd SSE responses.
+- Improve QwenCode trace data accuracy and add QwenCode allow rules to agentsight config.
+- Keep session across cosh restarts.
+- Map cosh session temporary file writes. (#2080)
+
+## 0.9.1
+
+### Features
 - Rework optimization dashboard views and add detour-based cost waste analysis.
 - Move agent health and interruptions to a dedicated dashboard page.
 
@@ -16,7 +30,6 @@
 - Skip message parse for non-LLM paths.
 - Encrypt optimization config API key.
 - Show known agent rules.
-- Map cosh session temporary file writes. (#2080)
 
 ### CI
 - Pin eBPF build to clang 15 and use dedicated runner pools.
