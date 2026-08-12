@@ -89,7 +89,12 @@
       {"rule": ["qwen*"], "agent_name": "QwenCode"},
       {"rule": ["*/qwen*"], "agent_name": "QwenCode"},
       {"rule": ["*node*", "*qwen*"], "agent_name": "QwenCode"},
-      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"}
+      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "-m", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agent_scope*"], "agent_name": "AgentScope"}
     ]
   },
   "codex_offsets": {
