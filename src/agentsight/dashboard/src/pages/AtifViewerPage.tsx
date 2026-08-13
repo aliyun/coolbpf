@@ -9,6 +9,7 @@ import {
 } from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
 import { SubagentGraph } from '../components/SubagentGraph';
+import { CausalAttributionPanel } from '../components/CausalAttributionPanel';
 import type { TrajNode } from '../utils/trajectoryTree';
 import {
   buildTrajectoryTree, findNodeByPath, findNodeByRef, encodeNodePath, decodeNodePath,
@@ -1058,7 +1059,7 @@ export const AtifViewerPage: React.FC = () => {
                   <p className="text-gray-400">该轨迹暂无步骤数据</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_2fr] gap-4 items-start">
+                <div className="grid grid-cols-1 lg:grid-cols-[minmax(240px,1fr)_2fr_minmax(300px,380px)] gap-4 items-start">
                   {/* Left: round list */}
                   <div className="space-y-2 lg:max-h-[calc(100vh-200px)] lg:overflow-y-auto lg:sticky lg:top-4 pr-1">
                     {rounds.map(round => (
@@ -1071,7 +1072,7 @@ export const AtifViewerPage: React.FC = () => {
                     ))}
                   </div>
 
-                  {/* Right: selected round detail */}
+                  {/* Center: selected round detail */}
                   <div>
                     {activeRound ? (
                       <RoundDetail
@@ -1086,6 +1087,16 @@ export const AtifViewerPage: React.FC = () => {
                         <p className="text-gray-400">点击左侧轮次查看详情</p>
                       </div>
                     )}
+                  </div>
+
+                  {/* Right: causal attribution panel */}
+                  <div className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+                    <CausalAttributionPanel
+                      sessionId={queryId}
+                      roundIndex={selectedRound ?? undefined}
+                      roundLabel={activeRound?.label}
+                      idKind={queryType}
+                    />
                   </div>
                 </div>
               )}

@@ -1871,3 +1871,17 @@ export async function saveOptimizeConfig(body: {
     body: JSON.stringify(body),
   });
 }
+
+/** Run causal attribution on a trajectory and return the causal case. */
+export async function runCausalAttribution(
+  body: import('../types/causal').CausalAttributionRequest,
+): Promise<import('../types/causal').CausalAttributionResponse> {
+  return apiFetch<import('../types/causal').CausalAttributionResponse>(
+    `${API_BASE}/api/causal-attribution`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+}
