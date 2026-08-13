@@ -19,7 +19,8 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -653,10 +654,99 @@ impl AgentSight {
         if let Err(e) = probes.add_traced_pid(pid) {
             log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
+        // Register descendant PIDs so child processes spawned by wrapper-style
+        // agents are admitted by the BPF `traced_processes` filter even when
+        // procmon misses their execve tracepoint. The SSL uprobe is inode-global
+        // (pid=-1), so registering is sufficient — no per-child attach needed.
+        //
+        // Currently gated to QwenCode: its `/usr/local/bin/qwen` shebang
+        // wrapper immediately spawnSync's a `node-22 --expose-gc …cli.js`
+        // child, which then spawn's another node-22 worker that does all the
+        // actual LLM HTTPS I/O. The wrapper itself makes zero SSL calls, so
+        // without the descendants in the BPF map, qwencode's traffic is
+        // captured by the uprobe and silently dropped by `is_pid_traced()`.
+        // Other agents (CoshNG, Claude, Codex, …) still have their main
+        // process participate in TLS, so the matched PID alone is enough.
+        if Self::should_register_descendants(agent_name) {
+            for child in Self::collect_descendant_pids(pid) {
+                if child == pid {
+                    continue;
+                }
+                if let Err(e) = probes.add_traced_pid(child) {
+                    log::debug!("Failed to register descendant pid {child} of {pid}: {e}");
+                } else {
+                    log::debug!("Registered descendant pid {child} of {pid} ({agent_name})");
+                }
+            }
+        }
         // attach_process logs WARN internally if SSL attach degrades to
         // global-uprobe-only coverage; always succeeds for BPF map registration.
         let _ = probes.attach_process(pid as i32);
         log::info!("Attached to agent: {agent_name} (pid={pid})");
+    }
+
+    /// Whether descendant PIDs should also be registered into the BPF
+    /// `traced_processes` map when an agent is attached.
+    ///
+    /// Currently true only for `QwenCode` — the only agent whose matched
+    /// wrapper process does not itself perform any TLS I/O and whose actual
+    /// LLM traffic happens in deeply-nested child `node-22` processes that
+    /// procmon tends to miss.
+    fn should_register_descendants(agent_name: &str) -> bool {
+        matches!(agent_name, "QwenCode")
+    }
+
+    /// Collect all descendant PIDs of `root` by walking `/proc`.
+    ///
+    /// Reads each numeric `/proc/<pid>/status` once to obtain its `PPid`, then
+    /// BFS-traverses the parent->children edges. Returns the full set including
+    /// `root` itself. Silently skips processes that exit before we read them —
+    /// they won't produce SSL events anyway.
+    fn collect_descendant_pids(root: u32) -> HashSet<u32> {
+        Self::collect_descendant_pids_impl(root, Path::new("/proc"))
+    }
+
+    fn collect_descendant_pids_impl(root: u32, proc_root: &Path) -> HashSet<u32> {
+        let mut result = HashSet::new();
+        result.insert(root);
+
+        let proc_dir = match fs::read_dir(proc_root) {
+            Ok(d) => d,
+            Err(_) => return result,
+        };
+
+        let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+        for entry in proc_dir.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let pid: u32 = match name.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let status = match fs::read_to_string(proc_root.join(format!("{pid}/status"))) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ppid = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:\t"))
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            if let Some(ppid) = ppid {
+                children_of.entry(ppid).or_default().push(pid);
+            }
+        }
+
+        let mut queue = vec![root];
+        while let Some(p) = queue.pop() {
+            if let Some(kids) = children_of.get(&p) {
+                for &k in kids {
+                    if result.insert(k) {
+                        queue.push(k);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Detach SSL probes from a specific agent process
@@ -3175,5 +3265,127 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a fake `/proc/<pid>/status` file with a single `PPid:\t<ppid>` line.
+    fn write_fake_status(proc_root: &Path, pid: u32, ppid: u32) {
+        let dir = proc_root.join(pid.to_string());
+        std::fs::create_dir_all(&dir).expect("create fake proc dir");
+        std::fs::write(dir.join("status"), format!("Name:\tfake\nPPid:\t{ppid}\n"))
+            .expect("write fake status");
+    }
+
+    #[test]
+    fn collect_descendants_qwencode_wrapper_chain() {
+        // cosh-shell(1) -> bash(2) -> node wrapper(3) -> node-22(4) -> node-22(5)
+        // Asking for descendants of 3 must return {3, 4, 5} and ignore the
+        // ancestor (1, 2) and unrelated branches (9, parented by 1).
+        let dir = unique_tmp_dir("qwencode-chain");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 2, 1);
+        write_fake_status(&dir, 3, 2);
+        write_fake_status(&dir, 4, 3);
+        write_fake_status(&dir, 5, 4);
+        write_fake_status(&dir, 9, 1);
+
+        let got = AgentSight::collect_descendant_pids_impl(3, &dir);
+
+        let mut want = HashSet::new();
+        want.extend([3, 4, 5]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_root_only_when_no_children() {
+        let dir = unique_tmp_dir("lone-root");
+        write_fake_status(&dir, 7, 0);
+        write_fake_status(&dir, 8, 0); // sibling, not a descendant
+
+        let got = AgentSight::collect_descendant_pids_impl(7, &dir);
+        let mut want = HashSet::new();
+        want.insert(7);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_returns_root_when_proc_missing() {
+        let dir = unique_tmp_dir("missing-proc").join("does-not-exist");
+        // Don't create `dir` — read_dir must fail and the helper must fall
+        // back to returning {root}.
+        let got = AgentSight::collect_descendant_pids_impl(42, &dir);
+        let mut want = HashSet::new();
+        want.insert(42);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn collect_descendants_skips_orphan_status_files() {
+        // pid=10 has a status file; pid=11 has its directory but no status
+        // file (process exited mid-walk). The walker should include 10 as a
+        // descendant of 1 but silently skip 11.
+        let dir = unique_tmp_dir("orphan-status");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 10, 1);
+        let orphan_dir = dir.join("11");
+        std::fs::create_dir_all(&orphan_dir).expect("create orphan proc dir");
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 10]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_ignores_non_numeric_entries() {
+        // `/proc` always contains `self`, `thread-self`, `sys`, etc. The
+        // walker must skip non-numeric entries without panicking.
+        let dir = unique_tmp_dir("non-numeric");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 2, 1);
+        std::fs::create_dir_all(dir.join("self")).expect("create self dir");
+        std::fs::create_dir_all(dir.join("thread-self")).expect("create thread-self dir");
+        std::fs::write(dir.join("meminfo"), "ignored").expect("write stray file");
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 2]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_register_descendants_only_qwencode() {
+        // Positive case: the only agent currently opted in.
+        assert!(AgentSight::should_register_descendants("QwenCode"));
+
+        // Negative cases: every other known agent name must stay out so the
+        // traced_processes BPF map stays lean.
+        for name in [
+            "CoshNG",
+            "Claude",
+            "Codex",
+            "OpenClaw",
+            "os-copilot",
+            "cosh",
+            "node-22",
+            "Hermes",
+            "Runloop",
+            "CoshNG-shell",
+            "",
+            "qwencode", // lowercase must not match
+            "qwenCode", // case-sensitive
+        ] {
+            assert!(
+                !AgentSight::should_register_descendants(name),
+                "descendant registration must be opt-in; {name:?} is not opted in"
+            );
+        }
     }
 }
