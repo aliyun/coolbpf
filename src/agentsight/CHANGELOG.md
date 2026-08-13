@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.1
+
+### Features
+- Bootstrap dashboard i18n with preferred browser locale matching.
+- Add agentscope framework to agent discovery rules.
+- Streamline component onboarding docs and clarify service startup.
+
+### Fixes
+- Treat pause_turn as a normal SSE finish. (#2320)
+- Keep tool_call name across SSE continuation deltas.
+- Report pids in the observer namespace. (#2360)
+- Validate enforcer RPM payload, preserve RPM staging targets, and suppress repeated enforcer errors.
+- Wrap extractor errors in JSON envelope and classify store errors by variant. (#2417, #2418)
+- Dedupe unavailable state and refine dashboard metadata sync.
+
 ## 0.10.0
 
 ### Features
@@ -11,7 +26,6 @@
 
 ### Fixes
 - Keep turn open on tool-call stop and add user_message_count to turn.id bucket key.
-- Treat pause_turn as a normal SSE finish. (#2320)
 - Stream-decode fragmented zstd SSE responses.
 - Improve QwenCode trace data accuracy and add QwenCode allow rules to agentsight config.
 - Keep session across cosh restarts.
