@@ -221,6 +221,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
+                .service(handlers::get_latency_metrics)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)

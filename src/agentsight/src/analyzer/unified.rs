@@ -995,6 +995,7 @@ impl Analyzer {
                     duration_ns: resp
                         .end_timestamp_ns()
                         .saturating_sub(req.source_event.timestamp_ns),
+                    first_output_timestamp_ns: None,
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -1038,6 +1039,7 @@ impl Analyzer {
                     duration_ns: resp
                         .end_timestamp_ns()
                         .saturating_sub(req.source_event.timestamp_ns),
+                    first_output_timestamp_ns: resp.first_output_timestamp_ns(),
                     is_sse: true,
                     sse_event_count: resp.sse_event_count(),
                 })
@@ -1067,6 +1069,7 @@ impl Analyzer {
                     response_headers: String::new(),
                     response_body: None,
                     duration_ns: 0,
+                    first_output_timestamp_ns: None,
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -1076,22 +1079,20 @@ impl Analyzer {
 
                 // Try SSE parsing first, fallback to regular text if it fails
                 // This is more robust than checking content-type header (which may fail due to HPACK)
-                let (response_body, sse_event_count) =
-                    if let Some(sse_json) = stream.response_sse_json_array() {
-                        // Successfully parsed as SSE
-                        let event_count = sse_json.as_array().map(|a| a.len()).unwrap_or(0);
-                        (
-                            Some(serde_json::to_string(&sse_json).unwrap_or_default()),
-                            event_count,
-                        )
-                    } else {
-                        // Not SSE, try regular JSON or raw text
-                        let body = stream
-                            .response_json_body()
-                            .map(|v| serde_json::to_string(&v).unwrap_or_default())
-                            .or_else(|| stream.response_body_str());
-                        (body, 0)
-                    };
+                let parsed_sse_json = stream.response_sse_json_array();
+                let sse_event_count = stream.response_sse_event_count();
+                let response_body = if let Some(sse_json) = parsed_sse_json.as_ref() {
+                    // Successfully parsed as SSE
+                    Some(serde_json::to_string(sse_json).unwrap_or_default())
+                } else {
+                    // Not SSE, try regular JSON or raw text
+                    let body = stream
+                        .response_json_body()
+                        .map(|v| serde_json::to_string(&v).unwrap_or_default())
+                        .or_else(|| stream.response_body_str());
+                    body
+                };
+                let is_sse = stream.is_response_sse() || sse_event_count > 0;
 
                 Some(HttpRecord {
                     timestamp_ns: stream.start_timestamp_ns,
@@ -1107,7 +1108,12 @@ impl Analyzer {
                     duration_ns: stream
                         .end_timestamp_ns
                         .saturating_sub(stream.start_timestamp_ns),
-                    is_sse: sse_event_count > 0,
+                    first_output_timestamp_ns: if is_sse {
+                        stream.first_output_timestamp_ns()
+                    } else {
+                        None
+                    },
+                    is_sse,
                     sse_event_count,
                 })
             }
@@ -1487,15 +1493,30 @@ mod tests {
     fn build_sse_http2_stream(
         path: &str,
         request_body: &[u8],
-        sse_chunk: &serde_json::Value,
+        sse_chunk: Option<&serde_json::Value>,
+    ) -> crate::aggregator::Http2Stream {
+        let response_body = sse_chunk.map_or_else(
+            || "data: [DONE]\n\n".to_string(),
+            |chunk| format!("data: {}\n\ndata: [DONE]\n\n", chunk),
+        );
+        build_http2_stream(
+            path,
+            request_body,
+            response_body.into_bytes(),
+            "text/event-stream",
+        )
+    }
+
+    fn build_http2_stream(
+        path: &str,
+        request_body: &[u8],
+        body_bytes: Vec<u8>,
+        content_type: &str,
     ) -> crate::aggregator::Http2Stream {
         use crate::aggregator::{ConnectionId, Http2Stream, StreamId};
         use crate::parser::{Http2FrameType, ParsedHttp2Frame};
         use crate::probes::sslsniff::SslEvent;
         use std::rc::Rc;
-
-        let response_body = format!("data: {}\n\ndata: [DONE]\n\n", sse_chunk);
-        let body_bytes = response_body.into_bytes();
 
         let ssl_event = Rc::new(SslEvent {
             source: 0,
@@ -1568,7 +1589,7 @@ mod tests {
         });
         stream.decoded_response_headers = Some(vec![
             (":status".to_string(), "200".to_string()),
-            ("content-type".to_string(), "text/event-stream".to_string()),
+            ("content-type".to_string(), content_type.to_string()),
         ]);
         stream.response_data_frames.push(ParsedHttp2Frame {
             frame_type: Http2FrameType::Data,
@@ -1582,6 +1603,87 @@ mod tests {
         stream.response_complete = true;
         stream.end_timestamp_ns = 1_100_000_000;
         stream
+    }
+    fn analyze_http2_record(
+        analyzer: &Analyzer,
+        stream: crate::aggregator::Http2Stream,
+    ) -> HttpRecord {
+        analyzer
+            .analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream))
+            .into_iter()
+            .find_map(|result| match result {
+                AnalysisResult::Http(record) => Some(record),
+                _ => None,
+            })
+            .expect("Analyzer must emit HttpRecord")
+    }
+
+    #[test]
+    fn first_output_timestamp_propagates_from_http2_to_latency_metrics() {
+        use crate::genai::{GenAIBuilder, GenAISemanticEvent};
+        use crate::response_map::ResponseSessionMapper;
+        use std::collections::HashMap;
+
+        let analyzer = Analyzer::new();
+        let request_body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-h2-propagation",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]
+        });
+        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, Some(&chunk));
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+
+        let http = results
+            .iter()
+            .find_map(|result| match result {
+                AnalysisResult::Http(record) => Some(record),
+                _ => None,
+            })
+            .expect("Analyzer must emit HttpRecord");
+        assert_eq!(http.first_output_timestamp_ns, Some(1_000_000_000));
+        assert!(http.is_sse);
+
+        let builder = GenAIBuilder::new();
+        let mapper = ResponseSessionMapper::new();
+        let cache = HashMap::<u32, String>::new();
+        let (built, pending) = builder.build_with_pending(&results, &mapper, &cache);
+        let call = built
+            .events
+            .into_iter()
+            .find_map(|event| match event {
+                GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("GenAIBuilder must emit LLMCall");
+        assert_eq!(
+            call.metadata.get("first_output_timestamp_ns"),
+            Some(&"1000000000".to_string())
+        );
+
+        let event = GenAISemanticEvent::LLMCall(call);
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_analyzer_latency_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        if let Some(info) = pending.as_ref() {
+            store.insert_pending(info).unwrap();
+        }
+        store.complete_pending(&event).unwrap();
+
+        let metrics = store.get_latency_metrics(0, 2_000_000_000, None).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].streaming_call_count, 1);
+        assert_eq!(
+            metrics[0].ttft_ms.as_ref().map(|metric| metric.p50),
+            Some(100.0)
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1597,7 +1699,7 @@ mod tests {
             "model": "gpt-4o",
             "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]
         });
-        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, &chunk);
+        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, Some(&chunk));
 
         let agg = AggregatedResult::Http2StreamComplete(stream);
         let result = analyzer.extract_message_from_http(&agg);
@@ -1618,8 +1720,11 @@ mod tests {
         let chunk = serde_json::json!({
             "choices": [{"message": {"content": "hi", "tool_use": null}}]
         });
-        let stream =
-            build_sse_http2_stream("/api/v1/copilot/generate_copilot", &request_body, &chunk);
+        let stream = build_sse_http2_stream(
+            "/api/v1/copilot/generate_copilot",
+            &request_body,
+            Some(&chunk),
+        );
 
         let agg = AggregatedResult::Http2StreamComplete(stream);
         let result = analyzer.extract_message_from_http(&agg);
@@ -1647,7 +1752,7 @@ mod tests {
         let stream = build_sse_http2_stream(
             "/@modelcontextprotocol%2fserver-everything",
             request_body,
-            &chunk,
+            Some(&chunk),
         );
         let agg = AggregatedResult::Http2StreamComplete(stream);
 
@@ -1659,11 +1764,62 @@ mod tests {
         let llm_stream = build_sse_http2_stream(
             "/v1/chat/completions",
             br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
-            &serde_json::json!({"id": "chatcmpl-1"}),
+            Some(&serde_json::json!({"id": "chatcmpl-1"})),
         );
         assert!(Analyzer::should_parse_message(
             &AggregatedResult::Http2StreamComplete(llm_stream)
         ));
+    }
+
+    #[test]
+    fn http2_sse_without_observable_output_remains_streaming() {
+        let analyzer = Analyzer::new();
+        let request_body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, None);
+
+        let http = analyze_http2_record(&analyzer, stream);
+
+        assert!(http.is_sse);
+        assert_eq!(http.first_output_timestamp_ns, None);
+        assert_eq!(http.sse_event_count, 1);
+    }
+
+    #[test]
+    fn http2_metadata_only_sse_keeps_streaming_identity_without_first_output() {
+        let analyzer = Analyzer::new();
+        let request_body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let stream = build_sse_http2_stream(
+            "/v1/chat/completions",
+            request_body,
+            Some(&serde_json::json!({"type": "response.created"})),
+        );
+
+        let http = analyze_http2_record(&analyzer, stream);
+
+        assert!(http.is_sse);
+        assert_eq!(http.first_output_timestamp_ns, None);
+        assert_eq!(http.sse_event_count, 2);
+    }
+
+    #[test]
+    fn http2_ordinary_json_response_is_not_streaming() {
+        let analyzer = Analyzer::new();
+        let request_body =
+            br#"{"model":"gpt-4o","stream":false,"messages":[{"role":"user","content":"hi"}]}"#;
+        let stream = build_http2_stream(
+            "/v1/chat/completions",
+            request_body,
+            br#"{"id":"non-sse","choices":[]}"#.to_vec(),
+            "application/json",
+        );
+
+        let http = analyze_http2_record(&analyzer, stream);
+
+        assert!(!http.is_sse);
+        assert_eq!(http.first_output_timestamp_ns, None);
+        assert_eq!(http.sse_event_count, 0);
     }
 
     #[test]
