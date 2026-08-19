@@ -2296,6 +2296,10 @@ mod tests {
         let filtered_agents = filtered_body["agents"].as_array().unwrap();
         assert_eq!(filtered_agents.len(), 1);
         assert_eq!(filtered_agents[0]["pid"], 1001);
+        assert_eq!(
+            filtered_body["filtered_count"], 2,
+            "hidden Cosh + client entries must be surfaced as filtered_count"
+        );
 
         let include_clients = awtest::call_service(
             &app,
@@ -2307,6 +2311,7 @@ mod tests {
         let include_body = service_response_json(include_clients).await;
         let agents = include_body["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 2, "Cosh should still be excluded");
+        assert_eq!(include_body["filtered_count"], 1);
 
         let deleted = awtest::call_service(
             &app,
@@ -2804,6 +2809,10 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
 pub struct AgentHealthResponse {
     pub agents: Vec<AgentHealthStatus>,
     pub last_scan_time: u64,
+    /// Entries hidden by the default view (Cosh + healthy client agents).
+    /// Non-zero tells callers the empty/short list is a filter result, not
+    /// missing data; pass `?include_clients=true` to see client agents.
+    pub filtered_count: usize,
 }
 
 /// GET /api/agent-health
@@ -2819,8 +2828,9 @@ pub async fn get_agent_health(
 ) -> impl Responder {
     let include_clients = req.query_string().contains("include_clients=true");
     let store = data.health_store.read().unwrap();
-    let agents = store
-        .all_agents()
+    let all = store.all_agents();
+    let total = all.len();
+    let agents: Vec<AgentHealthStatus> = all
         .into_iter()
         .filter(|a| a.agent_name != "Cosh")
         .filter(|a| {
@@ -2829,9 +2839,11 @@ pub async fn get_agent_health(
                 || a.status == crate::health::store::AgentHealthState::Offline
         })
         .collect();
+    let filtered_count = total - agents.len();
     HttpResponse::Ok().json(AgentHealthResponse {
         agents,
         last_scan_time: store.last_scan_time,
+        filtered_count,
     })
 }
 
