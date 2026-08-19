@@ -5,8 +5,9 @@ import {
   restartAgentHealth,
   fetchInterruptions,
   resolveInterruption,
+  fetchLatencyMetrics,
 } from '../utils/apiClient';
-import type { InterruptionRecord, InterruptionSeverity } from '../utils/apiClient';
+import type { InterruptionRecord, InterruptionSeverity, LatencyMetricsSummary, MetricPercentiles } from '../utils/apiClient';
 import type { AgentHealthStatus } from '../types';
 import { useI18n, useLocaleTag, INTERRUPTION_TYPES, interruptionTypeKey } from '../i18n';
 import type { MessageKey } from '../i18n';
@@ -59,13 +60,85 @@ interface Toast {
   message: string;
 }
 
+function formatMetricValue(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function formatMetricP50(metric: MetricPercentiles | null, unit: string): string {
+  return metric ? formatMetricValue(metric.p50) + ' ' + unit : '—';
+}
+
+function canonicalAgentKey(agentName: string): string {
+  return agentName.toLowerCase();
+}
+
+const LatencyMetricsRow: React.FC<{ metrics: LatencyMetricsSummary }> = ({ metrics }) => {
+  const { t } = useI18n();
+  const items = [
+    { label: t('latency.ttft'), metric: metrics.ttft_ms, unit: 'ms' },
+    { label: t('latency.tps'), metric: metrics.tps_tokens_per_second, unit: 'tokens/s' },
+    { label: t('latency.tpot'), metric: metrics.tpot_ms_per_token, unit: 'ms/token' },
+    { label: t('latency.e2e'), metric: metrics.e2e_latency_ms, unit: 'ms' },
+  ];
+
+  if (!items.some(item => item.metric !== null)) return null;
+
+  const tooltip = items
+    .map(({ label, metric, unit }) => {
+      if (!metric) return label + ' —';
+      return (
+        label +
+        ' ' +
+        t('latency.p50') +
+        ' ' +
+        formatMetricValue(metric.p50) +
+        ' ' +
+        unit +
+        ' · ' +
+        t('latency.p95') +
+        ' ' +
+        formatMetricValue(metric.p95) +
+        ' ' +
+        unit +
+        ' · ' +
+        t('latency.p99') +
+        ' ' +
+        formatMetricValue(metric.p99) +
+        ' ' +
+        unit
+      );
+    })
+    .join(' · ');
+
+  return (
+    <div
+      className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-700"
+      title={tooltip}
+      aria-label={tooltip}
+    >
+      {items.map(({ label, metric, unit }) => (
+        <span key={label}>
+          <span className="text-gray-400">{label}</span> {formatMetricP50(metric, unit)}
+        </span>
+      ))}
+    </div>
+  );
+};
+
+const LATENCY_TIME_PRESETS = [
+  { key: 'latency.range24h', ms: 24 * 3600 * 1000 },
+  { key: 'latency.range7d', ms: 7 * 24 * 3600 * 1000 },
+  { key: 'latency.range30d', ms: 30 * 24 * 3600 * 1000 },
+] as const;
+
 const AgentCard: React.FC<{
   agent: AgentHealthStatus;
   related: AgentHealthStatus[];
   onDelete: (pid: number) => void;
   onRestart: (pid: number) => void;
   restarting: boolean;
-}> = ({ agent, related, onDelete, onRestart, restarting }) => {
+  latency?: LatencyMetricsSummary;
+}> = ({ agent, related, onDelete, onRestart, restarting, latency }) => {
   const { t } = useI18n();
   const [showRelated, setShowRelated] = useState(false);
 
@@ -177,6 +250,7 @@ const AgentCard: React.FC<{
           </div>
         )}
       </div>
+      {latency && <LatencyMetricsRow metrics={latency} />}
       {(isOffline || canRestart) && (
         <div className="mt-2 flex items-center gap-3">
           {isOffline && (
@@ -236,6 +310,34 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const [error, setError] = useState<string | null>(null);
   const [restartingPids, setRestartingPids] = useState<Set<number>>(new Set());
   const hasDataRef = useRef(false);
+  const [rangeMs, setRangeMs] = useState(7 * 24 * 3600 * 1000);
+  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetricsSummary[]>([]);
+  const [latencyLoading, setLatencyLoading] = useState(true);
+  const [latencyError, setLatencyError] = useState<string | null>(null);
+  const latencyRequestIdRef = useRef(0);
+
+  const loadLatency = useCallback(async () => {
+    const requestId = ++latencyRequestIdRef.current;
+    setLatencyLoading(true);
+    setLatencyError(null);
+    try {
+      const endNs = Date.now() * 1_000_000;
+      const startNs = endNs - rangeMs * 1_000_000;
+      const data = await fetchLatencyMetrics(startNs, endNs);
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyMetrics(data);
+        setLatencyError(null);
+      }
+    } catch (e: any) {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyError(e.message || '');
+      }
+    } finally {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyLoading(false);
+      }
+    }
+  }, [rangeMs]);
 
   const refresh = useCallback(async () => {
     try {
@@ -289,6 +391,10 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     return () => clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    void loadLatency();
+  }, [loadLatency]);
+
   // Sort: hung/unhealthy first (real problems), healthy in the middle, offline last (less prominent)
   const sorted = [...agents].sort((a, b) => {
     const order: Record<string, number> = {
@@ -306,6 +412,24 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const offlineCount = agents.filter(a => a.status === 'offline').length;
   const hungCount = agents.filter(a => a.status === 'hung').length;
   const totalCount = agents.length;
+
+  const latencyByAgent = new Map<string, LatencyMetricsSummary[]>();
+  for (const metric of latencyMetrics) {
+    if (metric.agent_name !== null) {
+      const key = canonicalAgentKey(metric.agent_name);
+      const summaries = latencyByAgent.get(key);
+      if (summaries) {
+        summaries.push(metric);
+      } else {
+        latencyByAgent.set(key, [metric]);
+      }
+    }
+  }
+  const latencyForAgent = (agentName: string): LatencyMetricsSummary | undefined => {
+    const summaries = latencyByAgent.get(canonicalAgentKey(agentName));
+    // Do not silently choose one when casing variants produce separate summaries.
+    return summaries?.length === 1 ? summaries[0] : undefined;
+  };
 
   const gatewayPids = new Set(sorted.map(a => a.pid));
   // Orphaned related processes: workers whose parent is not any main card (should not happen, fallback).
@@ -342,9 +466,35 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
             </span>
           )}
         </div>
-        {lastScan > 0 && (
-          <span className="text-xs text-gray-400">{t('ah.lastScan', { time: relativeTime(lastScan, t) })}</span>
-        )}
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-gray-400">{t('latency.title')}</span>
+            {LATENCY_TIME_PRESETS.map(({ key, ms }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setRangeMs(ms)}
+                aria-pressed={rangeMs === ms}
+                className={rangeMs === ms
+                  ? 'px-2 py-1 text-[11px] rounded bg-blue-100 text-blue-700 font-medium'
+                  : 'px-2 py-1 text-[11px] rounded bg-gray-100 hover:bg-gray-200 text-gray-600'}
+              >
+                {t(key)}
+              </button>
+            ))}
+          </div>
+          {latencyLoading && (
+            <span className="text-[11px] text-gray-400">{t('latency.loading')}</span>
+          )}
+          {latencyError !== null && (
+            <span className="text-[11px] text-red-400" title={latencyError || t('latency.error')}>
+              {t('latency.error')}
+            </span>
+          )}
+          {lastScan > 0 && (
+            <span className="text-xs text-gray-400">{t('ah.lastScan', { time: relativeTime(lastScan, t) })}</span>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -367,6 +517,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
               onDelete={handleDelete}
               onRestart={handleRestart}
               restarting={restartingPids.has(agent.pid)}
+              latency={latencyForAgent(agent.agent_name)}
             />
           ))}
         </div>

@@ -2,8 +2,10 @@ import React, {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 
@@ -35,6 +37,19 @@ const enUSMessages = {
   'nav.riskEnforcement': 'Risk Enforcement',
   'nav.trajectoryViewer': 'Trajectory Viewer',
   'nav.settings': 'Settings',
+  'latency.title': 'Latency Metrics',
+  'latency.ttft': 'TTFT',
+  'latency.tps': 'TPS',
+  'latency.tpot': 'TPOT',
+  'latency.e2e': 'E2E',
+  'latency.p50': 'P50',
+  'latency.p95': 'P95',
+  'latency.p99': 'P99',
+  'latency.loading': 'Loading latency metrics...',
+  'latency.error': 'Failed to load latency metrics',
+  'latency.range24h': 'Last 24h',
+  'latency.range7d': 'Last 7d',
+  'latency.range30d': 'Last 30d',
   'login.subtitle': 'Enter your dashboard token to continue',
   'login.tokenLabel': 'Dashboard Token',
   'login.tokenPlaceholder': 'Paste your token here',
@@ -1016,6 +1031,19 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'nav.riskEnforcement': '风险拦截',
     'nav.trajectoryViewer': '轨迹查看',
     'nav.settings': '设置',
+    'latency.title': '延迟指标',
+    'latency.ttft': 'TTFT',
+    'latency.tps': 'TPS',
+    'latency.tpot': 'TPOT',
+    'latency.e2e': 'E2E',
+    'latency.p50': 'P50',
+    'latency.p95': 'P95',
+    'latency.p99': 'P99',
+    'latency.loading': '正在加载延迟指标...',
+    'latency.error': '延迟指标加载失败',
+    'latency.range24h': '最近 24h',
+    'latency.range7d': '最近 7d',
+    'latency.range30d': '最近 30d',
     'login.subtitle': '请输入 Dashboard 令牌以继续',
     'login.tokenLabel': 'Dashboard 令牌',
     'login.tokenPlaceholder': '在此粘贴令牌',
@@ -2135,33 +2163,87 @@ interface LanguageSwitcherProps {
   className?: string;
 }
 
+const LOCALE_OPTIONS: Array<{ value: Locale; label: string }> = [
+  { value: 'en-US', label: 'English' },
+  { value: 'zh-CN', label: '简体中文' },
+];
+
 export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({
   id,
   className = '',
 }) => {
   const { locale, setLocale, t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
-    const nextLocale = event.target.value;
-    if (isSupportedLocale(nextLocale)) {
-      setLocale(nextLocale);
-    }
-  };
+  useEffect(() => {
+    if (!open) return;
+
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
+  const selectedLabel = LOCALE_OPTIONS.find((option) => option.value === locale)?.label ?? 'English';
 
   return (
-    <label className={`inline-flex items-center gap-1.5 ${className}`} htmlFor={id}>
+    <div ref={containerRef} className={`relative inline-flex items-center gap-1.5 ${className}`}>
       <span aria-hidden="true">🌐</span>
-      <span className="sr-only">{t('language.label')}</span>
-      <select
+      <button
+        type="button"
         id={id}
-        aria-label={t('language.label')}
-        value={locale}
-        onChange={handleChange}
-        className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        aria-label={`${t('language.label')}: ${selectedLabel}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={`${id}-menu`}
+        onClick={() => setOpen((current) => !current)}
+        className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
       >
-        <option value="en-US">English</option>
-        <option value="zh-CN">简体中文</option>
-      </select>
-    </label>
+        {selectedLabel}
+        <span aria-hidden="true" className="text-xs text-gray-400">▾</span>
+      </button>
+      {open && (
+        <div
+          id={`${id}-menu`}
+          role="menu"
+          aria-label={t('language.label')}
+          className="absolute right-0 top-full z-50 mt-1 min-w-[120px] rounded-md border border-gray-200 bg-white p-1 shadow-lg"
+        >
+          {LOCALE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="menuitemradio"
+              aria-checked={locale === option.value}
+              onClick={() => {
+                setLocale(option.value);
+                setOpen(false);
+              }}
+              className={`block w-full rounded px-3 py-2 text-left text-sm ${
+                locale === option.value
+                  ? 'bg-blue-50 text-blue-700'
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 };
