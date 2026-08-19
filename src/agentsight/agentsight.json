@@ -93,6 +93,9 @@
       {"rule": ["*python*", "*agentscope*"], "agent_name": "AgentScope"},
       {"rule": ["*python*", "*", "*agentscope*"], "agent_name": "AgentScope"},
       {"rule": ["*python*", "*agent_scope*"], "agent_name": "AgentScope"}
+    ],
+    "deny": [
+      {"rule": ["*", "*", "-c", "*sftp-server*"]}
     ]
   },
   "codex_offsets": {
