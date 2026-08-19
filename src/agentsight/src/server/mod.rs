@@ -290,6 +290,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::list_trajectories)
                 .service(handlers::trajectory_filters)
                 .service(handlers::get_trajectory_detail)
+                // API self-documentation
+                .service(web::resource("/docs").route(web::get().to(api_docs)))
                 .default_service(web::route().to(api_not_found)),
         )
         // Health scope with not-found fallback
@@ -299,9 +301,255 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .service(serve_frontend);
 }
 
+/// Route inventory served by `GET /api/docs`.
+///
+/// Keep in sync with `configure_routes` above — the doc test in this module
+/// spot-checks a few entries but cannot detect every drift.
+const API_ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/health", "Liveness probe (localhost only)"),
+    ("GET", "/metrics", "Prometheus metrics (localhost only)"),
+    (
+        "GET",
+        "/api/auth/status",
+        "Whether dashboard auth is enabled",
+    ),
+    ("GET", "/api/auth/verify", "Verify a dashboard token"),
+    (
+        "POST",
+        "/api/auth/login",
+        "Exchange token for a session cookie",
+    ),
+    ("GET", "/api/docs", "This route list"),
+    ("GET", "/api/sessions", "List observed agent sessions"),
+    (
+        "GET",
+        "/api/sessions/{session_id}/traces",
+        "Traces of a session",
+    ),
+    ("GET", "/api/traces/{trace_id}", "Trace detail"),
+    (
+        "GET",
+        "/api/conversations/{conversation_id}",
+        "Conversation events",
+    ),
+    ("GET", "/api/agent-names", "Distinct agent names"),
+    ("GET", "/api/timeseries", "Token/call time series"),
+    ("GET", "/api/metrics/latency", "LLM latency metrics"),
+    ("POST", "/api/grader/evaluate", "Run grader on a session"),
+    ("GET", "/api/grader/latest", "Latest grader result"),
+    (
+        "GET",
+        "/api/export/atif/trace/{trace_id}",
+        "Export trace as ATIF",
+    ),
+    (
+        "GET",
+        "/api/export/atif/session/{session_id}",
+        "Export session as ATIF",
+    ),
+    (
+        "GET",
+        "/api/export/atif/conversation/{conversation_id}",
+        "Export conversation as ATIF",
+    ),
+    (
+        "GET",
+        "/api/agent-health",
+        "Agent health list (see filtered_count)",
+    ),
+    (
+        "DELETE",
+        "/api/agent-health/{pid}",
+        "Acknowledge an offline agent",
+    ),
+    (
+        "POST",
+        "/api/agent-health/{pid}/restart",
+        "Restart a hung agent",
+    ),
+    ("GET", "/api/interruptions", "List interruption events"),
+    ("GET", "/api/interruptions/count", "Interruption count"),
+    ("GET", "/api/interruptions/stats", "Interruption statistics"),
+    (
+        "GET",
+        "/api/interruptions/session-counts",
+        "Counts per session",
+    ),
+    (
+        "GET",
+        "/api/interruptions/conversation-counts",
+        "Counts per conversation",
+    ),
+    (
+        "GET",
+        "/api/interruptions/{interruption_id}",
+        "Interruption detail",
+    ),
+    (
+        "POST",
+        "/api/interruptions/{interruption_id}/resolve",
+        "Mark an interruption resolved",
+    ),
+    (
+        "GET",
+        "/api/sessions/{session_id}/interruptions",
+        "Interruptions of a session",
+    ),
+    (
+        "GET",
+        "/api/conversations/{conversation_id}/interruptions",
+        "Interruptions of a conversation",
+    ),
+    ("GET", "/api/token-savings", "Token savings summary"),
+    (
+        "GET",
+        "/api/token-savings/session/{session_id}",
+        "Token savings of a session",
+    ),
+    ("GET", "/api/security/status", "Security module status"),
+    ("GET", "/api/security/summary", "Security event summary"),
+    (
+        "GET",
+        "/api/security/events/count-by",
+        "Security event counts",
+    ),
+    ("GET", "/api/security/events", "Security event list"),
+    (
+        "GET",
+        "/api/security/events/{event_id}",
+        "Security event detail",
+    ),
+    (
+        "GET",
+        "/api/security/observability/sessions",
+        "Security sessions",
+    ),
+    (
+        "GET",
+        "/api/security/observability/sessions/{session_id}/runs",
+        "Security session runs",
+    ),
+    (
+        "GET",
+        "/api/security/observability/timeline",
+        "Security timeline",
+    ),
+    ("GET", "/api/audit/summary", "System audit summary"),
+    ("GET", "/api/audit/events", "System audit events"),
+    ("GET", "/api/audit/sessions", "System audit sessions"),
+    ("GET", "/api/audit/cases", "System audit cases"),
+    ("GET", "/api/audit/cases/{case_id}", "Audit case detail"),
+    (
+        "POST",
+        "/api/audit/cases/{case_id}/review",
+        "Review an audit case",
+    ),
+    (
+        "GET",
+        "/api/audit/cases/{case_id}/containment-plan",
+        "Containment plan for a case",
+    ),
+    (
+        "POST",
+        "/api/audit/cases/{case_id}/contain",
+        "Contain an audit case",
+    ),
+    ("GET", "/api/enforcement/health", "Enforcer health"),
+    (
+        "POST",
+        "/api/enforcement/bindings",
+        "Apply enforcement binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/file-bindings",
+        "Apply file binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/credential-bindings",
+        "Apply credential binding (token required)",
+    ),
+    (
+        "GET",
+        "/api/enforcement/bindings",
+        "List enforcement bindings",
+    ),
+    (
+        "DELETE",
+        "/api/enforcement/bindings/{binding_id}",
+        "Detach a binding (token required)",
+    ),
+    (
+        "GET",
+        "/api/enforcement/violations",
+        "List enforcement violations",
+    ),
+    ("GET", "/api/skill-metrics", "All skill metrics"),
+    (
+        "GET",
+        "/api/skill-metrics/downloads",
+        "Skill download counts",
+    ),
+    ("GET", "/api/skill-metrics/loads", "Skill load counts"),
+    ("GET", "/api/skill-metrics/usage-ratio", "Skill usage ratio"),
+    (
+        "GET",
+        "/api/skill-metrics/distribution",
+        "Skill usage distribution",
+    ),
+    ("GET", "/api/skill-metrics/hotness", "Skill hotness ranking"),
+    (
+        "POST",
+        "/api/optimize/sessions/{session_id}/{dimension}",
+        "Run optimization analysis",
+    ),
+    (
+        "GET",
+        "/api/optimize/sessions/{session_id}/results",
+        "Optimization results of a session",
+    ),
+    (
+        "GET",
+        "/api/optimize/results",
+        "Latest optimization results",
+    ),
+    ("GET", "/api/optimize/config", "Optimization config"),
+    ("POST", "/api/optimize/config", "Update optimization config"),
+    ("POST", "/api/causal-attribution", "Run causal attribution"),
+    ("GET", "/api/trajectories", "List collected trajectories"),
+    (
+        "GET",
+        "/api/trajectories/filters",
+        "Trajectory filter values",
+    ),
+    ("GET", "/api/trajectories/{session_id}", "Trajectory detail"),
+];
+
+/// GET /api/docs — machine-readable route inventory for integrators, so
+/// endpoints are discoverable without reverse-engineering the frontend bundle.
+async fn api_docs() -> impl Responder {
+    let routes: Vec<serde_json::Value> = API_ROUTES
+        .iter()
+        .map(|(method, path, description)| {
+            serde_json::json!({
+                "method": method,
+                "path": path,
+                "description": description,
+            })
+        })
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "service": "agentsight",
+        "routes": routes,
+    }))
+}
+
 async fn api_not_found() -> impl Responder {
-    HttpResponse::NotFound()
-        .json(serde_json::json!({"error": "not_found", "message": "No matching API endpoint"}))
+    HttpResponse::NotFound().json(serde_json::json!({
+        "error": "not_found",
+        "message": "No matching API endpoint; see GET /api/docs for the route list"
+    }))
 }
 
 /// Builds the JSON body extractor config registered on the server `App`.
@@ -685,6 +933,53 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn api_docs_lists_routes_and_not_found_points_to_it() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/api/docs").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        let routes = body["routes"].as_array().unwrap();
+        assert!(routes.len() >= 50, "route inventory should be complete");
+        let paths: Vec<&str> = routes.iter().filter_map(|r| r["path"].as_str()).collect();
+        for expected in [
+            "/api/sessions",
+            "/api/token-savings",
+            "/api/agent-health",
+            "/api/security/summary",
+            "/api/docs",
+        ] {
+            assert!(paths.contains(&expected), "missing {expected} in /api/docs");
+        }
+
+        // The /api fallback must point integrators to the route list.
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/v1/metrics")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        assert!(
+            body["message"].as_str().unwrap().contains("/api/docs"),
+            "404 fallback should reference /api/docs"
+        );
     }
 
     #[actix_web::test]
