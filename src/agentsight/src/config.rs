@@ -1701,8 +1701,14 @@ mod tests {
     fn test_default_cmdline_rules() {
         let rules = default_cmdline_rules();
         assert!(!rules.is_empty());
-        // All should be allow rules
-        assert!(rules.iter().all(|r| r.allow));
+        // Contains both allow rules and the default deny rules (e.g. the
+        // sftp-server subprocess exclusion).
+        assert!(rules.iter().any(|r| r.allow));
+        assert!(
+            rules
+                .iter()
+                .any(|r| !r.allow && r.patterns.iter().any(|p| p.contains("sftp-server")))
+        );
         // Should contain Hermes, Cosh, OpenClaw agent names
         let names: Vec<&str> = rules
             .iter()

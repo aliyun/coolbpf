@@ -259,7 +259,15 @@ impl AgentScanner {
     }
 
     /// Find the first matching agent for a process context
+    ///
+    /// Deny rules take precedence over allow rules: without this check,
+    /// agent-spawned helper subprocesses (e.g. an SFTP server launched
+    /// through the agent's shell wrapper) match the broad allow rules and
+    /// show up as discovered agents.
     fn find_match(&self, ctx: &ProcessContext) -> Option<AgentInfo> {
+        if self.deny_matchers.iter().any(|m| m.matches(ctx)) {
+            return None;
+        }
         for matcher in &self.matchers {
             if matcher.matches(ctx) {
                 return Some(matcher.info().clone());
@@ -390,6 +398,78 @@ mod tests {
         // Deny works
         assert!(scanner.is_denied(&["deny-me-process".to_string()]));
         assert!(!scanner.is_denied(&["node".to_string(), "/path/claude-code".to_string()]));
+    }
+
+    #[test]
+    fn test_find_match_deny_takes_precedence_over_allow() {
+        let rules = vec![
+            CmdlineRule {
+                patterns: vec!["node*".to_string(), "*agent*".to_string()],
+                agent_name: Some("Agent".to_string()),
+                allow: true,
+            },
+            CmdlineRule {
+                patterns: vec!["*".to_string(), "*".to_string(), "-c".to_string()],
+                agent_name: None,
+                allow: false,
+            },
+        ];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+
+        let denied = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/agent/cli.js".to_string(),
+                "-c".to_string(),
+                "/usr/libexec/openssh/sftp-server".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert!(scanner.find_match(&denied).is_none());
+
+        let allowed = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec!["node".to_string(), "/usr/lib/agent/cli.js".to_string()],
+            exe_path: String::new(),
+        };
+        assert_eq!(
+            scanner.find_match(&allowed).map(|i| i.name),
+            Some("Agent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_default_rules_deny_sftp_subprocess() {
+        let scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+
+        // SFTP subprocess spawned through the cosh shell wrapper must not be
+        // reported as a Cosh agent.
+        let sftp = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/copilot-shell/cli.js".to_string(),
+                "-c".to_string(),
+                "/usr/libexec/openssh/sftp-server".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert!(scanner.find_match(&sftp).is_none());
+
+        // A genuine interactive cosh process still matches.
+        let cosh = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/copilot-shell/cli.js".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert_eq!(
+            scanner.find_match(&cosh).map(|i| i.name),
+            Some("Cosh".to_string())
+        );
     }
 
     #[test]
