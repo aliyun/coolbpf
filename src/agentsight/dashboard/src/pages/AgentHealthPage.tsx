@@ -590,7 +590,11 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     [agents],
   );
 
-  const healthyCount = agents.filter(a => a.status === 'healthy').length;
+  // Count promoted gateways (no_port but running) as healthy so the summary
+  // ratio matches the green "Running" rendering of their cards.
+  const healthyCount = agents.filter(
+    a => a.status === 'healthy' || isPromotedGatewayRunning(a)
+  ).length;
   const offlineCount = agents.filter(a => a.status === 'offline').length;
   const hungCount = agents.filter(a => a.status === 'hung').length;
   const totalCount = agents.length;
