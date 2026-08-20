@@ -5,10 +5,9 @@
 //! Linux-only `AppState`. On macOS the collector scans Qoder/QoderWork session
 //! directories and stores ATIF v1.7 documents in `trajectories.db`.
 
-use std::sync::Arc;
-
 use actix_web::{HttpResponse, Responder, get, web};
-use agentsight_trajectory_collector::TrajectoryStore;
+use agentsight_atif::StepCategory;
+use agentsight_trajectory_collector::StepScanFilter;
 use serde::Deserialize;
 
 use super::LocalState;
@@ -111,12 +110,101 @@ pub async fn get_trajectory_detail(
     }
 }
 
+/// Defaults and hard caps for `/api/trajectories/steps`.
+const STEP_DEFAULT_LIMIT: i64 = 50;
+const STEP_MAX_LIMIT: i64 = 500;
+const STEP_DEFAULT_CONTEXT: i64 = 3;
+const STEP_MAX_CONTEXT: i64 = 10;
+const STEP_DEFAULT_MAX_SCAN: i64 = 500;
+const STEP_MAX_MAX_SCAN: i64 = 2000;
+
+#[derive(Deserialize)]
+pub struct TrajectoryStepQuery {
+    /// Comma-separated step categories, matched as OR. Omit for every step.
+    pub category: Option<String>,
+    pub agent_name: Option<String>,
+    pub project: Option<String>,
+    pub source: Option<String>,
+    pub session_id: Option<String>,
+    pub limit: Option<i64>,
+    pub context: Option<i64>,
+    pub max_scan: Option<i64>,
+}
+
+/// GET /api/trajectories/steps
+///
+/// Must be registered before `/api/trajectories/{session_id}`.
+#[get("/api/trajectories/steps")]
+pub async fn list_trajectory_steps(
+    state: web::Data<LocalState>,
+    query: web::Query<TrajectoryStepQuery>,
+) -> impl Responder {
+    // An unknown category is rejected rather than ignored: silently dropping it
+    // would return unrelated steps that look like a legitimate empty result.
+    let mut categories = Vec::new();
+    if let Some(raw) = query.category.as_deref() {
+        for token in raw.split(',').filter(|t| !t.trim().is_empty()) {
+            match StepCategory::parse(token) {
+                Some(c) => categories.push(c),
+                None => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "invalid_category",
+                        "message": format!("Unknown category '{}'", token.trim()),
+                        "valid_categories": StepCategory::ALL
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+
+    let Some(tstore) = state.trajectory_store() else {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "hits": [], "scanned_trajectories": 0,
+            "truncated": false, "skipped_unparsable": 0
+        }));
+    };
+
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(STEP_MAX_LIMIT),
+        _ => STEP_DEFAULT_LIMIT,
+    };
+    let context_radius = match query.context {
+        Some(v) if v >= 0 => v.min(STEP_MAX_CONTEXT),
+        _ => STEP_DEFAULT_CONTEXT,
+    };
+    let max_scan = match query.max_scan {
+        Some(v) if v > 0 => v.min(STEP_MAX_MAX_SCAN),
+        _ => STEP_DEFAULT_MAX_SCAN,
+    };
+
+    let filter = StepScanFilter {
+        project: query.project.clone(),
+        source: query.source.clone(),
+        agent_name: query.agent_name.clone(),
+        session_id: query.session_id.clone(),
+        categories,
+        limit,
+        context_radius,
+        max_scan,
+    };
+    match tstore.scan_steps(&filter) {
+        Ok(outcome) => HttpResponse::Ok().json(outcome),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{App, test};
+    use agentsight_trajectory_collector::TrajectoryStore;
     use std::path::PathBuf;
-    use std::sync::RwLock;
+    use std::sync::{Arc, RwLock};
 
     fn make_state(store: Option<Arc<TrajectoryStore>>) -> web::Data<LocalState> {
         web::Data::new(LocalState {

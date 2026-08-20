@@ -259,9 +259,13 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
+| `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
+| `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
+| `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |
 | `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
-| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
+| `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |
 
 ## 9. Frontend
 

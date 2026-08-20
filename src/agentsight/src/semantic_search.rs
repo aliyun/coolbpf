@@ -2,7 +2,9 @@
 //!
 //! Both `server::optimize` and `local::server::optimize` expose
 //! `POST /api/sessions/search`. This module owns the request/response contract
-//! and the LLM ranking call so the two handlers cannot drift apart.
+//! and the LLM ranking call so the two handlers cannot drift apart. It lives at
+//! the crate root rather than under `server` because the latter is gated to
+//! Linux, which would put it out of reach of the macOS handler.
 
 use actix_web::HttpResponse;
 use agentsight_opt::LlmClient;

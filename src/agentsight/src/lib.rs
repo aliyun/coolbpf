@@ -27,8 +27,14 @@ pub mod chrome_trace;
 pub mod config;
 pub mod ecs_metadata;
 mod logging;
+// Cross-platform: rules run over either genai events (Linux) or collected
+// trajectories (all OSes); only the genai provider inside is Linux-gated.
+pub mod preferences;
 mod private_sqlite;
 pub mod security;
+// Cross-platform: the request/response contract and LLM ranking call behind
+// `POST /api/sessions/search`, shared by the Linux and macOS server handlers.
+pub mod semantic_search;
 pub mod tokenizer;
 pub mod utils;
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- Add `GET /api/preferences` and `GET /api/preferences/export` to surface the
+  working habits inferred from recent conversations (language, plan-first
+  workflow, test expectations, correction patterns, tool leanings), with
+  `/api/preferences/turns` exposing the user turns an analysis was based on.
+  Analysis runs per request over `genai_events` on Linux or collected
+  trajectories elsewhere, so there is no derived state to migrate or go stale.
+- Add `GET /api/trajectories/steps` to find ATIF steps by derived category
+  (`user_input`, `system`, `agent_message`, `thinking`, `tool_call`,
+  `tool_result`), returning each hit with its neighbouring steps. Categories are
+  multi-label because a single agent step can carry a message, reasoning, tool
+  calls and observations at once.
+
+### Fixes
+- Initialize logging in the macOS `trace` path so trajectory collection failures
+  surface instead of being silently dropped.
+
 ## 0.12.1
 
 ### Breaking

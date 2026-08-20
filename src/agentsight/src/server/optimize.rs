@@ -19,7 +19,7 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
 use super::AppState;
 use super::secret;
-use super::semantic_search;
+use crate::semantic_search;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";

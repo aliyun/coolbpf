@@ -14,6 +14,7 @@ pub mod qoder;
 pub mod store;
 
 pub use store::{
+    strip_system_context, StepContext, StepHit, StepScanFilter, StepScanOutcome, StepView,
     TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryRecord, TrajectoryStore,
     TrajectorySummary,
 };
