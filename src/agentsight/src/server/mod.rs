@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod capabilities;
 mod causal;
 mod containment;
 mod enforcement;
@@ -620,10 +621,7 @@ pub async fn run_server(
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
 
-    let enforcement_socket = std::env::var_os("AGENTSIGHT_ENFORCER_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/agentsight/enforcer.sock"));
-    let enforcement_client = EnforcementClient::new(enforcement_socket);
+    let enforcement_client = EnforcementClient::new(capabilities::enforcer_socket_path());
     let enforcement = Arc::new(EnforcementCoordinator::new(
         enforcement_client.clone(),
         EnforcementStore::open_private(&state_dir)
