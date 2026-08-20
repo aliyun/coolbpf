@@ -69,24 +69,15 @@ pub async fn auth_login(
 
 /// GET /api/auth/status
 ///
-/// Returns whether authentication is enabled.  Exempt from auth middleware.
+/// Returns whether authentication is enabled plus the capability list the
+/// dashboard should render (probed from installed companion components).
+/// Exempt from auth middleware.
 #[get("/status")]
 pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(json!({
         "auth_enabled": data.auth.enabled,
         "mode": "linux",
-        "capabilities": [
-            "agent_observability",
-            "sessions",
-            "token_savings",
-            "optimization",
-            "skills",
-            "security",
-            "enforcement",
-            "atif",
-            "settings",
-            "agent_health"
-        ],
+        "capabilities": super::capabilities::app_capabilities(),
     }))
 }
 
@@ -1659,6 +1650,17 @@ mod tests {
             serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
                 .unwrap();
         assert_eq!(body["auth_enabled"], true);
+        // Intrinsic capabilities must always be advertised; component-backed
+        // ones (security/enforcement/token_savings) depend on the host.
+        let caps = body["capabilities"].as_array().unwrap();
+        for cap in [
+            "agent_observability",
+            "sessions",
+            "agent_health",
+            "settings",
+        ] {
+            assert!(caps.iter().any(|v| v == cap), "missing capability {cap}");
+        }
     }
 
     #[actix_web::test]

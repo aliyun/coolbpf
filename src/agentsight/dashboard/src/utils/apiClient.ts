@@ -1757,6 +1757,7 @@ export type AppCapability =
   | 'optimization'
   | 'skills'
   | 'security'
+  | 'system_audit'
   | 'enforcement'
   | 'atif'
   | 'settings'
