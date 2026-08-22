@@ -1,5 +1,30 @@
 # 更新日志
 
+## 0.10.3
+
+### 新功能
+- 会话列表新增语义搜索。(#2733)
+- 新增 DeepSeek Harness 的 dsh 插件。
+- Agent 发现按类型分组。
+- agent-health 新增 filtered_count。
+- 新增 /api/docs 路由清单。
+- Agent 健康卡片展示 LLM latency 指标。(#2586)
+
+### 修复
+- 移除 savings 上硬编码的负号。(#2754)
+- 将 analyzer 调用归类为 internal。(#2755)
+- savings 比率以分数形式返回。(#2732)
+- 循环检测中匹配 tool 参数。(#2719)
+- 探测伴随组件以提供 dashboard 能力。(#2696)
+- graceful reap 仅作用于 worker agent。
+- dashboard 中将 no_port gateway 计为健康。(#2694)
+- 全新安装时打印 deadloop 提示。
+- SIGHUP 时重新加载配置。
+- 审计事件补齐 provider 与 session_id。
+- 将 decompress fallback 降级为 debug 日志。
+- Agent 发现中排除 sftp-server。
+- 修正 copilot cmdline 规则拼写错误。
+
 ## 0.10.2
 
 ### 新功能
