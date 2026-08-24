@@ -220,10 +220,10 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/export/atif/conversation/{id}` | GET | ATIF conversation 导出 |
 | `/api/token-savings` | GET | Token 节省统计（`start_ns`, `end_ns`, `agent_name`） |
 | `/api/interruptions` | GET | 中断事件列表（`start_ns`, `end_ns`, `agent_name`, `type`, `severity`, `resolved`, `limit`） |
-| `/api/interruptions/count` | GET | 中断计数按严重级别（`start_ns`, `end_ns`） |
-| `/api/interruptions/stats` | GET | 中断按类型统计（`start_ns`, `end_ns`） |
-| `/api/interruptions/session-counts` | GET | 按 session 分组的中断计数（`start_ns`, `end_ns`） |
-| `/api/interruptions/conversation-counts` | GET | 按 conversation 分组的中断计数（`start_ns`, `end_ns`） |
+| `/api/interruptions/count` | GET | 中断计数按严重级别（`start_ns`, `end_ns`, `agent_name`）— 固定只统计 `resolved=false`，不接受 `resolved` 参数 |
+| `/api/interruptions/stats` | GET | 中断按（类型, 严重级别）统计（`start_ns`, `end_ns`）— 同样固定只统计 `resolved=false` |
+| `/api/interruptions/session-counts` | GET | 按 session 分组的未解决中断计数（`start_ns`, `end_ns`, `agent_name`），NULL session_id 归入 `__unassigned__` |
+| `/api/interruptions/conversation-counts` | GET | 按 conversation 分组的未解决中断计数（`start_ns`, `end_ns`, `agent_name`），NULL conversation_id 归入 `__unassigned__` |
 | `/api/interruptions/{id}` | GET | 单个中断事件详情 |
 | `/api/interruptions/{id}/resolve` | POST | 标记中断为已解决 |
 | `/api/sessions/{id}/interruptions` | GET | 指定 session 的所有中断 |
