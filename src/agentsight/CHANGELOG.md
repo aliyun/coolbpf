@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.0
+
+### Changes
+- Version bump for RPM packaging; no functional changes since 0.10.3.
+
 ## 0.10.3
 
 ### Features
