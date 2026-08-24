@@ -6,6 +6,19 @@ use std::sync::Mutex;
 use super::connection::create_connection;
 use crate::interruption::{InterruptionEvent, InterruptionType};
 
+/// Bucket key reported by the per-session breakdown for events whose
+/// `session_id` could never be resolved.
+///
+/// Grouping them under a sentinel instead of dropping the rows keeps the
+/// overview total equal to the sum of the breakdown; the dashboard renders
+/// this key as an "unassigned" row. The double-underscore shape cannot
+/// collide with a real session id (a UUID or a 32-hex fallback hash).
+pub const UNASSIGNED_SESSION_ID: &str = "__unassigned__";
+
+/// Bucket key used by the per-conversation breakdown for NULL
+/// `conversation_id`. Mirrors [`UNASSIGNED_SESSION_ID`].
+pub const UNASSIGNED_CONVERSATION_ID: &str = "__unassigned__";
+
 // ─── API response types ────────────────────────────────────────────────────────
 
 /// Summary returned by GET /api/interruptions
@@ -429,59 +442,101 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    /// Statistics: count by type within a time range.
+    /// Statistics: count by (type, severity) within a time range.
+    ///
+    /// `resolved` filters by resolution state: `Some(false)` yields the
+    /// unresolved-only view that the dashboard overview shares with the
+    /// per-session breakdown, while `None` counts every event (used by the
+    /// Prometheus counter and the CLI, which must stay monotonic).
+    ///
+    /// Grouped by severity as well as type so a type whose severity mapping
+    /// changed across versions cannot report one severity for a count that
+    /// aggregates several — callers summing `by_severity` rely on this.
     pub fn stats(
         &self,
         start_ns: i64,
         end_ns: i64,
+        resolved: Option<bool>,
     ) -> Result<Vec<InterruptionTypeStat>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT interruption_type, severity, COUNT(*) AS cnt
+        // Two fixed statements instead of an assembled one: the storage layer
+        // forbids building SQL by concatenation, so no future filter can turn
+        // this into unsafe query assembly.
+        const STATS_ALL: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY interruption_type
-             ORDER BY cnt DESC",
-        )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
+             GROUP BY interruption_type, severity
+             ORDER BY cnt DESC";
+        const STATS_BY_RESOLVED: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
+             FROM interruption_events
+             WHERE occurred_at_ns BETWEEN ?1 AND ?2 AND resolved = ?3
+             GROUP BY interruption_type, severity
+             ORDER BY cnt DESC";
+
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(InterruptionTypeStat {
                 interruption_type: row.get(0)?,
                 severity: row.get(1)?,
                 count: row.get(2)?,
             })
-        })?;
+        };
         let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
+        match resolved {
+            Some(r) => {
+                let mut stmt = conn.prepare(STATS_BY_RESOLVED)?;
+                for row in stmt.query_map(params![start_ns, end_ns, r as i32], map_row)? {
+                    result.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(STATS_ALL)?;
+                for row in stmt.query_map(params![start_ns, end_ns], map_row)? {
+                    result.push(row?);
+                }
+            }
         }
         Ok(result)
     }
 
     /// Count unresolved interruptions grouped by (session_id, severity, type).
     /// Returns detailed rows for building per-severity badges with type tooltips.
+    ///
+    /// Events with a NULL `session_id` are bucketed under
+    /// [`UNASSIGNED_SESSION_ID`] rather than dropped: the overview card counts
+    /// them, so filtering them out here made the breakdown silently disagree
+    /// with the total and looked like data loss.
+    ///
+    /// `agent_name` scopes the result to one agent so the breakdown matches the
+    /// dashboard's agent filter; `None` covers all agents. Bound as a parameter
+    /// compared with `?4 IS NULL` instead of appending a clause, since the
+    /// storage layer forbids assembling SQL by concatenation.
     pub fn count_unresolved_by_session_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
+        agent_name: Option<&str>,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT session_id, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT COALESCE(session_id, ?3) AS sid, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
-             WHERE session_id IS NOT NULL
-               AND resolved = 0
+             WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY session_id, severity, interruption_type
-             ORDER BY session_id, cnt DESC",
+               AND (?4 IS NULL OR agent_name = ?4)
+             GROUP BY sid, severity, interruption_type
+             ORDER BY sid, cnt DESC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![start_ns, end_ns, UNASSIGNED_SESSION_ID, agent_name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -490,34 +545,76 @@ impl InterruptionStore {
     }
 
     /// Count unresolved interruptions grouped by (conversation_id, severity, type).
+    ///
+    /// NULL `conversation_id` is bucketed under [`UNASSIGNED_CONVERSATION_ID`]
+    /// for the same total-versus-breakdown consistency reason as
+    /// [`Self::count_unresolved_by_session_detailed`], and `agent_name` scopes
+    /// the result the same way.
     pub fn count_unresolved_by_conversation_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
+        agent_name: Option<&str>,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT conversation_id, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT COALESCE(conversation_id, ?3) AS cid, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
-             WHERE conversation_id IS NOT NULL
-               AND resolved = 0
+             WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY conversation_id, severity, interruption_type
-             ORDER BY conversation_id, cnt DESC",
+               AND (?4 IS NULL OR agent_name = ?4)
+             GROUP BY cid, severity, interruption_type
+             ORDER BY cid, cnt DESC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![start_ns, end_ns, UNASSIGNED_CONVERSATION_ID, agent_name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// Backfill a NULL `session_id` for every interruption of `call_id`.
+    ///
+    /// Companion to the GenAI store's retroactive session fix-up: a call that
+    /// escaped the session-resolution deferral window has its interruptions
+    /// already persisted with a NULL `session_id`, so repairing only
+    /// `genai_events` would leave them unattributable forever.
+    ///
+    /// Only NULL rows are touched — an already-attributed interruption keeps
+    /// whatever id it was detected with.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection mutex is poisoned (surfaced rather
+    /// than recovered, so the caller can retry on a later fix-up attempt) or
+    /// the UPDATE fails.
+    pub fn backfill_null_session_id(
+        &self,
+        call_id: &str,
+        session_id: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let updated = conn.execute(
+            "UPDATE interruption_events
+             SET session_id = ?2
+             WHERE call_id = ?1 AND session_id IS NULL",
+            params![call_id, session_id],
+        )?;
+        Ok(updated)
     }
 
     /// Check if a recent agent_crash event exists for the given PID.
@@ -1065,7 +1162,7 @@ mod tests {
         e.occurred_at_ns = 5_000_000_000;
         store.insert(&e).unwrap();
 
-        let stats = store.stats(0, i64::MAX).unwrap();
+        let stats = store.stats(0, i64::MAX, None).unwrap();
         // rate_limit should have count=2, agent_crash count=1
         let rl = stats
             .iter()
@@ -1097,7 +1194,7 @@ mod tests {
         store.resolve("int-csd-2").unwrap();
 
         let rows = store
-            .count_unresolved_by_session_detailed(0, i64::MAX)
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1, "only unresolved rows should appear");
         assert_eq!(rows[0].0, "sess-X");
@@ -1112,10 +1209,215 @@ mod tests {
         store.insert(&e).unwrap();
 
         let rows = store
-            .count_unresolved_by_conversation_detailed(0, i64::MAX)
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "conv-ccd");
+    }
+
+    // ── total-versus-breakdown consistency (issue: 7 high interruptions with a
+    //    NULL session_id counted in the overview but missing from the per-session
+    //    breakdown) ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn session_breakdown_buckets_null_session_id_instead_of_dropping_it() {
+        let store = temp_store();
+
+        let mut attributed = make_event("conv-a", InterruptionType::ToolFailure);
+        attributed.interruption_id = "int-attributed".to_string();
+        attributed.session_id = Some("sess-real".to_string());
+        store.insert(&attributed).unwrap();
+
+        // The empty_response / sse_truncated shape: detected before the session
+        // was resolved, so persisted with a NULL session_id.
+        for i in 0..3 {
+            let mut orphan = make_event("conv-b", InterruptionType::EmptyResponse);
+            orphan.interruption_id = format!("int-orphan-{i}");
+            orphan.session_id = None;
+            store.insert(&orphan).unwrap();
+        }
+
+        let rows = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .unwrap();
+        let breakdown_total: i64 = rows.iter().map(|(_, _, _, cnt)| cnt).sum();
+        let overview_total: i64 = store
+            .stats(0, i64::MAX, Some(false))
+            .unwrap()
+            .iter()
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(
+            breakdown_total, overview_total,
+            "per-session breakdown must account for every counted interruption"
+        );
+
+        let unassigned = rows
+            .iter()
+            .find(|(sid, _, _, _)| sid == UNASSIGNED_SESSION_ID)
+            .expect("NULL session_id must land in the unassigned bucket");
+        assert_eq!(unassigned.3, 3);
+        assert!(rows.iter().any(|(sid, _, _, _)| sid == "sess-real"));
+    }
+
+    #[test]
+    fn conversation_breakdown_buckets_null_conversation_id() {
+        let store = temp_store();
+        let mut e = make_event("conv-kept", InterruptionType::SseTruncated);
+        e.interruption_id = "int-conv-kept".to_string();
+        e.conversation_id = None;
+        store.insert(&e).unwrap();
+
+        let rows = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, UNASSIGNED_CONVERSATION_ID);
+    }
+
+    #[test]
+    fn stats_resolved_filter_selects_the_intended_view() {
+        let store = temp_store();
+        let mut open = make_event("conv-open", InterruptionType::EmptyResponse);
+        open.interruption_id = "int-open".to_string();
+        store.insert(&open).unwrap();
+        let mut closed = make_event("conv-closed", InterruptionType::EmptyResponse);
+        closed.interruption_id = "int-closed".to_string();
+        store.insert(&closed).unwrap();
+        store.resolve("int-closed").unwrap();
+
+        let sum = |rows: Vec<InterruptionTypeStat>| -> i64 { rows.iter().map(|s| s.count).sum() };
+        assert_eq!(
+            sum(store.stats(0, i64::MAX, Some(false)).unwrap()),
+            1,
+            "dashboard view counts unresolved only"
+        );
+        assert_eq!(
+            sum(store.stats(0, i64::MAX, None).unwrap()),
+            2,
+            "Prometheus counter view keeps resolved events"
+        );
+    }
+
+    #[test]
+    fn breakdowns_scope_to_the_requested_agent() {
+        let store = temp_store();
+        // Both agents have an unattributed interruption; a per-agent view must
+        // not fold the other agent's rows into the unassigned bucket.
+        for (i, agent) in ["AgentA", "AgentB"].iter().enumerate() {
+            let mut e = make_event("conv-agent", InterruptionType::EmptyResponse);
+            e.interruption_id = format!("int-agent-{i}");
+            e.session_id = None;
+            e.agent_name = Some((*agent).to_string());
+            store.insert(&e).unwrap();
+        }
+
+        let only_a = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, Some("AgentA"))
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].0, UNASSIGNED_SESSION_ID);
+        assert_eq!(only_a[0].3, 1, "AgentB's row must not be counted");
+
+        let both = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(both[0].3, 2, "None must cover every agent");
+
+        let conv_only_b = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, Some("AgentB"))
+            .unwrap();
+        assert_eq!(conv_only_b.len(), 1);
+        assert_eq!(conv_only_b[0].3, 1);
+    }
+
+    #[test]
+    fn stats_groups_by_severity_so_by_severity_sums_stay_exact() {
+        let store = temp_store();
+        // Same type persisted with two severities (a severity mapping that
+        // changed across versions leaves exactly this shape in the DB).
+        let mut high = make_event("conv-sev", InterruptionType::EmptyResponse);
+        high.interruption_id = "int-sev-high".to_string();
+        high.severity = crate::interruption::types::Severity::High;
+        store.insert(&high).unwrap();
+        let mut medium = make_event("conv-sev", InterruptionType::EmptyResponse);
+        medium.interruption_id = "int-sev-medium".to_string();
+        medium.severity = crate::interruption::types::Severity::Medium;
+        store.insert(&medium).unwrap();
+
+        let rows = store.stats(0, i64::MAX, Some(false)).unwrap();
+        let empty_rows: Vec<_> = rows
+            .iter()
+            .filter(|s| s.interruption_type == "empty_response")
+            .collect();
+        assert_eq!(
+            empty_rows.len(),
+            2,
+            "one row per (type, severity), not a merged count with one severity"
+        );
+        assert!(empty_rows.iter().all(|s| s.count == 1));
+        assert_eq!(empty_rows.iter().map(|s| s.count).sum::<i64>(), 2);
+    }
+
+    // ── backfill_null_session_id (retroactive fix-up companion) ───────────────
+
+    #[test]
+    fn backfill_null_session_id_only_touches_null_rows_of_the_call() {
+        let store = temp_store();
+
+        let mut orphan = make_event("conv-bf", InterruptionType::SseTruncated);
+        orphan.interruption_id = "int-bf-orphan".to_string();
+        orphan.session_id = None;
+        orphan.call_id = Some("call-1".to_string());
+        store.insert(&orphan).unwrap();
+
+        let mut already = make_event("conv-bf", InterruptionType::EmptyResponse);
+        already.interruption_id = "int-bf-attributed".to_string();
+        already.session_id = Some("sess-keep".to_string());
+        already.call_id = Some("call-1".to_string());
+        store.insert(&already).unwrap();
+
+        let mut other_call = make_event("conv-bf", InterruptionType::SseTruncated);
+        other_call.interruption_id = "int-bf-other".to_string();
+        other_call.session_id = None;
+        other_call.call_id = Some("call-2".to_string());
+        store.insert(&other_call).unwrap();
+
+        let updated = store
+            .backfill_null_session_id("call-1", "sess-resolved")
+            .unwrap();
+        assert_eq!(updated, 1, "only the NULL row of call-1 may be updated");
+
+        let session_of = |id: &str| store.get_by_id(id).unwrap().unwrap().session_id;
+        assert_eq!(
+            session_of("int-bf-orphan").as_deref(),
+            Some("sess-resolved")
+        );
+        assert_eq!(
+            session_of("int-bf-attributed").as_deref(),
+            Some("sess-keep"),
+            "an already-attributed interruption must not be overwritten"
+        );
+        assert_eq!(
+            session_of("int-bf-other"),
+            None,
+            "another call's interruption must be left alone"
+        );
+    }
+
+    #[test]
+    fn backfill_null_session_id_unknown_call_updates_nothing() {
+        let store = temp_store();
+        let mut e = make_event("conv-bf-none", InterruptionType::EmptyResponse);
+        e.interruption_id = "int-bf-none".to_string();
+        e.session_id = None;
+        e.call_id = Some("call-x".to_string());
+        store.insert(&e).unwrap();
+
+        let updated = store
+            .backfill_null_session_id("no-such-call", "sess-resolved")
+            .unwrap();
+        assert_eq!(updated, 0);
     }
 
     // ── OOM dedup ────────────────────────────────────────────────────────────

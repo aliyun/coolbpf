@@ -890,6 +890,17 @@ export interface InterruptionTypeDetail {
   count: number;
 }
 
+/**
+ * Bucket key the backend reports for interruptions whose `session_id` /
+ * `conversation_id` could never be resolved.
+ *
+ * Such events are counted by the overview card, so the per-session breakdown
+ * groups them here instead of dropping them — otherwise the total and the
+ * breakdown disagree and look like missing data. Must stay in sync with
+ * `UNASSIGNED_SESSION_ID` in src/storage/sqlite/interruption.rs.
+ */
+export const UNASSIGNED_INTERRUPTION_BUCKET = '__unassigned__';
+
 export interface SessionInterruptionCount {
   session_id: string;
   total: number;
@@ -964,14 +975,20 @@ export async function resolveInterruption(interruptionId: string): Promise<void>
 
 /**
  * Fetch unresolved interruption count + max severity per session_id.
+ *
+ * `agentName` must match the agent used to filter the session list, otherwise
+ * the unassigned bucket would aggregate other agents' interruptions into the
+ * filtered table.
  */
 export async function fetchInterruptionSessionCounts(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<SessionInterruptionCount[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
   return apiFetch<SessionInterruptionCount[]>(
     `${API_BASE}/api/interruptions/session-counts?${params.toString()}`
   );
@@ -982,11 +999,13 @@ export async function fetchInterruptionSessionCounts(
  */
 export async function fetchInterruptionConversationCounts(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<ConversationInterruptionCount[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
   return apiFetch<ConversationInterruptionCount[]>(
     `${API_BASE}/api/interruptions/conversation-counts?${params.toString()}`
   );

@@ -805,6 +805,7 @@ impl AgentSight {
                     &mut self.retro_session_fixup,
                     &self.response_mapper,
                     store,
+                    self.interruption_store.as_deref(),
                     fw_event.pid,
                     self.pid_agent_name_cache
                         .peek(&fw_event.pid)
@@ -2340,6 +2341,7 @@ fn apply_retro_session_fixup(
     fixups: &mut lru::LruCache<u32, Vec<RetroFixupEntry>>,
     mapper: &ResponseSessionMapper,
     store: &GenAISqliteStore,
+    istore: Option<&InterruptionStore>,
     pid: u32,
     current_agent: Option<&str>,
 ) {
@@ -2369,15 +2371,47 @@ fn apply_retro_session_fixup(
                 continue;
             }
         }
-        match store.update_fallback_session_id(&call_id, &session_id) {
-            Ok(n) if n > 0 => {
-                log::debug!("retro session fix-up: call_id={call_id} session_id={session_id}");
+        // Repair the interruptions of this call too: they were persisted with
+        // a NULL session_id while the call was deferred, and the per-session
+        // dashboard breakdown would otherwise never attribute them.
+        //
+        // Both updates are idempotent (one targets NULL session_id, the other
+        // the 32-hex fallback shape), so re-registering on partial failure is
+        // safe and is required: dropping the entry after only one store
+        // succeeded would leave the other permanently unrepaired.
+        let interruption_repaired = match istore {
+            Some(istore) => match istore.backfill_null_session_id(&call_id, &session_id) {
+                Ok(n) => {
+                    if n > 0 {
+                        log::debug!(
+                            "retro session fix-up: {n} interruption(s) of call_id={call_id} -> session_id={session_id}"
+                        );
+                    }
+                    true
+                }
+                Err(e) => {
+                    log::warn!(
+                        "retro session fix-up of interruptions failed for call_id={call_id}: {e}"
+                    );
+                    false
+                }
+            },
+            None => true,
+        };
+        let genai_repaired = match store.update_fallback_session_id(&call_id, &session_id) {
+            Ok(n) => {
+                if n > 0 {
+                    log::debug!("retro session fix-up: call_id={call_id} session_id={session_id}");
+                }
+                true
             }
-            Ok(_) => {}
             Err(e) => {
                 log::warn!("retro session fix-up failed for call_id={call_id}: {e}");
-                failed.push((call_id, registered_at, entry_agent));
+                false
             }
+        };
+        if !interruption_repaired || !genai_repaired {
+            failed.push((call_id, registered_at, entry_agent));
         }
     }
     if !failed.is_empty() {
@@ -3204,7 +3238,7 @@ mod tests {
         );
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(rows.len(), 1);
@@ -3216,6 +3250,91 @@ mod tests {
         assert!(
             fixups.peek(&4242).is_none(),
             "pid entry must be consumed after the fix-up"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cross-module coverage for the dual-store fix-up: one late FileWrite must
+    /// repair the GenAI row **and** the interruptions of the same call. Passing
+    /// `None` for the interruption store (as the narrow test above does) cannot
+    /// catch a regression in the interruption branch.
+    #[test]
+    fn test_retro_session_fixup_repairs_both_stores() {
+        use crate::interruption::{InterruptionEvent, InterruptionType};
+
+        let dir = unique_tmp_dir("retro-fixup-dual");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let istore = InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+            .expect("interruption store");
+
+        let mut info = make_test_pending_info("retro-call-dual");
+        info.pid = 4242;
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        // An interruption detected while the call was still deferred: no
+        // session_id could be attached at detection time.
+        let mut event = InterruptionEvent::new(
+            InterruptionType::EmptyResponse,
+            None,
+            None,
+            Some("conv-dual".to_string()),
+            Some("retro-call-dual".to_string()),
+            Some(4242),
+            Some("cosh-core".to_string()),
+            1_000,
+            None,
+        );
+        event.interruption_id = "int-retro-dual".to_string();
+        istore.insert(&event).expect("insert interruption");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(
+            4242,
+            vec![(
+                "retro-call-dual".to_string(),
+                std::time::Instant::now(),
+                None,
+            )],
+        );
+
+        let mapper = make_mapper_with_pid(4242);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, Some(&istore), 4242, None);
+
+        const RESOLVED: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(rows[0].1.as_deref(), Some(RESOLVED), "genai row repaired");
+
+        let repaired = istore
+            .get_by_id("int-retro-dual")
+            .expect("get interruption")
+            .expect("interruption present");
+        assert_eq!(
+            repaired.session_id.as_deref(),
+            Some(RESOLVED),
+            "interruption session_id must be backfilled by the same fix-up"
+        );
+
+        // Repaired rows must now appear in the per-session breakdown under the
+        // real session rather than the unassigned bucket.
+        let breakdown = istore
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .expect("breakdown");
+        assert!(
+            breakdown.iter().any(|(sid, _, _, _)| sid == RESOLVED),
+            "backfilled interruption must group under the resolved session"
+        );
+        assert!(
+            !breakdown
+                .iter()
+                .any(|(sid, _, _, _)| sid == crate::storage::sqlite::UNASSIGNED_SESSION_ID),
+            "unassigned bucket must be empty once the session is known"
+        );
+        assert!(
+            fixups.peek(&4242).is_none(),
+            "pid entry must be consumed after a fully successful fix-up"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3241,7 +3360,7 @@ mod tests {
 
         // Mapper knows a different pid only.
         let mapper = make_mapper_with_pid(9999);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(
@@ -3282,7 +3401,7 @@ mod tests {
         fixups.put(4242, vec![("retro-call-3".to_string(), expired_at, None)]);
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(
@@ -3324,7 +3443,14 @@ mod tests {
         );
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, Some("other-agent"));
+        apply_retro_session_fixup(
+            &mut fixups,
+            &mapper,
+            &store,
+            None,
+            4242,
+            Some("other-agent"),
+        );
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(

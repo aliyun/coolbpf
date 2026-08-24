@@ -25,6 +25,7 @@ import {
   fetchInterruptionConversationCounts,
   fetchLatestEvaluation,
   fetchTokenSavings,
+  UNASSIGNED_INTERRUPTION_BUCKET,
   SessionSummary,
   TraceSummary,
   TimeseriesBucket,
@@ -447,6 +448,29 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
           </td>
         </tr>
       )}
+
+      {/* Interruptions with no conversation_id. Without this row they would
+          show up in the session badge and then disappear on expand, since the
+          rows below only look up counts by a real trace's conversation_id. */}
+      {(() => {
+        const ic = conversationInterruptionCounts.get(UNASSIGNED_INTERRUPTION_BUCKET);
+        if (!ic || ic.total === 0) return null;
+        return (
+          <tr className="bg-amber-50 border-t border-amber-100">
+            <td colSpan={10} className="px-4 lg:px-8 py-3">
+              <div className="grid grid-cols-[230px_244px_110px_110px_150px_74px_100px_90px] items-center text-xs min-w-[900px]">
+                <div className="text-amber-800">{t('cl.unassignedConversation')}</div>
+                <div className="col-span-6 text-amber-700">
+                  {t('cl.unassignedConversationHint')}
+                </div>
+                <div>
+                  <InterruptionBadge bySeverity={ic.by_severity} types={ic.types} />
+                </div>
+              </div>
+            </td>
+          </tr>
+        );
+      })()}
 
       {pageTraces.map((tr) => (
         <React.Fragment key={tr.conversation_id}>
@@ -949,10 +973,12 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       ).filter(s => s.count > 0)
     );
 
-    // 3. Update conversation-level badge counts
-    if (info.conversation_id) {
+    // 3. Update conversation-level badge counts. A null id belongs to the
+    //    unassigned bucket, which is a real row in the breakdown.
+    {
+      const convKey = info.conversation_id ?? UNASSIGNED_INTERRUPTION_BUCKET;
       setConversationInterruptionCounts(prev => {
-        const existing = prev.get(info.conversation_id!);
+        const existing = prev.get(convKey);
         if (!existing) return prev;
         const next = new Map(prev);
         const newTotal = Math.max(0, existing.total - 1);
@@ -963,18 +989,19 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             : t
         ).filter(t => t.count > 0);
         if (newTotal === 0) {
-          next.delete(info.conversation_id!);
+          next.delete(convKey);
         } else {
-          next.set(info.conversation_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
+          next.set(convKey, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
         }
         return next;
       });
     }
 
-    // 4. Update session-level badge counts
-    if (info.session_id) {
+    // 4. Update session-level badge counts (same unassigned handling).
+    {
+      const sessKey = info.session_id ?? UNASSIGNED_INTERRUPTION_BUCKET;
       setSessionInterruptionCounts(prev => {
-        const existing = prev.get(info.session_id!);
+        const existing = prev.get(sessKey);
         if (!existing) return prev;
         const next = new Map(prev);
         const newTotal = Math.max(0, existing.total - 1);
@@ -985,9 +1012,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             : t
         ).filter(t => t.count > 0);
         if (newTotal === 0) {
-          next.delete(info.session_id!);
+          next.delete(sessKey);
         } else {
-          next.set(info.session_id!, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
+          next.set(sessKey, { ...existing, total: newTotal, by_severity: newBySev, types: newTypes });
         }
         return next;
       });
@@ -1034,8 +1061,8 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       fetchTimeseries(startNs, endNs, agent),
       fetchInterruptionCount(startNs, endNs, agent).catch(() => null),
       fetchInterruptionStats(startNs, endNs).catch(() => [] as InterruptionTypeStat[]),
-      fetchInterruptionSessionCounts(startNs, endNs).catch(() => [] as SessionInterruptionCount[]),
-      fetchInterruptionConversationCounts(startNs, endNs).catch(() => [] as ConversationInterruptionCount[]),
+      fetchInterruptionSessionCounts(startNs, endNs, agent).catch(() => [] as SessionInterruptionCount[]),
+      fetchInterruptionConversationCounts(startNs, endNs, agent).catch(() => [] as ConversationInterruptionCount[]),
       fetchTokenSavings(startNs, endNs, agent).catch(() => null),
     ]);
     setSessions(sessData);
@@ -1301,6 +1328,31 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                     </tr>
                   </thead>
                 <tbody className="divide-y divide-gray-100">
+                  {/* Interruptions the backend could not attribute to a session.
+                      Rendered outside the pagination slice so the visible
+                      breakdown always adds up to the overview total. */}
+                  {(() => {
+                    const ic = sessionInterruptionCounts.get(UNASSIGNED_INTERRUPTION_BUCKET);
+                    if (!ic || ic.total === 0) return null;
+                    return (
+                      <tr className="bg-amber-50">
+                        <td className="px-4 lg:px-6 py-4">
+                          <span
+                            className="text-sm text-amber-800"
+                            title={t('cl.unassignedSessionHint')}
+                          >
+                            {t('cl.unassignedSession')}
+                          </span>
+                        </td>
+                        <td colSpan={8} className="px-4 lg:px-6 py-4 text-xs text-amber-700">
+                          {t('cl.unassignedSessionHint')}
+                        </td>
+                        <td className="px-4 lg:px-6 py-4">
+                          <InterruptionBadge bySeverity={ic.by_severity} types={ic.types} />
+                        </td>
+                      </tr>
+                    );
+                  })()}
                   {!loading && sessions.length === 0 && (
                     <tr>
                       <td colSpan={10} className="px-4 lg:px-6 py-12 text-center text-gray-400">
