@@ -586,12 +586,22 @@ fn find_all_patterns(haystack: &[u8], pattern: &[u8]) -> Vec<usize> {
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
-    // SSL function prologue byte patterns (x86_64).
-    // These are stable across versions because they represent the fixed
-    // parameter-saving and state-setup logic of the POSIX SSL API.
-    const HANDSHAKE_PAT: &[u8] = &[
-        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
-        0xec, 0x28, 0x49, 0x89, 0xfc, 0x48, 0x8b, 0x47, 0x30,
+    // SSL function prologue byte patterns (x86_64), stable across versions
+    // because they encode the fixed parameter-saving and state-setup logic of
+    // the POSIX SSL API. SSL_do_handshake needs one pattern per toolchain
+    // flavor because register allocation differs:
+    // - clang builds (Node.js, Chrome): spills the SSL* into r12.
+    // - Bun single-file executables (Claude Code >= 2.1.113): loads ssl->s3
+    //   into r15 and inlines the `initial_handshake_done` early-return check.
+    const HANDSHAKE_PATS: &[&[u8]] = &[
+        &[
+            0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48,
+            0x83, 0xec, 0x28, 0x49, 0x89, 0xfc, 0x48, 0x8b, 0x47, 0x30,
+        ],
+        &[
+            0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x4c, 0x8b, 0x7f, 0x30,
+            0x49, 0x83, 0xbf, 0x18, 0x01, 0x00, 0x00, 0x00, 0x74,
+        ],
     ];
     const READ_PAT: &[u8] = &[
         0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x48, 0x83, 0xbf, 0x98, 0x00,
@@ -627,14 +637,19 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
         return None;
     };
 
-    // --- SSL_do_handshake: expect unique match ---
-    let hs_matches = find_all_patterns(&data, HANDSHAKE_PAT);
+    // --- SSL_do_handshake: collect matches across all known variants ---
+    let mut hs_matches: Vec<usize> = HANDSHAKE_PATS
+        .iter()
+        .flat_map(|pat| find_all_patterns(&data, pat))
+        .collect();
     if hs_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_do_handshake pattern not found in {path}");
         }
         return None;
     }
+    hs_matches.sort_unstable();
+    hs_matches.dedup();
     // Pick the match closest to (and before) SSL_read.
     let hs_off = if hs_matches.len() == 1 {
         hs_matches[0]
@@ -1222,5 +1237,119 @@ mod tests {
             payload.len(),
             "buf_size clamped to available bytes"
         );
+    }
+
+    // ─── find_static_ssl_offsets regression tests ────────────────────────────
+    // Prologue literals mirror the ones inside find_static_ssl_offsets. If a
+    // production pattern is edited without updating these fixtures, detection
+    // on the synthetic image fails and the tests trip — that is the point.
+    const HS_CLANG_PAT: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
+        0xec, 0x28, 0x49, 0x89, 0xfc, 0x48, 0x8b, 0x47, 0x30,
+    ];
+    const HS_BUN_PAT: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x4c, 0x8b, 0x7f, 0x30, 0x49,
+        0x83, 0xbf, 0x18, 0x01, 0x00, 0x00, 0x00, 0x74,
+    ];
+    const READ_PAT_T: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x48, 0x83, 0xbf, 0x98, 0x00,
+        0x00, 0x00, 0x00, 0x74,
+    ];
+    const WRITE_PAT_T: &[u8] = &[
+        0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
+        0xec, 0x18, 0x41, 0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x89, 0xfb,
+    ];
+
+    /// Zero-filled synthetic binary with the given prologues planted at file
+    /// offsets; zeros cannot match any pattern, so matches are unambiguous.
+    fn build_static_ssl_image(
+        hs: Option<(usize, &[u8])>,
+        read: Option<usize>,
+        write: Option<usize>,
+    ) -> Vec<u8> {
+        let mut img = vec![0u8; 0x5000];
+        if let Some((off, pat)) = hs {
+            img[off..off + pat.len()].copy_from_slice(pat);
+        }
+        if let Some(off) = read {
+            img[off..off + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        }
+        if let Some(off) = write {
+            img[off..off + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        }
+        img
+    }
+
+    fn with_static_ssl_fixture(name: &str, img: &[u8], f: impl FnOnce(&str)) {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight-static-ssl-{}-{name}",
+            std::process::id()
+        ));
+        fs::write(&path, img).expect("write synthetic binary fixture");
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+        f(path_str);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn static_ssl_offsets_matches_bun_handshake_variant() {
+        // Regression for Claude Code >= 2.1.113: the Bun-built binary's
+        // SSL_do_handshake prologue must be detected alongside read/write.
+        let img = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        with_static_ssl_fixture("bun", &img, |path| {
+            let off = find_static_ssl_offsets(path).expect("Bun variant must be detected");
+            assert_eq!(off.ssl_do_handshake, 0x100);
+            assert_eq!(off.ssl_read, 0x2000);
+            assert_eq!(off.ssl_write, 0x2100);
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_matches_clang_handshake_variant() {
+        let img = build_static_ssl_image(Some((0x100, HS_CLANG_PAT)), Some(0x2000), Some(0x2100));
+        with_static_ssl_fixture("clang", &img, |path| {
+            let off = find_static_ssl_offsets(path).expect("clang variant must be detected");
+            assert_eq!(off.ssl_do_handshake, 0x100);
+            assert_eq!(off.ssl_read, 0x2000);
+            assert_eq!(off.ssl_write, 0x2100);
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_rejects_handshake_only_after_read() {
+        // With multiple handshake matches, selection requires one strictly
+        // before SSL_read; here both candidates sit after it.
+        let mut img = build_static_ssl_image(None, Some(0x2000), Some(0x2100));
+        img[0x3000..0x3000 + HS_BUN_PAT.len()].copy_from_slice(HS_BUN_PAT);
+        img[0x4000..0x4000 + HS_BUN_PAT.len()].copy_from_slice(HS_BUN_PAT);
+        with_static_ssl_fixture("hs-after-read", &img, |path| {
+            assert!(find_static_ssl_offsets(path).is_none());
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_prefers_handshake_before_read_on_ambiguity() {
+        // Multiple matches: the closest one strictly before SSL_read wins.
+        let mut img =
+            build_static_ssl_image(Some((0x1000, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        img[0x1800..0x1800 + HS_BUN_PAT.len()].copy_from_slice(HS_BUN_PAT);
+        img[0x3000..0x3000 + HS_BUN_PAT.len()].copy_from_slice(HS_BUN_PAT);
+        with_static_ssl_fixture("hs-ambiguous", &img, |path| {
+            let off = find_static_ssl_offsets(path).expect("ambiguous matches must resolve");
+            assert_eq!(off.ssl_do_handshake, 0x1800);
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_rejects_write_beyond_adjacency() {
+        // SSL_write must sit within ADJACENCY_THRESHOLD (0x1000) after SSL_read.
+        let img = build_static_ssl_image(
+            Some((0x100, HS_BUN_PAT)),
+            Some(0x2000),
+            Some(0x2000 + 0x2000),
+        );
+        with_static_ssl_fixture("write-far", &img, |path| {
+            assert!(find_static_ssl_offsets(path).is_none());
+        });
     }
 }
