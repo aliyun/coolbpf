@@ -34,6 +34,29 @@
 - 修改 `agentsight.json` 结构（新增/删除/重命名字段、改变语义）时，必须同步 bump `schema_version` 并更新 `config.rs` 中的 `CURRENT_SCHEMA_VERSION` 常量
 - 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
 
+### 用户文档
+用户指南位于 `docs/user-guide/{en,zh}/agent-observability/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
+
+改动落在下面这些面上时，必须在同一个 PR 里更新对应页面：
+
+| 改动内容 | 必须同步的页面 |
+|----------|----------------|
+| 新增/删除子命令，或改动参数、默认值、`possible_values` | `cli-reference.md` |
+| `agentsight.json` 字段、默认值、`features` 开关、`runtime_limits` | `configuration.md` |
+| `InterruptionType` 枚举、severity 默认值、检测阈值、DeadLoop 处置 | `interruption-detection.md` |
+| API 路由增删（`/api/docs` 清单变化）、数据库文件、保留与容量策略 | `data-and-storage.md` |
+| Dashboard 页面增删、导航能力探测（`capabilities`）、认证行为 | `dashboard.md` |
+| systemd unit、安装路径、容器/Sidecar 要求、macOS 能力边界 | `deployment.md` |
+| 伴生组件集成（tokenless / agent-sec-core / enforcer）表现变化 | `integrations.md` |
+
+硬性要求：
+
+- 文档中的命令与输出必须在真实环境验证过，禁止凭源码推测排版；示例中的会话/对话/中断 ID、Token 数、主机名与 IP 必须是一眼可辨的占位值（如 `00000000-0000-0000-0000-000000000001`、`203.0.113.10`），禁止粘贴真实采集数据
+- 不要在正文中钉未发布的补丁版本号，用 `0.11`、`0.11.x` 这类版本序列表述
+- 已知缺陷（CLI 与界面提示不一致、参数覆盖不全等）以显式 caveat 写清楚，不要静默省略
+- 截图放在 `docs/images/agentsight/{en,zh}/`，用相对路径引用；网站构建由 `website/scripts/prepare-docs.mjs` 自动改写路径并拷贝到静态目录，新增图片必须被某个页面引用，否则不会进入站点
+- 文档变更后本地至少跑通：`bash scripts/docs-lint.sh`、`python3 scripts/docs-link-check.py`、`npm run build --prefix website`
+
 ## 1. Quick Start
 
 ```bash
@@ -257,8 +280,8 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 `agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
 
-- **版本缺失或过旧**（如从 0.6 升级到 0.7）：自动备份旧文件为 `.json.bak`，用内嵌默认配置覆盖
-- **版本一致**：保留用户自定义配置不动
+- **版本缺失或过旧**（如从 0.6 升级到 0.7）：先把旧文件复制为 `config.json.bak.<unix秒>`，再写入浅合并结果——以内嵌默认配置为底，逐个顶层键叠加用户已设置的内容（`schema_version` 除外），最后提升版本号（`config.rs` 的 `ensure_default_agents_config`，见 #1496）
+- **版本一致或更新**：保留用户自定义配置不动
 - **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
 
 **修改 `agentsight.json` 时的检查清单**：
