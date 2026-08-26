@@ -102,7 +102,7 @@ impl AppState {
         }
 
         // Check if DB exists
-        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        let db_path = storage_data_dir(&self.storage_path).join("trajectories.db");
         if !db_path.exists() {
             return None;
         }
@@ -602,11 +602,22 @@ fn extractor_error(message: String) -> actix_web::Error {
 // ─── Server entry point ───────────────────────────────────────────────────────
 
 fn private_state_dir(storage_path: &Path) -> PathBuf {
-    storage_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("/var/log/sysak/.agentsight"))
-        .join(".agentsight-private")
+    storage_data_dir(storage_path).join(".agentsight-private")
+}
+
+/// Directory holding the sibling databases of `storage_path`.
+///
+/// `serve --db` points at one database file; every other store must follow it
+/// into the same directory, otherwise browsing an archived copy mixes its
+/// sessions with the live host's interruptions. A bare relative `--db name.db`
+/// has an empty parent, which means the current directory (`.`) — resolving it
+/// to the system default would reintroduce the mixed-data behaviour.
+fn storage_data_dir(storage_path: &Path) -> &Path {
+    match storage_path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => Path::new("/var/log/sysak/.agentsight"),
+    }
 }
 
 /// Start the API server
@@ -683,11 +694,13 @@ pub async fn run_server(
         }
     }
 
-    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls)
+    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls).
+    // Open the same database `--db` selected so the checker reads pending calls and
+    // writes agent_crash events into one consistent dataset.
     let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
-        match crate::storage::sqlite::GenAISqliteStore::new() {
+        match crate::storage::sqlite::GenAISqliteStore::new_with_path(&storage_path) {
             Ok(store) => {
-                log::info!("GenAI SQLite store initialized for HealthChecker");
+                log::info!("GenAI SQLite store initialized for HealthChecker at {storage_path:?}");
                 Some(Arc::new(store))
             }
             Err(e) => {
@@ -698,7 +711,7 @@ pub async fn run_server(
 
     // Initialize interruption store
     let interruption_store: Option<Arc<InterruptionStore>> = {
-        let db_path = crate::storage::sqlite::sibling_db_path("interruption_events.db");
+        let db_path = storage_data_dir(&storage_path).join("interruption_events.db");
         match InterruptionStore::new_with_path(&db_path) {
             Ok(store) => {
                 log::info!("Interruption store initialized at {db_path:?}");
@@ -723,13 +736,13 @@ pub async fn run_server(
     checker.start();
 
     // Initialize read-only trajectory store (collector writes it in `trace` mode;
-    // serve only consumes). Path is derived via the shared sibling_db_path helper
-    // so reader and writer always resolve the same file. A missing DB simply
+    // serve only consumes). Path follows `--db` through storage_data_dir so
+    // reader and writer always resolve the same file. A missing DB simply
     // yields an empty table → empty API results (graceful degradation).
     // Only open when the file already exists to avoid creating an empty DB as a
     // persistent side-effect in serve mode when collection was never enabled.
     let trajectory_store: Option<Arc<TrajectoryStore>> = {
-        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        let db_path = storage_data_dir(&storage_path).join("trajectories.db");
         if !db_path.exists() {
             log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
             None
@@ -885,6 +898,35 @@ mod tests {
 
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
+
+    #[test]
+    fn storage_data_dir_default_matches_legacy_layout() {
+        // Without `--db`, serve opens the default GenAI DB; every sibling store
+        // must resolve to the historical directory so this change is a no-op
+        // for existing deployments.
+        let default_db = crate::storage::sqlite::GenAISqliteStore::default_path();
+        assert_eq!(
+            super::storage_data_dir(&default_db),
+            std::path::Path::new("/var/log/sysak/.agentsight"),
+        );
+    }
+
+    #[test]
+    fn storage_data_dir_follows_absolute_db() {
+        let db = PathBuf::from("/backup/2026/genai_events.db");
+        assert_eq!(
+            super::storage_data_dir(&db),
+            std::path::Path::new("/backup/2026"),
+        );
+    }
+
+    #[test]
+    fn storage_data_dir_keeps_relative_db_in_cwd() {
+        // A bare relative `--db archived.db` must keep its siblings next to it
+        // (current directory), not fall back to the system directory.
+        let db = PathBuf::from("archived.db");
+        assert_eq!(super::storage_data_dir(&db), std::path::Path::new("."));
+    }
 
     use super::auth::DashboardAuth;
     use super::{

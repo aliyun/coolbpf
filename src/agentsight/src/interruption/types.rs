@@ -48,6 +48,31 @@ pub enum InterruptionType {
 }
 
 impl InterruptionType {
+    /// Every variant, in declaration order.
+    ///
+    /// Single source of truth for CLI filters and API validation so a new
+    /// variant cannot silently stay unselectable.
+    pub const ALL: [InterruptionType; 18] = [
+        Self::AgentCrash,
+        Self::RateLimit,
+        Self::AuthError,
+        Self::NetworkTimeout,
+        Self::ServiceUnavailable,
+        Self::SafetyFilter,
+        Self::SseTruncated,
+        Self::ContextOverflow,
+        Self::TokenLimit,
+        Self::LlmError,
+        Self::RetryStorm,
+        Self::DeadLoop,
+        Self::ToolFailure,
+        Self::EmptyResponse,
+        Self::ResourceExhaustion,
+        Self::SlowResponse,
+        Self::StateMachineError,
+        Self::UnauthorizedAction,
+    ];
+
     /// String identifier stored in the database
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -668,5 +693,27 @@ mod tests {
         assert!(!s.core_dump);
         assert_eq!(s.code, 255);
         assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        let identifiers: Vec<&str> = InterruptionType::ALL.iter().map(|t| t.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = identifiers.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            identifiers.len(),
+            "InterruptionType::ALL repeats a variant"
+        );
+
+        // Round-tripping through from_str proves each identifier is the one the
+        // database and the CLI filters use.
+        for interruption_type in InterruptionType::ALL {
+            let identifier = interruption_type.as_str();
+            assert_eq!(
+                InterruptionType::from_str(identifier),
+                Some(interruption_type),
+                "identifier {identifier} does not round-trip"
+            );
+        }
     }
 }

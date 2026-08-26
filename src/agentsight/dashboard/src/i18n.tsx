@@ -60,8 +60,6 @@ const enUSMessages = {
   'login.signIn': 'Sign In',
   'login.tokenHintPrefix': 'Run ',
   'login.tokenHintSuffix': ' to view your token.',
-  'login.fullTokenHintPrefix': 'Or use ',
-  'login.fullTokenHintSuffix': ' to show the complete value.',
 
   // ── Common / shared ──
   'common.loading': 'Loading...',
@@ -1070,8 +1068,6 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'login.signIn': '登录',
     'login.tokenHintPrefix': '运行 ',
     'login.tokenHintSuffix': ' 查看令牌。',
-    'login.fullTokenHintPrefix': '或使用 ',
-    'login.fullTokenHintSuffix': ' 显示完整令牌。',
 
     // ── Common ──
     'common.loading': '加载中...',
