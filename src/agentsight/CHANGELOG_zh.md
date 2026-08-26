@@ -3,6 +3,7 @@
 ## 0.11.1
 
 ### 修复
+- SSL uprobe 被内核静默注销后按 TTL 自动重挂载，抓包可自愈，无需重启。(#2791)
 - 中断事件按 session/conversation 拆分时保留无 session 的记录，保证分组计数与总数一致。(#2796)
 - 新增 Bun SSL_do_handshake prologue 模式，支持捕获 Claude Code（Bun 构建，>= 2.1.113）的 LLM 流量。(#2782)
 

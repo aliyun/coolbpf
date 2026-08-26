@@ -25,7 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
@@ -44,6 +44,43 @@ use bpf::*;
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAX_BUF_SIZE: usize = bpf::MAX_BUF_SIZE as usize;
 const POLL_TIMEOUT_MS: u64 = 100;
+
+/// How long a global uprobe attachment is trusted before the next matching
+/// process triggers a re-attach. The kernel can deregister uprobe consumers
+/// without any userspace-visible error (observed on serverless/overlayfs
+/// hosts), leaving the `Link` objects alive but the probes silent. Userspace
+/// cannot query liveness, so re-attach on TTL expiry is the recovery path.
+const STALE_REATTACH_TTL: Duration = Duration::from_secs(300);
+
+/// Effective stale re-attach TTL, resolved once per `SslSniff` at
+/// construction. `AGENTSIGHT_SSL_REATTACH_TTL_SECS` overrides the default
+/// (0 forces a re-attach on every matching exec; used by tests).
+fn stale_reattach_ttl() -> Duration {
+    std::env::var("AGENTSIGHT_SSL_REATTACH_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(STALE_REATTACH_TTL)
+}
+
+/// Per-inode uprobe attachment state used for stale re-attach.
+struct InodeAttach {
+    /// Held for Drop (detaches the uprobes); never read directly.
+    _links: Vec<Link>,
+    attached_at: Instant,
+}
+
+/// Outcome of a single uprobe attach attempt for one library.
+enum AttachOutcome {
+    /// Probes attached successfully.
+    Attached(Vec<Link>),
+    /// No known SSL entry points in this binary; retrying is pointless, so
+    /// the inode stays marked in `traced_files` without an attachment.
+    Untraceable,
+    /// Transient attach failure; the caller unmarks the inode so a later
+    /// sweep can retry.
+    Failed,
+}
 
 /// User-space SslEvent - lightweight version of BPF probe_SSL_data_t
 ///
@@ -235,11 +272,17 @@ pub struct SslSniff {
     // OpenObject allocation that the skeleton borrows from.
     _open_object: Box<MaybeUninit<libbpf_rs::OpenObject>>,
     skel: Box<SslsniffSkel<'static>>,
-    _links: Vec<Link>,
+    /// Per-inode uprobe links with attach metadata (for stale re-attach).
+    attachments: HashMap<u64, InodeAttach>,
     traced_files: HashSet<u64>,
     /// Maps pid -> inodes that were attached for this pid.
     /// Used to clean up traced_files when the process exits.
     pid_inodes: HashMap<u32, Vec<u64>>,
+    /// Stale re-attach TTL, resolved once at construction from the
+    /// `AGENTSIGHT_SSL_REATTACH_TTL_SECS` override (or the default).
+    reattach_ttl: Duration,
+    /// How many stale attachments have been re-attached (diagnostics/tests).
+    stale_reattachs: u64,
     // Channel for user-space SslEvent (lightweight, no need for Box)
     tx: crossbeam_channel::Sender<SslEvent>,
     rx: crossbeam_channel::Receiver<SslEvent>,
@@ -290,9 +333,11 @@ impl SslSniff {
         Ok(Self {
             _open_object: open_object,
             skel,
-            _links: Vec::new(),
+            attachments: HashMap::default(),
             traced_files: HashSet::default(),
             pid_inodes: HashMap::default(),
+            reattach_ttl: stale_reattach_ttl(),
+            stale_reattachs: 0,
             tx,
             rx,
         })
@@ -302,7 +347,10 @@ impl SslSniff {
     ///
     /// Detects which SSL libraries the process has mapped (OpenSSL, GnuTLS, NSS,
     /// or statically-linked SSL — BoringSSL/OpenSSL), attaches uprobes, and skips any
-    /// library whose inode has already been traced (dedup via `traced_files`).
+    /// library whose inode has already been traced (dedup via `traced_files`) —
+    /// unless that attachment is stale (older than the re-attach TTL), in
+    /// which case the probes are re-attached and the old links are dropped
+    /// only after the replacement succeeds.
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
         let libs = ssl_libs_from_maps(pid)?;
         if libs.is_empty() {
@@ -319,93 +367,70 @@ impl SslSniff {
                 .collect::<Vec<_>>()
         );
 
+        let now = Instant::now();
         let mut attached_inodes: Vec<u64> = Vec::new();
         for (path, inode, kind) in libs {
-            // Skip libraries whose inode we already traced.
-            // Uprobes are attached globally (pid=-1), and the kernel's
-            // uprobe_mmap mechanism automatically installs breakpoints for
-            // new processes that map an already-registered inode, so each
-            // library only needs to be attached once — including statically-linked
-            // SSL binaries (codex, node, etc).
+            // Dedup by inode: with pid=-1 global attach each library only needs
+            // to be attached once — the kernel's uprobe_mmap mechanism installs
+            // breakpoints for new processes that map an already-registered
+            // inode, including statically-linked SSL binaries (codex, node,
+            // etc). But the kernel can also silently deregister uprobe
+            // consumers (observed on serverless/overlayfs hosts), leaving the
+            // probes silent with no error. Userspace cannot query liveness, so
+            // treat attachments older than the TTL as stale and re-attach.
             if !self.traced_files.insert(inode) {
-                log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
-                // Still record the pid→inode association so detach_process
-                // can track all pids referencing this inode.
-                attached_inodes.push(inode);
+                let stale = match self.attachments.get(&inode) {
+                    Some(a) => now.duration_since(a.attached_at) >= self.reattach_ttl,
+                    // Marked but never attached: an Untraceable binary. Nothing
+                    // to re-attach; rescanning it every sweep is wasted work.
+                    None => false,
+                };
+                if !stale {
+                    log::debug!("[attach_process] pid={pid}: skipping already-traced {path}");
+                    // Still record the pid→inode association so detach_process
+                    // can track all pids referencing this inode.
+                    attached_inodes.push(inode);
+                    continue;
+                }
+                let age_secs = self
+                    .attachments
+                    .get(&inode)
+                    .map(|a| now.duration_since(a.attached_at).as_secs());
+                // Build the replacement BEFORE dropping the old links: if the
+                // re-attach fails, the previous (possibly still working) probes
+                // stay active instead of leaving the library untraced.
+                match self.build_attach(pid, &path, kind) {
+                    AttachOutcome::Attached(links) => {
+                        log::warn!(
+                            "[attach_process] pid={pid}: re-attached stale {kind:?} uprobe on {path} ({}s old)",
+                            age_secs.unwrap_or(0)
+                        );
+                        self.record_attach(inode, links);
+                        self.stale_reattachs += 1;
+                        attached_inodes.push(inode);
+                    }
+                    AttachOutcome::Untraceable | AttachOutcome::Failed => {
+                        log::warn!(
+                            "[attach_process] pid={pid}: stale re-attach failed for {path}; keeping previous links"
+                        );
+                        attached_inodes.push(inode);
+                    }
+                }
                 continue;
             }
 
-            log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
-
-            let result = match kind {
-                // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
-                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
-                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
-                SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
-                SslLibKind::Static => {
-                    match attach_static_ssl_by_symbol(&mut self.skel, &path, -1) {
-                        Ok(ls) => Ok(ls),
-                        Err(sym_err) => {
-                            log::debug!(
-                                "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                            );
-                            match find_static_ssl_offsets(&path) {
-                                Some(off) => attach_static_ssl_by_offset(
-                                    &mut self.skel,
-                                    &path,
-                                    &off,
-                                    false,
-                                    -1,
-                                ),
-                                None => {
-                                    // Tier 3: codex offset table lookup (for static-pie binaries
-                                    // like Codex CLI that statically link OpenSSL/BoringSSL without symbols)
-                                    if let Some(ref table) = *CODEX_OFFSET_TABLE {
-                                        if let Some(off) = table.lookup(&path) {
-                                            log::info!(
-                                                "[attach_process] pid={pid}: codex offset table matched for {path} \
-                                             (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
-                                                off.ssl_write,
-                                                off.ssl_read,
-                                                off.ssl_do_handshake
-                                            );
-                                            attach_static_ssl_by_offset(
-                                                &mut self.skel,
-                                                &path,
-                                                &off,
-                                                true,
-                                                -1,
-                                            )
-                                        } else {
-                                            log::warn!(
-                                                "[attach_process] pid={pid}: SSL detection failed for {path} \
-                                             (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
-                                            );
-                                            continue;
-                                        }
-                                    } else {
-                                        log::warn!(
-                                            "[attach_process] pid={pid}: SSL detection failed for {path} \
-                                         (no SSL_* in .dynsym and no byte-pattern match), skipping"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-            match result {
-                Ok(ls) => {
-                    self._links.extend(ls);
+            match self.build_attach(pid, &path, kind) {
+                AttachOutcome::Attached(links) => {
+                    self.record_attach(inode, links);
                     attached_inodes.push(inode);
                 }
-                Err(e) => {
-                    // Attach failed: remove inode from traced_files so retries can succeed
+                AttachOutcome::Untraceable => {
+                    // Not traceable on this host; leave the inode marked so we
+                    // do not repeat the (expensive) detection on every sweep.
+                }
+                AttachOutcome::Failed => {
+                    // Attach failed: drop the inode so a later retry can succeed.
                     self.traced_files.remove(&inode);
-                    eprintln!("Warning: attach_process pid={pid} {path}: {e:#}");
                 }
             }
         }
@@ -418,14 +443,111 @@ impl SslSniff {
         Ok(())
     }
 
+    /// Number of SSL library inodes with live uprobe attachments (diagnostics).
+    pub fn traced_inode_count(&self) -> usize {
+        self.attachments.len()
+    }
+
+    /// How many stale attachments have been replaced by a re-attach
+    /// (diagnostics/tests).
+    pub fn stale_reattach_count(&self) -> u64 {
+        self.stale_reattachs
+    }
+
+    /// Record a successful attach for `inode`, replacing any prior entry
+    /// (whose links are dropped, detaching the old probes).
+    fn record_attach(&mut self, inode: u64, links: Vec<Link>) {
+        self.attachments.insert(
+            inode,
+            InodeAttach {
+                _links: links,
+                attached_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Attach uprobes for a single SSL library.
+    ///
+    /// Does not touch `traced_files` or `attachments`; the caller decides how
+    /// to record or retry the outcome.
+    fn build_attach(&mut self, pid: i32, path: &str, kind: SslLibKind) -> AttachOutcome {
+        log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
+
+        // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
+        let result = match kind {
+            SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
+            SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
+            SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
+            SslLibKind::Static => {
+                match attach_static_ssl_by_symbol(&mut self.skel, path, -1) {
+                    Ok(ls) => Ok(ls),
+                    Err(sym_err) => {
+                        log::debug!(
+                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                        );
+                        match find_static_ssl_offsets(path) {
+                            Some(off) => {
+                                attach_static_ssl_by_offset(&mut self.skel, path, &off, false, -1)
+                            }
+                            None => {
+                                // Tier 3: codex offset table lookup (for static-pie binaries
+                                // like Codex CLI that statically link OpenSSL/BoringSSL without symbols)
+                                if let Some(ref table) = *CODEX_OFFSET_TABLE {
+                                    if let Some(off) = table.lookup(path) {
+                                        log::info!(
+                                            "[attach_process] pid={pid}: codex offset table matched for {path} \
+                                         (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                            off.ssl_write,
+                                            off.ssl_read,
+                                            off.ssl_do_handshake
+                                        );
+                                        return match attach_static_ssl_by_offset(
+                                            &mut self.skel,
+                                            path,
+                                            &off,
+                                            true,
+                                            -1,
+                                        ) {
+                                            Ok(links) => AttachOutcome::Attached(links),
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                                );
+                                                AttachOutcome::Failed
+                                            }
+                                        };
+                                    }
+                                }
+                                log::warn!(
+                                    "[attach_process] pid={pid}: SSL detection failed for {path} \
+                                 (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                );
+                                return AttachOutcome::Untraceable;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        match result {
+            Ok(links) => AttachOutcome::Attached(links),
+            Err(e) => {
+                log::warn!("[attach_process] pid={pid}: attach failed for {path}: {e:#}");
+                AttachOutcome::Failed
+            }
+        }
+    }
+
     /// Detach SSL probes for a process and clean up traced inodes.
     ///
-    /// When a process exits, its inodes are removed from `traced_files` **only
-    /// if no other traced pid still references the same inode**.  Uprobes are
-    /// attached globally (`pid=-1`), so the link remains valid for other
-    /// processes using the same library; removing the inode prematurely would
-    /// cause the scanner to re-attach on the next sweep, producing duplicate
-    /// uprobe fds.
+    /// When a process exits, its inodes are removed from `traced_files` (and
+    /// their `attachments` entries dropped, detaching the global uprobes)
+    /// **only if no other traced pid still references the same inode**.
+    /// Uprobes are attached globally (`pid=-1`), so the link remains valid
+    /// for other processes using the same library; removing the inode
+    /// prematurely would cause the scanner to re-attach on the next sweep,
+    /// producing duplicate uprobe fds.
     pub fn detach_process(&mut self, pid: u32) {
         if let Some(inodes) = self.pid_inodes.remove(&pid) {
             let mut removed = 0;
@@ -438,6 +560,11 @@ impl SslSniff {
                     .any(|other_inode| other_inode == inode);
                 if !still_used {
                     self.traced_files.remove(inode);
+                    // Drop the attachment too: releasing the Links detaches the
+                    // (now unneeded) global uprobes and keeps `attachments`
+                    // consistent with `traced_files`. A later process mapping
+                    // this inode re-attaches through the fresh-attach path.
+                    self.attachments.remove(inode);
                     removed += 1;
                 }
             }
