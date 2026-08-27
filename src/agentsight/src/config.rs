@@ -45,6 +45,14 @@ pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
 /// Default bounded channel capacity for probe → event loop events.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
 
+/// Default byte budget for probe events queued in the event channel (64 MiB).
+///
+/// A slot count cannot bound memory on its own: one SSL record carries up to
+/// `MAX_BUF_SIZE` (4 MiB) of payload, so the 10 000 default slots admit
+/// gigabytes of in-flight data under real HTTPS traffic. Admission is therefore
+/// gated on bytes as well.
+pub const DEFAULT_EVENT_CHANNEL_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// Default maximum number of pending GenAI events waiting for session_id resolution.
 pub const DEFAULT_PENDING_GENAI_MAX_COUNT: usize = 1_000;
 
@@ -390,6 +398,9 @@ pub struct JsonRuntimeLimits {
     pub event_channel_capacity: Option<usize>,
     #[serde(default)]
     pub event_channel_policy: Option<String>,
+    /// Byte budget for events queued in the probe event channel, in MiB.
+    /// Bounds in-flight memory that the slot count alone cannot (#2888).
+    pub event_channel_max_bytes_mb: Option<usize>,
     pub pending_genai_max_count: Option<usize>,
     pub pending_genai_max_bytes_mb: Option<usize>,
     pub pid_cache_size: Option<usize>,
@@ -745,6 +756,12 @@ pub struct RuntimeLimits {
     pub event_channel_capacity: usize,
     /// Policy when the event channel is full.
     pub event_channel_policy: ChannelPolicy,
+    /// Byte budget for events queued in the event channel.
+    ///
+    /// Enforced alongside `event_channel_capacity`: whichever limit is reached
+    /// first stops admission. Needed because event sizes span four orders of
+    /// magnitude (a 16 KiB SSL record vs. a 4 MiB one).
+    pub event_channel_max_bytes: usize,
     /// Max pending GenAI events waiting for session_id resolution.
     pub pending_genai_max_count: usize,
     /// Max bytes for pending GenAI events.
@@ -764,6 +781,7 @@ impl Default for RuntimeLimits {
         Self {
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
             event_channel_policy: ChannelPolicy::Backpressure,
+            event_channel_max_bytes: DEFAULT_EVENT_CHANNEL_MAX_BYTES,
             pending_genai_max_count: DEFAULT_PENDING_GENAI_MAX_COUNT,
             pending_genai_max_bytes: DEFAULT_PENDING_GENAI_MAX_BYTES,
             pid_cache_size: DEFAULT_PID_CACHE_SIZE,
@@ -1234,6 +1252,10 @@ impl AgentsightConfig {
                     .as_deref()
                     .map(ChannelPolicy::from)
                     .unwrap_or_default(),
+                event_channel_max_bytes: limits
+                    .event_channel_max_bytes_mb
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
                 pending_genai_max_count: limits
                     .pending_genai_max_count
                     .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
@@ -1916,6 +1938,10 @@ mod tests {
             DEFAULT_EVENT_CHANNEL_CAPACITY
         );
         assert_eq!(
+            limits.event_channel_max_bytes,
+            DEFAULT_EVENT_CHANNEL_MAX_BYTES
+        );
+        assert_eq!(
             limits.pending_genai_max_count,
             DEFAULT_PENDING_GENAI_MAX_COUNT
         );
@@ -1955,6 +1981,7 @@ mod tests {
             "runtime_limits": {
                 "event_channel_capacity": 5000,
                 "event_channel_policy": "drop_newest",
+                "event_channel_max_bytes_mb": 16,
                 "pending_genai_max_count": 500,
                 "pending_genai_max_bytes_mb": 32,
                 "pid_cache_size": 256,
@@ -1971,6 +1998,10 @@ mod tests {
             ChannelPolicy::DropNewest
         ));
         assert_eq!(config.runtime_limits.pending_genai_max_count, 500);
+        assert_eq!(
+            config.runtime_limits.event_channel_max_bytes,
+            16 * 1024 * 1024
+        );
         assert_eq!(
             config.runtime_limits.pending_genai_max_bytes,
             32 * 1024 * 1024

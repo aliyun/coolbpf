@@ -411,6 +411,7 @@ AgentSight 通过 `agentsight.json` 配置文件进行统一管理（默认路�
 |--------|--------|------|
 | `event_channel_capacity` | 10,000 | Probe → 事件通道的有界容量 |
 | `event_channel_policy` | `"backpressure"` | 满载策略：`backpressure` / `drop_newest` / `sample` |
+| `event_channel_max_bytes_mb` | 64 | 排队事件的字节预算（单条 SSL 记录可达 4 MiB，仅靠槽位数无法限定内存）|
 | `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
 | `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
 | `pid_cache_size` | 1,024 | PID → agent_name 的 LRU 缓存大小 |
