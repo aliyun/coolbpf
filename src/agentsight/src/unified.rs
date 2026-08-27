@@ -38,7 +38,7 @@ use crate::interruption::{
     DetectorConfig, InterruptionDetector, ProcessExitStatus, recover_oom_events,
 };
 use crate::parser::Parser;
-use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
+use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
@@ -103,6 +103,8 @@ pub struct AgentSight {
     last_drain_check: std::time::Instant,
     /// Rate-limiter for interruption DB purge (at most once per 60 s)
     last_interruption_purge: std::time::Instant,
+    /// Rate-limiter for the buffer watermark log (at most once per 60 s)
+    last_watermark_log: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: lru::LruCache<u32, String>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
@@ -591,6 +593,7 @@ impl AgentSight {
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
             last_interruption_purge: std::time::Instant::now(),
+            last_watermark_log: std::time::Instant::now(),
             pid_agent_name_cache,
             http_domains,
             pending_logtail,
@@ -1102,6 +1105,10 @@ impl AgentSight {
 
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
+            // Rate-limited internally, and deliberately outside the idle branch:
+            // a saturated byte budget keeps the queue non-empty, which is exactly
+            // when the watermarks matter most.
+            self.maybe_log_buffer_watermarks();
             if let Some(result) = self.try_process() {
                 log::trace!("[Event {result}] Processed");
             } else {
@@ -2198,6 +2205,26 @@ impl AgentSight {
             }
         }
     }
+
+    /// Periodically report event-buffer watermarks.
+    ///
+    /// The tracer runs under `MemoryMax=350M`; when it is killed the journal is
+    /// the only evidence left, and a cgroup total says nothing about *which*
+    /// buffer grew (#2888).
+    fn maybe_log_buffer_watermarks(&mut self) {
+        if self.last_watermark_log.elapsed() < std::time::Duration::from_secs(60) {
+            return;
+        }
+        self.last_watermark_log = std::time::Instant::now();
+
+        let (needs_attention, report) =
+            watermark_report(self.probes.channel_watermarks(), self.pending_genai.len());
+        if needs_attention {
+            log::info!("{report}");
+        } else {
+            log::debug!("{report}");
+        }
+    }
 }
 
 impl Drop for AgentSight {
@@ -2528,10 +2555,85 @@ fn record_agent_crash_interruptions(
     }
 }
 
+/// Render the buffer watermark report, and whether it needs operator attention.
+///
+/// Split out from the logging call site so the wording is covered by tests: this
+/// line is the only evidence left after an OOM kill, and it has to say which
+/// buffer holds the memory. Attention means the byte budget already rejected
+/// events, which is reported at INFO so diagnosing an OOM does not require
+/// turning on debug logging; a quiet pipeline stays at DEBUG.
+fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, String) {
+    let mut report = format!(
+        "Buffer watermarks: event channel {} / {} bytes in flight",
+        marks.in_flight_bytes, marks.budget_bytes
+    );
+    let needs_attention = marks.dropped_over_budget > 0;
+    if needs_attention {
+        report.push_str(&format!(
+            ", {} events dropped over budget",
+            marks.dropped_over_budget
+        ));
+    }
+    report.push_str(&format!(", pending_genai {pending_genai} entries"));
+    (needs_attention, report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn watermark_report_stays_quiet_without_drops() {
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 1024,
+                budget_bytes: 64 * 1024 * 1024,
+                dropped_over_budget: 0,
+            },
+            3,
+        );
+        assert!(!needs_attention);
+        assert_eq!(
+            report,
+            "Buffer watermarks: event channel 1024 / 67108864 bytes in flight, \
+             pending_genai 3 entries"
+        );
+    }
+
+    #[test]
+    fn watermark_report_surfaces_drops() {
+        // The drop count is the signal that separates channel pressure from
+        // downstream growth, so it must appear and must raise the level.
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 67108864,
+                budget_bytes: 67108864,
+                dropped_over_budget: 42,
+            },
+            17,
+        );
+        assert!(needs_attention);
+        assert!(report.contains("42 events dropped over budget"));
+        assert!(report.contains("67108864 / 67108864 bytes in flight"));
+        assert!(report.contains("pending_genai 17 entries"));
+    }
+
+    #[test]
+    fn watermark_report_shows_unlimited_budget_as_zero() {
+        // With the gate disabled the reading must still be usable, otherwise an
+        // operator who set 0 loses the only in-flight measurement.
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 8 * 1024 * 1024,
+                budget_bytes: 0,
+                dropped_over_budget: 0,
+            },
+            0,
+        );
+        assert!(!needs_attention);
+        assert!(report.contains("8388608 / 0 bytes in flight"));
+    }
 
     /// Generate a unique temp directory for each test invocation.
     fn unique_tmp_dir(tag: &str) -> PathBuf {

@@ -17,7 +17,7 @@ mod elf_buildid;
 pub use filewatch::{FileWatch, FileWatchEvent};
 pub use filewrite::{FileWrite as FileWriteProbe, FileWriteEvent};
 pub use pidns::observer_in_init_pidns;
-pub use probes::{Probes, ProbesPoller};
+pub use probes::{ChannelWatermarks, Probes, ProbesPoller};
 pub use procmon::{Event as ProcMonEventExt, ProcMon, ProcMonEvent};
 pub use proctrace::{ProcPoller, ProcTrace, VariableEvent as ProcEvent};
 pub use shared_maps::{MapKind, SharedMaps};

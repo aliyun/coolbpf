@@ -427,6 +427,7 @@ Configure buffer caps to prevent unbounded memory growth:
 |--------|---------|-------------|
 | `event_channel_capacity` | 10,000 | Bounded channel capacity for probe events |
 | `event_channel_policy` | `"backpressure"` | Full-channel policy: `backpressure` / `drop_newest` / `sample` |
+| `event_channel_max_bytes_mb` | 64 | Byte budget for queued probe events (one SSL record reaches 4 MiB, so the slot count alone cannot bound memory) |
 | `pending_genai_max_count` | 1,000 | Max pending events awaiting session_id |
 | `pending_genai_max_bytes_mb` | 64 | Max bytes for pending events |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU cache size |
