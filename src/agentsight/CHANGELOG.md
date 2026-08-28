@@ -1,9 +1,25 @@
 # Changelog
 
+## 0.11.2
+
+### Features
+- Show historical agent activity. (#2817)
+
+### Fixes
+- Re-attach stale SSL uprobes after kernel-side consumer deregistration so capture self-heals without a restart. (#2792)
+- Restart agentsight after an OOM kill. (#2925)
+- Bound probe event channel by bytes to cap memory under event bursts. (#2925)
+- Align CLI and dashboard with docs and de-duplicate the guide sidebar. (#2899)
+- Trim oversized db by row fraction. (#2872)
+- Trim interruption db to size limit. (#2823)
+- Keep binding API state consistent. (#2794)
+
+### Docs
+- Expand the AgentSight user guide into task pages. (#2825)
+
 ## 0.11.1
 
 ### Fixes
-- Re-attach stale SSL uprobes after kernel-side consumer deregistration so capture self-heals without a restart. (#2791)
 - Keep null-session interruptions in breakdowns so per-session and per-conversation counts always sum to the total. (#2796)
 - Add Bun SSL_do_handshake prologue pattern so Claude Code (Bun builds >= 2.1.113) LLM traffic is captured. (#2782)
 
