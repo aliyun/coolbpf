@@ -173,6 +173,8 @@ export interface EnforcementViolation {
   occurred_at_ns: number;
   observed_at_ns: number;
   actplane_revision: string;
+  /** Correlated risk case id (enriched by the backend), when available. */
+  case_id?: string | null;
 }
 
 export interface FileBindingInput {
@@ -215,12 +217,24 @@ export interface CredentialBindingInput {
   agent_id: string;
   session_id?: string;
   root_pid: number;
-  source_path: string;
+  source_path?: string;
+  source_paths?: string[];
   trusted_endpoint?: string;
+  trusted_endpoints?: string[];
   revision: number;
   mode: EnforcementPolicyMode;
   taint_ttl_secs?: number;
   destination_scope: CredentialDestinationScope;
+}
+
+export interface AgentProtectionPreview {
+  agent_id: string;
+  root_pid: number;
+  workspace_path: string;
+  source_paths: string[];
+  trusted_endpoints: string[];
+  mode: EnforcementPolicyMode;
+  max_trusted_endpoints: number;
 }
 
 export class EnforcementApiError extends Error {
@@ -294,6 +308,13 @@ export const createCredentialBinding = (input: CredentialBindingInput) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
+
+export const fetchAgentProtectionPreview = (pid: number, directory?: string) => {
+  const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+  return enforcementRequest<AgentProtectionPreview>(
+    `/api/enforcement/agent-protection/${pid}${query}`,
+  );
+};
 
 export const detachEnforcementBinding = (bindingId: string) =>
   enforcementRequest<void>(
@@ -1294,6 +1315,7 @@ export interface SecurityEvidenceEvent {
   occurred_at_ns: number;
   identity: {
     pid: number;
+    ppid?: number | null;
     session_id?: string | null;
     tool_call_id?: string | null;
     [key: string]: unknown;
@@ -1609,7 +1631,7 @@ export async function fetchAuditSessions(
 }
 
 export async function fetchSecurityCases(
-  params?: { limit?: number; offset?: number },
+  params?: { limit?: number; offset?: number; agent_id?: string; status?: string; blocked?: boolean },
 ): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
   return auditFetch<SecurityPaginated<SecurityRiskCase>>(
     `${API_BASE}/api/audit/cases${buildQuery(params)}`,
