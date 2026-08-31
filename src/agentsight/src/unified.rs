@@ -195,6 +195,11 @@ impl AgentSight {
         // Init logging after config file load so JSON `log_path` / `verbose` apply.
         config.apply_verbose();
 
+        // Establish the procfs root before anything resolves a pid through it,
+        // and before a probe bakes the pid-namespace flag derived from it into
+        // its skeleton.
+        crate::utils::procfs::configure(&config.procfs_root);
+
         if config_load_ok {
             if let Some(path) = config.config_path.as_ref() {
                 log::info!(
@@ -711,7 +716,7 @@ impl AgentSight {
     /// `root` itself. Silently skips processes that exit before we read them —
     /// they won't produce SSL events anyway.
     fn collect_descendant_pids(root: u32) -> HashSet<u32> {
-        Self::collect_descendant_pids_impl(root, Path::new("/proc"))
+        Self::collect_descendant_pids_impl(root, crate::utils::procfs::proc_root())
     }
 
     fn collect_descendant_pids_impl(root: u32, proc_root: &Path) -> HashSet<u32> {
@@ -898,8 +903,8 @@ impl AgentSight {
             );
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
-            // to the *process* comm (/proc/<pid>/comm) and only then the event's
-            // per-event thread comm (which may be e.g. "HTTP client").
+            // to the *process* comm (`<procfs root>/<pid>/comm`) and only then
+            // the event's per-event thread comm (which may be e.g. "HTTP client").
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
@@ -1049,8 +1054,7 @@ impl AgentSight {
         match event {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
-                let cmdline_args =
-                    crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
+                let cmdline_args = crate::discovery::scanner::read_cmdline(pid);
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {

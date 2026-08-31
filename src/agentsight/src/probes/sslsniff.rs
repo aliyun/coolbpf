@@ -5,14 +5,14 @@
 // Exposes a `SslSniff` struct with a builder-style API.
 
 use crate::config;
+use crate::utils::procfs::{proc_pid_entry, proc_pid_rooted};
 use anyhow::{Context, Result};
 use libbpf_rs::{
     Link, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
 };
-use procfs::process::Process;
 
-use super::pidns::observer_in_init_pidns;
+use super::pidns::proc_root_is_init_pidns;
 use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
@@ -313,7 +313,7 @@ impl SslSniff {
         let mut open_skel = builder.open().context("failed to open BPF object")?;
 
         // Tell BPF which namespace to report event pids in.
-        open_skel.rodata_mut().observer_pidns_is_init = observer_in_init_pidns();
+        open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
         // Reuse shared maps when running under the unified manager.
         if let Some(shared) = shared {
@@ -898,57 +898,86 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     None
 }
 
-/// Parse `/proc/<pid>/maps` via `procfs` and return `(absolute_path, inode, SslLibKind)`
+/// Split one `maps` line into `(inode, pathname)`.
+///
+/// The line is `start-end perms offset dev inode pathname`, and the pathname is
+/// taken as the verbatim remainder rather than another whitespace token: it can
+/// contain spaces and carries a literal `" (deleted)"` suffix for unlinked files,
+/// which the caller keys off. Anonymous and pseudo mappings (`[heap]`, `[stack]`)
+/// return an empty pathname and are filtered by the caller.
+fn parse_maps_line(line: &str) -> Option<(u64, &str)> {
+    let mut rest = line;
+    let mut inode = None;
+    for field in 0..5 {
+        rest = rest.trim_start();
+        match rest.find(char::is_whitespace) {
+            Some(end) => {
+                if field == 4 {
+                    inode = rest[..end].parse::<u64>().ok();
+                }
+                rest = &rest[end..];
+            }
+            // Anonymous mappings end at the inode with neither a pathname nor
+            // trailing whitespace; surface them with an empty path instead of
+            // dropping the line.
+            None if field == 4 => return Some((rest.parse::<u64>().ok()?, "")),
+            None => return None,
+        }
+    }
+    Some((inode?, rest.trim_start()))
+}
+
+/// Parse `<procfs root>/<pid>/maps` and return `(attach_path, inode, SslLibKind)`
 /// for every SSL-related library found.
 ///
-/// Each unique inode is returned at most once.
+/// Each unique inode is returned at most once. Parsed by hand rather than via the
+/// `procfs` crate so the read honours the configured procfs root -- that crate
+/// hardcodes `/proc`, which an observer reading a bind-mounted host procfs cannot
+/// use.
 fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
-    let proc = Process::new(pid).with_context(|| format!("failed to open /proc/{pid}"))?;
-    let maps = proc
-        .maps()
-        .with_context(|| format!("failed to read /proc/{pid}/maps"))?;
+    let maps_path = proc_pid_entry(pid, "maps");
+    let maps = fs::read_to_string(&maps_path)
+        .with_context(|| format!("failed to read {}", maps_path.display()))?;
 
     let mut seen_inodes: HashSet<u64> = HashSet::new();
     let mut results: Vec<(String, u64, SslLibKind)> = Vec::new();
 
-    for entry in maps.iter() {
-        // Only care about file-backed mappings.
-        let path_str = match &entry.pathname {
-            procfs::process::MMapPath::Path(p) => p.to_string_lossy().into_owned(),
-            _ => continue,
+    for line in maps.lines() {
+        let Some((inode, path_str)) = parse_maps_line(line) else {
+            continue;
         };
-        // inode comes from the memory map entry's inode field.
-        let inode = entry.inode;
-        if inode == 0 || seen_inodes.contains(&inode) {
+        // Only care about file-backed mappings.
+        if inode == 0 || !path_str.starts_with('/') || seen_inodes.contains(&inode) {
             continue;
         }
-        if let Some(kind) = classify_ssl_lib(&path_str) {
+        if let Some(kind) = classify_ssl_lib(path_str) {
             seen_inodes.insert(inode);
             // When the backing file has been unlinked (" (deleted)" in maps),
-            // the filesystem path no longer exists.  Fall back to /proc/<pid>/exe
+            // the filesystem path no longer exists.  Fall back to <pid>/exe
             // which the kernel keeps accessible as long as the process is alive.
             //
-            // For normal paths we prefix with `/proc/<pid>/root` so that the
-            // uprobe target resolves through the process's own mount namespace.
+            // For normal paths we prefix with `<pid>/root` so that the uprobe
+            // target resolves through the process's own mount namespace.
             // This is intentional: `canonicalize()` would resolve overlayfs
             // paths to the host's lower/upper dirs, which libbpf cannot always
             // map back to an inode for uprobe attachment.  The kernel's uprobe
-            // mechanism natively understands `/proc/<pid>/root/<path>` because
-            // it follows the process's mount namespace, making this safe for
-            // both host and container processes.
-            let path_str = if path_str.ends_with(" (deleted)") {
-                format!("/proc/{pid}/exe")
+            // mechanism natively understands `<pid>/root/<path>` because it
+            // follows the process's mount namespace, making this safe for both
+            // host and container processes -- and it keeps working when the
+            // `<pid>` entry itself comes from a bind-mounted host procfs.
+            let attach_path = if path_str.ends_with(" (deleted)") {
+                proc_pid_entry(pid, "exe")
             } else if matches!(kind, SslLibKind::Static) {
                 // Statically-linked SSL binary (codex, node, etc).
-                // /proc/<pid>/exe is a kernel-maintained symlink that stays
-                // valid even when the backing file has been replaced or
-                // unlinked, which is common for npm-installed binaries that
-                // get updated while old processes are still running.
-                format!("/proc/{pid}/exe")
+                // <pid>/exe is a kernel-maintained symlink that stays valid
+                // even when the backing file has been replaced or unlinked,
+                // which is common for npm-installed binaries that get updated
+                // while old processes are still running.
+                proc_pid_entry(pid, "exe")
             } else {
-                format!("/proc/{pid}/root{path_str}")
+                proc_pid_rooted(pid, path_str)
             };
-            results.push((path_str, inode, kind));
+            results.push((attach_path.to_string_lossy().into_owned(), inode, kind));
         }
     }
 
@@ -1489,5 +1518,78 @@ mod tests {
         with_static_ssl_fixture("write-far", &img, |path| {
             assert!(find_static_ssl_offsets(path).is_none());
         });
+    }
+
+    // ── parse_maps_line ─────────────────────────────────────────────────────
+    //
+    // Replaces the procfs crate's maps parsing, so it carries the coverage the
+    // crate used to provide. Fixtures match the kernel's show_map_vma output:
+    // five whitespace-separated fields (addr, perms, offset, dev, inode), then
+    // an optional pathname that is the *entire remainder* of the line and may
+    // itself contain spaces.
+
+    #[test]
+    fn maps_line_file_backed_mapping() {
+        let line = "7f2f0a000000-7f2f0a028000 r--p 00000000 fd:01 2621443 \
+                    /usr/lib64/libssl.so.1.1.1k";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((2621443, "/usr/lib64/libssl.so.1.1.1k"))
+        );
+    }
+
+    #[test]
+    fn maps_line_anonymous_mapping_ends_at_inode() {
+        // Anonymous vmas print neither a pathname nor trailing whitespace.
+        let line = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0";
+        assert_eq!(parse_maps_line(line), Some((0, "")));
+        // Trailing whitespace without a pathname behaves the same.
+        let padded = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0   ";
+        assert_eq!(parse_maps_line(padded), Some((0, "")));
+    }
+
+    #[test]
+    fn maps_line_deleted_suffix_is_part_of_the_path() {
+        // The suffix belongs to the pathname verbatim; the caller strips it
+        // when choosing the attach target.
+        let line = "7f2f09c00000-7f2f09c28000 r-xp 00028000 fd:01 2621443 \
+                    /usr/lib64/libssl.so.1.1.1k (deleted)";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((2621443, "/usr/lib64/libssl.so.1.1.1k (deleted)"))
+        );
+    }
+
+    #[test]
+    fn maps_line_pseudo_path_survives_untouched() {
+        // [stack]/[heap]-style entries parse with a non-slash path; the caller
+        // filters them out, the parser must not mangle them.
+        let line = "7fffb6c40000-7fffb6c61000 rw-p 00000000 00:00 0   [stack]";
+        assert_eq!(parse_maps_line(line), Some((0, "[stack]")));
+    }
+
+    #[test]
+    fn maps_line_path_with_spaces_kept_whole() {
+        let line = "7f2f09a00000-7f2f09a10000 r--p 00000000 fd:01 1048577 \
+                    /opt/my app (copy)/libssl.so";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((1048577, "/opt/my app (copy)/libssl.so"))
+        );
+    }
+
+    #[test]
+    fn maps_line_malformed_input_yields_none() {
+        // Fewer than five fields.
+        assert_eq!(
+            parse_maps_line("7f2f0a000000-7f2f0a028000 r--p 00000000"),
+            None
+        );
+        // Garbage in the inode field.
+        let bad_inode = "7f2f0a000000-7f2f0a028000 r--p 00000000 fd:01 xx /usr/lib/libssl.so";
+        assert_eq!(parse_maps_line(bad_inode), None);
+        // Not a maps line at all.
+        assert_eq!(parse_maps_line("rubbish"), None);
+        assert_eq!(parse_maps_line(""), None);
     }
 }
