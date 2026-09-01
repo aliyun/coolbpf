@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { runCausalAttribution } from '../utils/apiClient';
 import type {
   CausalAttrib,
+  CausalFinding,
   CausalAttributionRequest,
   CausalCase,
   CausalEdge,
@@ -24,7 +25,7 @@ interface HistoryEntry {
   caseData: CausalCase;
 }
 
-const HISTORY_KEY_PREFIX = 'agentsight.causal.history.v1';
+const HISTORY_KEY_PREFIX = 'agentsight.causal.history.v2';
 const HISTORY_MAX_ENTRIES = 20;
 
 function historyKey(
@@ -107,14 +108,14 @@ const NODE_KIND_LEGEND: Array<{
   label: string;
   desc: string;
 }> = [
-  { kind: 'root', label: '元凶', desc: '首次产生缺陷' },
+  { kind: 'failed', label: '调用失败', desc: '这一步的工具调用报错了' },
+  { kind: 'root', label: '元凶', desc: '问题从这一步开始，有证据' },
   { kind: 'sym', label: '症状', desc: '忠实处理被污染输入' },
   { kind: 'seed', label: '萌芽', desc: '小问题被放大' },
   { kind: 'shipped', label: '问题交付', desc: '坏结果交给用户' },
   { kind: 'good', label: '达成', desc: '最终结论正确' },
   { kind: 'user', label: '用户', desc: '用户输入/干预' },
   { kind: 'env', label: '环境', desc: '外部触发' },
-  { kind: 'cf', label: '反事实', desc: '如果…会怎样' },
   { kind: 'ok', label: '正常', desc: '无缺陷' },
 ];
 
@@ -129,7 +130,7 @@ const NODE_STYLE: Record<
   good: { fill: '#e7f3ec', stroke: '#2e7d46', text: '#22303f', tag: '#2e7d46' },
   env: { fill: '#fff2d8', stroke: '#c98a12', text: '#22303f', tag: '#c98a12' },
   shipped: { fill: '#f6d7d1', stroke: '#7b241c', text: '#22303f', tag: '#7b241c' },
-  cf: { fill: '#f9e8e8', stroke: '#7b241c', text: '#22303f', tag: '#7b241c' },
+  failed: { fill: '#fdebd0', stroke: '#c0392b', text: '#22303f', tag: '#c0392b' },
   user: { fill: '#d6eaf8', stroke: '#1a5276', text: '#22303f', tag: '#1a5276' },
 };
 
@@ -143,7 +144,6 @@ const ATTRIB_STYLE: Record<CausalAttrib, { bg: string; fg: string; label: string
 const NODE_W = 220;
 const NODE_H = 78;
 const GAP_Y = 48;
-const GAP_X = 40;
 const START_Y = 20;
 const MAIN_X = 20;
 
@@ -159,11 +159,7 @@ function layoutNodes(caseData: CausalCase): Map<string, Laid> {
   // Vertical layout: the backend returns nodes in reverse chronological order
   // (conclusion first, root last). Reverse again so the ROOT sits at the top
   // and the conclusion at the bottom — the natural "cause → effect" reading.
-  const main = caseData.nodes
-    .filter((n) => n.kind !== 'cf')
-    .slice()
-    .reverse();
-  const cfs = caseData.nodes.filter((n) => n.kind === 'cf');
+  const main = caseData.nodes.slice().reverse();
 
   const laid = new Map<string, Laid>();
   main.forEach((node, i) => {
@@ -174,24 +170,6 @@ function layoutNodes(caseData: CausalCase): Map<string, Laid> {
       y,
       cx: MAIN_X + NODE_W / 2,
       cy: y + NODE_H / 2,
-    });
-  });
-
-  // Counterfactual nodes sit to the right of their parent chain, indented
-  // one column over. Anchor each CF to the closest main-chain Y so it
-  // visually lines up with the step it's "what-if" about.
-  cfs.forEach((node, i) => {
-    const anchorY =
-      main.length > 0
-        ? START_Y + Math.min(i, main.length - 1) * (NODE_H + GAP_Y)
-        : START_Y + i * (NODE_H + GAP_Y);
-    const x = MAIN_X + NODE_W + GAP_X;
-    laid.set(node.id, {
-      node,
-      x,
-      y: anchorY,
-      cx: x + NODE_W / 2,
-      cy: anchorY + NODE_H / 2,
     });
   });
 
@@ -207,9 +185,6 @@ function ArrowDefs() {
       <marker id="causal-arrow-bad" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
         <path d="M0,0 L9,3 L0,6 Z" fill="#c0392b" />
       </marker>
-      <marker id="causal-arrow-refute" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-        <path d="M0,0 L9,3 L0,6 Z" fill="#2e7d46" />
-      </marker>
     </defs>
   );
 }
@@ -224,51 +199,6 @@ function EdgeLine({
   const from = laid.get(edge.a);
   const to = laid.get(edge.b);
   if (!from || !to) return null;
-
-  const isCf = from.node.kind === 'cf' || to.node.kind === 'cf';
-  const sameColumn = Math.abs(from.x - to.x) < 10;
-
-  if (edge.type === 'refute') {
-    // Arc to the LEFT of the main chain so it doesn't collide with CF nodes
-    // (which live to the right). Control point 60px left of the column.
-    const midY = (from.cy + to.cy) / 2;
-    const arcX = Math.min(from.x, to.x) - 60;
-    const d = `M${from.x},${from.cy} Q${arcX},${midY} ${to.x},${to.cy}`;
-    return (
-      <g>
-        <path
-          d={d}
-          fill="none"
-          stroke="#2e7d46"
-          strokeWidth={2}
-          strokeDasharray="6 4"
-          markerEnd="url(#causal-arrow-refute)"
-        />
-        <text x={arcX - 4} y={midY} fontSize={11} textAnchor="end" fill="#2e7d46">
-          现实反证
-        </text>
-      </g>
-    );
-  }
-
-  if (isCf || !sameColumn) {
-    // Horizontal: main column → counterfactual column. Arrow points from
-    // the main-chain node to the CF node.
-    const main = from.x < to.x ? from : to;
-    const cf = from.x < to.x ? to : from;
-    return (
-      <line
-        x1={main.x + NODE_W}
-        y1={main.cy}
-        x2={cf.x}
-        y2={cf.cy}
-        stroke="#c0392b"
-        strokeWidth={2.4}
-        strokeDasharray="6 4"
-        markerEnd="url(#causal-arrow-bad)"
-      />
-    );
-  }
 
   // Main chain: vertical edge from parent's bottom to child's top. Parent
   // is whichever node has the smaller Y (higher on the page).
@@ -306,8 +236,6 @@ function NodeRect({
       text: '#22303f',
       tag: '#64748b',
     };
-  const isCf = node.kind === 'cf';
-  const dashArray = isCf ? '5 3' : undefined;
   // Truncate the evaluator's summary so it fits within the node width. The
   // full text is shown in the detail panel below the graph.
   const shortTag = (node.tag || '').length > 14
@@ -325,7 +253,6 @@ function NodeRect({
         fill={style.fill}
         stroke={style.stroke}
         strokeWidth={selected ? 3 : 2.2}
-        strokeDasharray={dashArray}
       />
       <text x={x + NODE_W / 2} y={y + 26} fontSize={13} fontWeight={700} textAnchor="middle" fill={style.text}>
         {shortTag}
@@ -356,7 +283,11 @@ function CausalGraph({
   const width = Math.max(320, (xs.length ? Math.max(...xs) : 320) + 80);
   const height = Math.max(200, (ys.length ? Math.max(...ys) : 200) + 40);
 
-  const selected = selectedId ? laidMap.get(selectedId)?.node : null;
+  // Falls back to the first node: `selectedId` persists across a re-analysis,
+  // which produces fresh node ids, and the stale lookup then left the detail
+  // panel blank until the reader clicked something.
+  const selected =
+    (selectedId ? laidMap.get(selectedId)?.node : null) ?? laidList[0]?.node ?? null;
 
   const handleSelectNode = (node: CausalNode) => {
     setSelectedId(node.id);
@@ -482,6 +413,74 @@ function CausalGraph({
   );
 }
 
+/**
+ * The checkable grounds for an allegation, listed under it.
+ *
+ * Rendered only when something is actually alleged, so everything here is
+ * evidence a reader can re-check against the trace. On a round with nothing
+ * alleged this panel does not appear at all: a reader who came to confirm a
+ * result is not helped by a list of things that turned up clean.
+ */
+const FINDING_BADGE: Record<string, string> = {
+  failure_then_fabrication: '工具没成功却给了结果',
+  ungrounded_onset: '这句话查不到出处',
+  repeated_identical_failure: '同样的调用反复失败',
+};
+
+function FindingsBlock({
+  findings,
+  claimsChecked,
+  claimsUnresolved,
+}: {
+  findings: CausalFinding[];
+  claimsChecked: number;
+  claimsUnresolved: number;
+}) {
+  const summary =
+    findings.length > 0
+      ? `查出 ${findings.length} 条可自行核对的问题`
+      : `核对了 ${claimsChecked} 条内容`;
+
+  return (
+    <details
+      open={findings.length > 0}
+      className="border border-gray-200 rounded-lg bg-white"
+    >
+      <summary className="p-4 cursor-pointer text-xs text-gray-600 select-none">
+        <span className="font-semibold">可自行核对的检查项</span>
+        <span className="ml-2 text-gray-500">{summary}</span>
+      </summary>
+      <div className="px-4 pb-4">
+        <div className="text-xs text-gray-500 mb-2">
+          可核对内容 {claimsChecked} 条，其中 {claimsUnresolved} 条找不到上游来源
+        </div>
+        {findings.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            没发现"说出来的内容查不到出处"，也没发现"工具没成功却照样给了结果"。
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {findings.map((f, i) => (
+              <li key={i} className="text-sm text-gray-800">
+                <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 mr-2">
+                  {FINDING_BADGE[f.kind] ?? '检查项'}
+                </span>
+                <span className="font-mono text-xs text-gray-500">step {f.step}</span>
+                <div className="mt-1 text-gray-700 leading-relaxed">{f.detail}</div>
+                {f.quote && (
+                  <pre className="mt-1 p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">
+                    {f.quote}
+                  </pre>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   sessionId,
   roundIndex,
@@ -592,6 +591,27 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
     setComplaint('');
     setSelectedAltIdx(null);
   };
+
+  // Naming a component to blame and prescribing a fix are claims about cause,
+  // so they need evidence a reader can check. The model calling a round a
+  // failure is not that — it does so on rounds where the agent reported a tool
+  // error honestly — and dressing that opinion up with a culprit and a remedy
+  // is what makes the panel read as a verdict when it is only a suspicion.
+  const hasDefect = !!caseData && caseData.verdict_supported;
+
+  // Whether anything is actually being alleged. A round the model called a
+  // failure, or one with checkable evidence behind it, is an accusation and
+  // earns the accusatory framing: red wording, a named cause, an evidence tier
+  // saying how much to trust it, and the checkable-items panel.
+  //
+  // A round that succeeded is not an accusation. Its account still shows — the
+  // agent stumbling and recovering is worth reading — but hedging it with tiers
+  // and "no evidence found" only teaches the reader to distrust a conclusion
+  // that was never in doubt.
+  const hasAllegation =
+    !!caseData
+    && !caseData.needs_human_review
+    && (caseData.outcome === 'fail' || hasDefect);
 
   const attrib = caseData
     ? (ATTRIB_STYLE[caseData.attrib] ?? {
@@ -718,38 +738,72 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
             {/* ① Verdict */}
             <div
               className={`border rounded-lg p-4 ${
-                caseData.outcome === 'fail'
-                  ? 'bg-red-50 border-red-200 border-l-4 border-l-red-600'
-                  : 'bg-green-50 border-green-200 border-l-4 border-l-green-600'
+                caseData.needs_human_review
+                  ? 'bg-amber-50 border-amber-200 border-l-4 border-l-amber-500'
+                  : caseData.outcome === 'fail'
+                    ? 'bg-red-50 border-red-200 border-l-4 border-l-red-600'
+                    : 'bg-green-50 border-green-200 border-l-4 border-l-green-600'
               }`}
             >
-              <div className="text-xs font-semibold text-gray-600 mb-2">① 结论</div>
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <span className="text-xs font-semibold text-gray-600">① 结论</span>
+              </div>
               <div className="text-sm text-gray-800 space-y-1">
-                <div>
-                  <span className="text-gray-500 font-medium">犯了什么错：</span>
-                  <span className="font-semibold text-red-700">{caseData.verdict}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500 font-medium">核心原因：</span>
-                  <span>{caseData.root_one}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500 font-medium">最终结果：</span>
-                  <span className={caseData.outcome === 'fail' ? 'text-red-700 font-semibold' : 'text-green-700 font-semibold'}>
-                    {caseData.outcome === 'fail' ? '❌ 问题结论直接交付' : '✅ 最终办成了'}
-                  </span>
-                  {caseData.outcome_note && (
-                    <span className="ml-2 text-gray-600 text-xs">· {caseData.outcome_note}</span>
-                  )}
-                </div>
-                {caseData.turn_issue && (
+                {caseData.needs_human_review ? (
+                  <div>
+                    <span className="text-amber-900 font-semibold">无法判断。</span>
+                    <span className="text-gray-700">
+                      这一轮多数工具调用没有可关联的结果，当前记录不足以可靠判断是否存在问题，因此不展示根因归属。
+                    </span>
+                  </div>
+                ) : hasAllegation ? (
+                  <>
+                    <div>
+                      <span className="text-gray-500 font-medium">问题：</span>
+                      <span className="font-semibold text-red-700">{caseData.verdict}</span>
+                    </div>
+                    {caseData.root_one && (
+                      <div>
+                        <span className="text-gray-500 font-medium">原因：</span>
+                        <span>{caseData.root_one}</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div>
+                    <span className="text-gray-500 font-medium">没发现问题。</span>
+                    {caseData.verdict && (
+                      <span className="text-gray-700">{caseData.verdict}</span>
+                    )}
+                  </div>
+                )}
+                {!caseData.needs_human_review && (
+                  <div>
+                    <span className="text-gray-500 font-medium">最终结果：</span>
+                    <span className={caseData.outcome === 'fail' ? 'text-red-700 font-semibold' : 'text-green-700 font-semibold'}>
+                      {caseData.outcome === 'fail' ? '❌ 问题结论直接交付' : '✅ 最终办成了'}
+                    </span>
+                    {caseData.outcome_note && (
+                      <span className="ml-2 text-gray-600 text-xs">· {caseData.outcome_note}</span>
+                    )}
+                  </div>
+                )}
+                {hasAllegation && caseData.turn_issue && (
                   <div className="pt-1 border-t border-dashed border-gray-200">
-                    <span className="text-gray-500 font-medium">性质：</span>
+                    <span className="text-gray-500 font-medium">失败形态：</span>
                     <span className="text-gray-700">{caseData.turn_issue}</span>
                   </div>
                 )}
               </div>
             </div>
+
+            {hasAllegation && (
+              <FindingsBlock
+                findings={caseData.findings ?? []}
+                claimsChecked={caseData.claims_checked}
+                claimsUnresolved={caseData.claims_unresolved}
+              />
+            )}
 
             {/* ② Graph */}
             <div>
@@ -758,7 +812,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
             </div>
 
             {/* ③ Attribution + fix */}
-            {attrib && (
+            {hasDefect && attrib && (
               <div className="border border-gray-200 rounded-lg p-4 bg-slate-50">
                 <div className="text-xs font-semibold text-gray-600 mb-2">③ 归因对象与解决方案</div>
 
@@ -839,16 +893,18 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
             )}
 
             {/* Contra panel */}
-            {caseData.contra && (
+            {hasDefect && caseData.contra && (
               <div className="border border-gray-200 rounded-lg p-4 bg-white">
-                <div className="text-xs font-semibold text-gray-600 mb-2">⚑ 关键矛盾</div>
+                <div className="text-xs font-semibold text-gray-600 mb-2">
+                  ⚑ {caseData.outcome === 'fail' ? '要求与实际交付的落差' : '要求与实际交付对照'}
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div className="bg-green-50 border border-green-200 rounded p-3">
-                    <div className="text-xs font-bold text-green-800 mb-1">已观测到的证据</div>
+                    <div className="text-xs font-bold text-green-800 mb-1">用户的原始要求</div>
                     <p className="text-sm text-gray-800">{caseData.contra.saw}</p>
                   </div>
                   <div className="bg-red-50 border border-red-200 rounded p-3">
-                    <div className="text-xs font-bold text-red-800 mb-1">实际给出的结论</div>
+                    <div className="text-xs font-bold text-red-800 mb-1">agent 实际交付</div>
                     <p className="text-sm text-gray-800">{caseData.contra.said}</p>
                   </div>
                 </div>
