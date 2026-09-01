@@ -11,6 +11,8 @@
 
 mod events;
 mod pending;
+mod resource;
+mod resource_timeline;
 mod schema;
 mod session;
 mod stats;
@@ -28,6 +30,8 @@ use crate::config::BatchConfig;
 // Re-export public types from sub-modules
 pub use events::TraceEventDetail;
 pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
+pub use resource::ResourceSample;
+pub use resource_timeline::{SessionPhase, SessionResourceTimeline};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
 pub use stats::{
     AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
