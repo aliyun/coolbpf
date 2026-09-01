@@ -544,36 +544,51 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    /// Count unresolved interruptions grouped by (conversation_id, severity, type).
+    /// Count unresolved interruptions grouped by
+    /// (session_id, conversation_id, severity, type).
     ///
-    /// NULL `conversation_id` is bucketed under [`UNASSIGNED_CONVERSATION_ID`]
-    /// for the same total-versus-breakdown consistency reason as
-    /// [`Self::count_unresolved_by_session_detailed`], and `agent_name` scopes
-    /// the result the same way.
+    /// NULL ids are bucketed under [`UNASSIGNED_SESSION_ID`] /
+    /// [`UNASSIGNED_CONVERSATION_ID`] for the same total-versus-breakdown
+    /// consistency reason as [`Self::count_unresolved_by_session_detailed`], and
+    /// `agent_name` scopes the result the same way.
+    ///
+    /// `session_id` is part of the grouping key because a conversation-only
+    /// breakdown cannot say which session an event belongs to: the dashboard
+    /// nests conversation rows under a session, so it would render every
+    /// session-less event under whichever session happens to own that
+    /// conversation, double-counting it against the unassigned-session row.
     pub fn count_unresolved_by_conversation_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
         agent_name: Option<&str>,
-    ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(String, String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT COALESCE(conversation_id, ?3) AS cid, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT COALESCE(session_id, ?3) AS sid, COALESCE(conversation_id, ?4) AS cid,
+                    severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
              WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-               AND (?4 IS NULL OR agent_name = ?4)
-             GROUP BY cid, severity, interruption_type
-             ORDER BY cid, cnt DESC",
+               AND (?5 IS NULL OR agent_name = ?5)
+             GROUP BY sid, cid, severity, interruption_type
+             ORDER BY sid, cid, cnt DESC",
         )?;
         let rows = stmt.query_map(
-            params![start_ns, end_ns, UNASSIGNED_CONVERSATION_ID, agent_name],
+            params![
+                start_ns,
+                end_ns,
+                UNASSIGNED_SESSION_ID,
+                UNASSIGNED_CONVERSATION_ID,
+                agent_name
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )?;
@@ -1343,7 +1358,8 @@ mod tests {
             .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "conv-ccd");
+        assert_eq!(rows[0].0, "sess-1");
+        assert_eq!(rows[0].1, "conv-ccd");
     }
 
     // ── total-versus-breakdown consistency (issue: 7 high interruptions with a
@@ -1403,7 +1419,51 @@ mod tests {
             .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, UNASSIGNED_CONVERSATION_ID);
+        assert_eq!(rows[0].0, "sess-1");
+        assert_eq!(rows[0].1, UNASSIGNED_CONVERSATION_ID);
+    }
+
+    #[test]
+    fn conversation_breakdown_keeps_session_less_events_out_of_a_real_session() {
+        let store = temp_store();
+
+        // One conversation, two events: one attributed to the session, one
+        // detected before the session was resolved. Grouping by conversation
+        // alone would file both under the session that owns the conversation,
+        // while the unassigned-session row counts the second one as well.
+        let mut attributed = make_event("conv-shared", InterruptionType::ToolFailure);
+        attributed.interruption_id = "int-shared-attributed".to_string();
+        attributed.session_id = Some("sess-owner".to_string());
+        store.insert(&attributed).unwrap();
+
+        let mut session_less = make_event("conv-shared", InterruptionType::EmptyResponse);
+        session_less.interruption_id = "int-shared-orphan".to_string();
+        session_less.session_id = None;
+        store.insert(&session_less).unwrap();
+
+        let rows = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
+            .unwrap();
+
+        let owned: i64 = rows
+            .iter()
+            .filter(|(sid, cid, _, _, _)| sid == "sess-owner" && cid == "conv-shared")
+            .map(|(_, _, _, _, cnt)| cnt)
+            .sum();
+        assert_eq!(
+            owned, 1,
+            "the session's own row must not absorb the session-less event"
+        );
+
+        let orphaned: i64 = rows
+            .iter()
+            .filter(|(sid, _, _, _, _)| sid == UNASSIGNED_SESSION_ID)
+            .map(|(_, _, _, _, cnt)| cnt)
+            .sum();
+        assert_eq!(
+            orphaned, 1,
+            "the session-less event stays in the unassigned-session bucket"
+        );
     }
 
     #[test]
@@ -1459,7 +1519,9 @@ mod tests {
             .count_unresolved_by_conversation_detailed(0, i64::MAX, Some("AgentB"))
             .unwrap();
         assert_eq!(conv_only_b.len(), 1);
-        assert_eq!(conv_only_b[0].3, 1);
+        assert_eq!(conv_only_b[0].0, UNASSIGNED_SESSION_ID);
+        assert_eq!(conv_only_b[0].1, "conv-agent");
+        assert_eq!(conv_only_b[0].4, 1);
     }
 
     #[test]

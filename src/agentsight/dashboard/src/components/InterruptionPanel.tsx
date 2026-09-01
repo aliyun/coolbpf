@@ -146,6 +146,14 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       let data: InterruptionRecord[];
       if (conversationId) {
         data = await fetchConversationInterruptions(conversationId);
+        // Passing both ids narrows the panel to one session's share of the
+        // conversation, matching the badge that opens it: that badge is keyed
+        // on (session_id, conversation_id), so an interruption detected before
+        // its session was resolved is counted by the unassigned-session row
+        // instead of by this session.
+        if (sessionId) {
+          data = data.filter((event) => event.session_id === sessionId);
+        }
       } else if (sessionId) {
         data = await fetchSessionInterruptions(sessionId);
       } else {

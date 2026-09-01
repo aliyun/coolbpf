@@ -2619,10 +2619,12 @@ mod tests {
                 .to_request(),
         )
         .await;
-        assert_eq!(
-            service_response_json(conversation_counts).await[0]["total"],
-            2
-        );
+        let conversation_row = service_response_json(conversation_counts).await;
+        assert_eq!(conversation_row[0]["total"], 2);
+        // The owning session must ship with the row; the dashboard keys the
+        // breakdown on (session_id, conversation_id).
+        assert_eq!(conversation_row[0]["session_id"], "sess-handler");
+        assert_eq!(conversation_row[0]["conversation_id"], "conv-handler-i");
 
         let by_session = awtest::call_service(
             &app,
@@ -3581,7 +3583,13 @@ pub async fn interruption_session_counts(
 
 /// GET /api/interruptions/conversation-counts?start_ns=<i64>&end_ns=<i64>
 ///
-/// Returns unresolved interruption breakdown per conversation_id, grouped by severity and type.
+/// Returns unresolved interruption breakdown per (session_id, conversation_id),
+/// grouped by severity and type.
+///
+/// The pair is the grouping key, not `conversation_id` alone: the dashboard
+/// nests conversation rows under a session, so a session-less event must not be
+/// attributed to whichever session owns its conversation — the
+/// unassigned-session row already accounts for it.
 #[get("/interruptions/conversation-counts")]
 pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
@@ -3604,16 +3612,16 @@ pub async fn interruption_conversation_counts(
     ) {
         Ok(rows) => {
             let mut map: std::collections::HashMap<
-                String,
+                (String, String),
                 (
                     i64,
                     std::collections::HashMap<String, i64>,
                     Vec<serde_json::Value>,
                 ),
             > = std::collections::HashMap::new();
-            for (cid, severity, itype, cnt) in rows {
+            for (sid, cid, severity, itype, cnt) in rows {
                 let entry = map
-                    .entry(cid)
+                    .entry((sid, cid))
                     .or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
                 entry.0 += cnt;
                 *entry.1.entry(severity.clone()).or_insert(0) += cnt;
@@ -3625,8 +3633,9 @@ pub async fn interruption_conversation_counts(
             }
             let json: Vec<_> = map
                 .into_iter()
-                .map(|(cid, (total, by_sev, types))| {
+                .map(|((sid, cid), (total, by_sev, types))| {
                     serde_json::json!({
+                        "session_id": sid,
                         "conversation_id": cid,
                         "total": total,
                         "by_severity": {

@@ -971,6 +971,7 @@ export interface SessionInterruptionCount {
 }
 
 export interface ConversationInterruptionCount {
+  session_id: string;
   conversation_id: string;
   total: number;
   by_severity: {
@@ -980,6 +981,23 @@ export interface ConversationInterruptionCount {
     low: number;
   };
   types: InterruptionTypeDetail[];
+}
+
+/**
+ * Key for the per-conversation breakdown, which the backend groups by
+ * (session_id, conversation_id).
+ *
+ * Both halves are needed: an interruption detected before its session was
+ * resolved carries the unassigned session bucket, and must not be looked up
+ * under the real session that owns the same conversation.
+ *
+ * Invariant: neither id contains U+0000, so the joined key cannot collide.
+ * Both are either a UUID, a 32-hex fallback hash, or the `__unassigned__`
+ * sentinel — an id carrying a NUL byte would already have failed to round-trip
+ * through the SQLite TEXT columns these values come from.
+ */
+export function conversationInterruptionKey(sessionId: string, conversationId: string): string {
+  return `${sessionId}\u0000${conversationId}`;
 }
 
 /**

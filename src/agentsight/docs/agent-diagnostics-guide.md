@@ -499,7 +499,7 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | `/api/interruptions/count` | GET | 中断统计（按严重级别） |
 | `/api/interruptions/stats` | GET | 中断统计（按类型） |
 | `/api/interruptions/session-counts` | GET | 各 Session 的中断聚合 |
-| `/api/interruptions/conversation-counts` | GET | 各 Conversation 的中断聚合 |
+| `/api/interruptions/conversation-counts` | GET | 各 Session + Conversation 的中断聚合 |
 | `/api/sessions/{id}/interruptions` | GET | 指定 Session 的中断 |
 | `/api/conversations/{id}/interruptions` | GET | 指定 Conversation 的中断 |
 | `/api/export/atif/trace/{id}` | GET | ATIF 格式导出 |
