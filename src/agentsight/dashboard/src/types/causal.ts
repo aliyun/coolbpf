@@ -1,7 +1,17 @@
 //! Types for the causal attribution offline analysis pipeline.
 //!
-//! Matches the JSON contract defined in `agentsight_causal_attribution_DEV.md` §7.
+//! Mirrors the JSON emitted by `POST /api/causal-attribution`.
 
+/**
+ * Node role in the causal chain.
+ *
+ * Either a problem is asserted or none is, so there is no kind for "suspected
+ * but unproven": on a round with nothing alleged the backend neutralises flagged
+ * steps to `ok` instead of drawing them as suspicions.
+ *
+ * `failed` records that a call on that step errored. That is a fact rather than
+ * an accusation, so it survives that neutralisation.
+ */
 export type CausalNodeKind =
   | 'ok'
   | 'seed'
@@ -10,26 +20,40 @@ export type CausalNodeKind =
   | 'good'
   | 'env'
   | 'shipped'
-  | 'cf'
+  | 'failed'
   | 'user';
 
-export type CausalEdgeType = 'n' | 'bad' | 'refute';
+export type CausalEdgeType = 'n' | 'bad';
 
 export type CausalAttrib = 'model' | 'skill' | 'prompt' | 'agent';
 
 export type CausalOutcome = 'success' | 'fail';
 
-/** One candidate attribution the evaluator considers plausible. The primary
- *  attribution lives on `CausalCase.attrib`; the rest are listed here so the
- *  user can swap in an alternative if they disagree with the top pick. */
+/**
+ * How strong the evidence behind the verdict is.
+ *
+ * `L2` is a failure tied to a fabricated value, `L3` an ungrounded claim, `L4` an
+ * unsupported model opinion. Only findings allowed to drive a verdict score a
+ * tier, so a finding that merely describes the round leaves it at `L4`.
+ */
+export type EvidenceTier = 'L2' | 'L3' | 'L4';
+
+/** One candidate attribution the evaluator considers plausible. */
 export interface AlternativeAttrib {
   attrib: CausalAttrib;
   /** 0..1 — evaluator's self-reported confidence in this candidate. */
   confidence: number;
-  /** One-line reason why this candidate is plausible. */
   rationale: string;
-  /** Concrete fix targeted at this candidate's attribution object. */
   fix: string;
+}
+
+/** A finding the deterministic pass established, verifiable without the model. */
+export interface CausalFinding {
+  kind: 'ungrounded_onset' | 'failure_then_fabrication' | 'repeated_identical_failure';
+  step: number;
+  detail: string;
+  /** Verbatim excerpt proving the finding. */
+  quote?: string;
 }
 
 export interface CausalNode {
@@ -66,13 +90,21 @@ export interface CausalCase {
   turn_issue?: string;
   attrib: CausalAttrib;
   fix: string;
-  /** Other candidates the evaluator considered plausible (sorted by confidence desc). */
   alternative_attribs?: AlternativeAttrib[];
   timeline?: string[];
   nodes: CausalNode[];
   edges: CausalEdge[];
   contra?: CausalContra;
   concl?: string;
+  evidence_tier: EvidenceTier;
+  /** False means the verdict is a suspicion, not an established defect. */
+  verdict_supported: boolean;
+  /** Too many calls were unclassifiable for a root cause to be claimed. */
+  needs_human_review: boolean;
+  findings?: CausalFinding[];
+  /** Verifiable claims examined; zero means silence proves nothing. */
+  claims_checked: number;
+  claims_unresolved: number;
 }
 
 export interface CausalAttributionRequest {
@@ -84,7 +116,6 @@ export interface CausalAttributionRequest {
   /**
    * Scope hint: "conversation" means `session_id` actually carries a
    * conversation_id and the backend should attribute only that sub-conversation.
-   * Unset / any other value → whole-session scope.
    */
   id_kind?: 'session' | 'conversation';
 }

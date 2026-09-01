@@ -623,11 +623,19 @@ impl GenAIBuilder {
                                 crate::analyzer::message::AnthropicContentBlock::ToolResult {
                                     tool_use_id,
                                     content,
-                                    ..
+                                    is_error,
                                 } => {
-                                    // Anthropic tool_result: convert to MessagePart::ToolCallResponse
-                                    let response_val =
-                                        content.clone().unwrap_or(serde_json::Value::Null);
+                                    // Anthropic tool_result: convert to MessagePart::ToolCallResponse.
+                                    // `is_error` must ride along inside the wrapper so the ATIF
+                                    // converter can preserve it as a structured failure signal.
+                                    let response_val = match (content.clone(), *is_error) {
+                                        (Some(value), Some(flag)) => {
+                                            serde_json::json!({"content": value, "is_error": flag})
+                                        }
+                                        (Some(value), None) => value,
+                                        (None, Some(flag)) => serde_json::json!({"is_error": flag}),
+                                        (None, None) => serde_json::Value::Null,
+                                    };
                                     parts.push(MessagePart::ToolCallResponse {
                                         id: Some(tool_use_id.clone()),
                                         response: response_val,
