@@ -144,9 +144,10 @@ fn normalize_attrib_invalid_defaults_to_model() {
 // suspicion, and must not be dressed up as an established defect
 // ---------------------------------------------------------------------------
 
-use grounding::claims::{Claim, ClaimClass};
-use grounding::evidence::{Finding, GroundingIndex, StepCallVerdict};
-use grounding::outcome::{CallStatus, CallVerdict, Confidence};
+use crate::grounding;
+use crate::grounding::claims::{Claim, ClaimClass};
+use crate::grounding::evidence::{Finding, GroundingIndex, StepCallVerdict};
+use crate::grounding::outcome::{CallStatus, CallVerdict, Confidence};
 
 fn failing_case() -> CausalCase {
     CausalCase {

@@ -7,6 +7,7 @@ mod agents;
 mod local_sessions;
 mod optimize;
 mod preferences;
+mod reuse;
 mod trajectories;
 
 use actix_cors::Cors;
@@ -23,6 +24,12 @@ use std::sync::{Arc, RwLock};
 pub struct LocalState {
     pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
     pub db_path: PathBuf,
+    /// Trajectory reuse labels (`reuse.db`).
+    ///
+    /// `None` when the private store could not be opened: labels are a
+    /// dashboard feature, so the viewer still serves and the endpoints report
+    /// why rather than the process refusing to start.
+    pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
 }
 
 impl LocalState {
@@ -378,9 +385,25 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
         None
     };
 
+    // Beside the trajectory database but in its own directory: opening tightens
+    // that directory to 0700, and doing so where `trajectories.db` lives would
+    // cut off every other reader of it.
+    let private_dir = db_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".agentsight-private");
+    let reuse_store = match crate::reuse::ReuseStore::open_private(&private_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            log::warn!("Reuse label store unavailable, labels disabled: {error}");
+            None
+        }
+    };
+
     let local_state = web::Data::new(LocalState {
         trajectory_store: Arc::new(RwLock::new(initial_store)),
         db_path,
+        reuse_store,
     });
     let optimize_state = optimize::OptimizeState::init(
         local_state
@@ -440,6 +463,8 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .service(optimize::update_optimize_config)
             .service(optimize::semantic_search_sessions)
             // User preference analysis API (registered before api_fallback)
+            .service(reuse::list_sessions)
+            .service(reuse::run_triage)
             .service(preferences::export_preferences)
             .service(preferences::get_preferences)
             .service(preferences::get_preference_turns)

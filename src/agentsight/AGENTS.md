@@ -259,6 +259,8 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
+| `/api/reuse/triage` | POST | 用确定性规则为已采集轨迹生成自动标签（可选 `session_id`, `limit`） |
+| `/api/reuse/sessions` | GET | 列出有效标签已解析的轨迹标签（支持 `label`, `confirm_state`, `changed_since_decision`, `limit`） |
 | `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
 | `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
 | `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |

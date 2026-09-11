@@ -20,7 +20,7 @@ use crate::storage::sqlite::GenAISqliteStore;
 
 // Deterministic grounding engine: establishes what can be checked before the
 // model is asked anything.
-mod grounding;
+use crate::grounding;
 
 // ─── In-memory cache ─────────────────────────────────────────────────────────
 //

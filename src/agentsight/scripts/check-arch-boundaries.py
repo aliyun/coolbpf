@@ -24,6 +24,7 @@ LAYER_MAP = {
     "tokenizer":   4,   # L4: Analyze
     "genai":       5,   # L5: Semantic
     "atif":        5,   # L5: Semantic
+    "grounding":   5,   # L5: Semantic (deterministic ATIF analysis, no crate deps)
     "storage":     6,   # L6: Persist
     "agent_sec":   7,   # L7: Serve
     "grader":      7,   # L7: Serve
@@ -32,6 +33,7 @@ LAYER_MAP = {
     "server":      7,   # L7: Serve
     "health":      7,   # L7: Serve
     "preferences": 7,   # L7: Serve (on-demand analysis shared by both servers)
+    "reuse":       7,   # L7: Serve (trajectory reuse labels shared by both servers)
     "semantic_search": 7,  # L7: Serve (session search contract shared by both servers)
     "bin":         8,   # L8: Entry
     "unified":     8,   # L8: Entry
@@ -49,6 +51,9 @@ ALLOWED_DEPS = {
     "tokenizer":   set(),
     "genai":       {"analyzer", "aggregator", "parser"},
     "atif":        {"genai", "storage"},
+    # Reads only the `agentsight_atif` crate, never `crate::` — which is what lets
+    # more than one subsystem share it.
+    "grounding":   set(),
     "storage":     {"analyzer", "genai", "security"},
     "grader":      {"storage"},
     "enforcement": {"storage"},
@@ -61,12 +66,20 @@ ALLOWED_DEPS = {
         "grader",
         "enforcement",
         "security",
+        "grounding",
         "preferences",
+        "reuse",
         "semantic_search",
     },
     # Same-layer peers of `server`: both are transport-agnostic contracts the
     # Linux and macOS handlers share, so they may only read downwards.
     "preferences": {"genai", "storage", "atif"},
+    # May read the grounding engine, and nothing else — in particular not
+    # `server`. The labelling rules themselves take grounding's conclusions as an
+    # argument; only the adapter that folds them reaches for the engine. Keeping
+    # the set this narrow is what stops an import of `server` from being quietly
+    # reintroduced.
+    "reuse":       {"grounding"},
     "semantic_search": {"storage"},
     "agent_sec":   set(),
     "health":      {"storage"},

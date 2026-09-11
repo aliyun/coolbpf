@@ -1,0 +1,635 @@
+//! SQLite persistence for trajectory reuse labels (`reuse.db`).
+//!
+//! A derived store: every row can be rebuilt from `trajectories.db` except the
+//! human decisions, which exist nowhere else and are therefore never
+//! overwritten by a recompute.
+//!
+//! Kept out of `trajectories.db` on purpose. That database belongs to the
+//! collector, which runs on both Linux and macOS and must not start paying for
+//! attribution schema it does not use; its migration also rewrites every row,
+//! so bolting tables onto it makes collector startup cost unpredictable.
+//!
+//! Opened through the crate-internal `private_sqlite` helper, like
+//! `security.db` and `enforcement.db`: label reasons quote user text, so the
+//! database and its WAL sidecars must be owner-only. Callers pass the dedicated
+//! private state directory rather than the shared data directory, because
+//! opening tightens that directory to `0700`, and doing that to the directory
+//! `trajectories.db` lives in would silently cut off every other reader of it.
+
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::label::{ConfirmState, LabelAction, LabelEventKind, SessionLabel, TrajectoryLabel};
+use super::triage::{TriageMetrics, TriageOutcome};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::Serialize;
+
+/// Schema version recorded in `PRAGMA user_version`.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Errors produced by [`ReuseStore`].
+#[derive(Debug, thiserror::Error)]
+pub enum ReuseStoreError {
+    /// The private database could not be opened with owner-only permissions.
+    /// Stringified because the underlying error type is crate-internal.
+    #[error("open reuse database: {0}")]
+    Open(String),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("store mutex poisoned")]
+    Poisoned,
+    /// A decision was submitted for a trajectory that has not been triaged.
+    /// Reported rather than silently creating a row, because a human verdict
+    /// with no automatic verdict beside it cannot be checked for misfires.
+    #[error("no label row for session {0}; run triage first")]
+    UnknownSession(String),
+    #[error("stored value {value:?} is not a valid {field}")]
+    Corrupt { field: &'static str, value: String },
+    /// The file was written by a newer binary. Refusing is the only safe
+    /// option: an unknown schema cannot be read correctly, and guessing risks
+    /// destroying human decisions.
+    #[error("reuse db schema is at v{found}, this binary supports up to v{supported}")]
+    SchemaTooNew { found: i64, supported: i64 },
+    #[error("no migration registered from schema v{0}")]
+    MissingMigration(i64),
+}
+
+type Result<T> = std::result::Result<T, ReuseStoreError>;
+
+/// One recorded change to a label, for answering "who set this, and when".
+#[derive(Debug, Clone, Serialize)]
+pub struct LabelEvent {
+    pub event_id: i64,
+    pub session_id: String,
+    pub from_label: Option<String>,
+    pub to_label: String,
+    pub action: String,
+    pub reason: Option<String>,
+    pub decided_by: String,
+    pub created_at_ns: i64,
+}
+
+/// Filter for [`ReuseStore::list_labels`].
+#[derive(Debug, Clone, Default)]
+pub struct LabelFilter {
+    /// Match rows whose *effective* label is any of these; empty means "any".
+    pub effective_labels: Vec<TrajectoryLabel>,
+    pub confirm_state: Option<ConfirmState>,
+    /// Only rows whose automatic verdict drifted away from a human decision.
+    pub only_changed_since_decision: bool,
+    /// `0` or less means unlimited.
+    pub limit: i64,
+}
+
+/// How often each rule's verdict was overturned by a person.
+///
+/// The original calibration corpus is gone, so these counts are the only
+/// remaining way to rank which rule misfires most.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleOverrideStat {
+    pub rule: String,
+    /// Rows this rule contributed to that a human replaced.
+    pub overridden: usize,
+    /// Rows this rule contributed to that a human accepted.
+    pub confirmed: usize,
+}
+
+/// Thread-safe store over a dedicated `reuse.db`.
+#[derive(Debug)]
+pub struct ReuseStore {
+    conn: Mutex<Connection>,
+}
+
+impl ReuseStore {
+    /// Name of the database inside the private state directory.
+    const DB_NAME: &'static str = "reuse.db";
+
+    /// Opens the label store in `state_dir` with owner-only permissions.
+    ///
+    /// `state_dir` must be the dedicated private directory (the one that also
+    /// holds `security.db`), never the shared data directory — see the module
+    /// docs.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::Open`] when the directory or database cannot
+    /// be made owner-only, [`ReuseStoreError::SchemaTooNew`] when the file was
+    /// written by a newer binary, or a SQL error if it cannot be migrated.
+    pub fn open_private(state_dir: impl AsRef<Path>) -> Result<Self> {
+        let connection =
+            crate::private_sqlite::open_private_connection(state_dir.as_ref(), Self::DB_NAME)
+                .map_err(|error| ReuseStoreError::Open(error.to_string()))?;
+        Self::from_connection(connection)
+    }
+
+    /// Wraps an already-open connection and brings its schema up to date.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::SchemaTooNew`] when the file was written by a
+    /// newer binary, or a SQL error if it cannot be migrated.
+    fn from_connection(mut conn: Connection) -> Result<Self> {
+        ensure_schema(&mut conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|_| ReuseStoreError::Poisoned)
+    }
+
+    /// Records a fresh automatic verdict, preserving any human decision.
+    ///
+    /// Idempotent per `(session_id, triage_version, source_content_hash)`: an
+    /// unchanged recompute rewrites the same values and logs nothing. When the
+    /// verdict does change, an `auto_retriage` event is appended so a later
+    /// disagreement with a human decision can be explained.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure, a poisoned mutex, or unreadable stored
+    /// enum values.
+    pub fn upsert_auto_label(
+        &self,
+        session_id: &str,
+        outcome: TriageOutcome,
+        source_content_hash: &str,
+        triage_version: &str,
+    ) -> Result<SessionLabel> {
+        let now = now_ns();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+
+        let existing = read_label(&tx, session_id)?;
+        let (label, event) = match existing {
+            Some(mut row) => {
+                let previous = row.auto_label;
+                row.apply_retriage(outcome, source_content_hash, triage_version, now);
+                let changed = previous != row.auto_label;
+                let event = changed.then_some((LabelEventKind::AutoRetriage, previous));
+                (row, event)
+            }
+            None => (
+                SessionLabel::from_outcome(
+                    session_id,
+                    outcome,
+                    source_content_hash,
+                    triage_version,
+                    now,
+                ),
+                None,
+            ),
+        };
+
+        write_label(&tx, &label)?;
+        if let Some((kind, previous)) = event {
+            append_event(
+                &tx,
+                session_id,
+                Some(previous.as_str()),
+                label.auto_label.as_str(),
+                kind,
+                None,
+                "system",
+                now,
+            )?;
+        }
+        tx.commit()?;
+        Ok(label)
+    }
+
+    /// Applies a human decision to an existing row.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::UnknownSession`] when the trajectory has not
+    /// been triaged yet, or a SQL error on failure.
+    pub fn apply_decision(
+        &self,
+        session_id: &str,
+        action: LabelAction,
+        decided_by: &str,
+        reason: Option<String>,
+    ) -> Result<SessionLabel> {
+        let now = now_ns();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+
+        let mut label = read_label(&tx, session_id)?
+            .ok_or_else(|| ReuseStoreError::UnknownSession(session_id.to_string()))?;
+        let previous = label.effective_label();
+        let kind = label.apply_decision(action, decided_by, reason.clone(), now);
+
+        write_label(&tx, &label)?;
+        append_event(
+            &tx,
+            session_id,
+            Some(previous.as_str()),
+            label.effective_label().as_str(),
+            kind,
+            reason.as_deref(),
+            decided_by,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(label)
+    }
+
+    /// Confirms several rows in one transaction, skipping any that are absent.
+    ///
+    /// Batch confirmation is how the trajectory list is meant to be worked
+    /// through, so a stale id in the request must not fail the whole call.
+    /// Returns the ids actually confirmed.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or a poisoned mutex.
+    pub fn confirm_batch(&self, session_ids: &[String], decided_by: &str) -> Result<Vec<String>> {
+        let now = now_ns();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let mut confirmed = Vec::new();
+        for session_id in session_ids {
+            let Some(mut label) = read_label(&tx, session_id)? else {
+                continue;
+            };
+            let previous = label.effective_label();
+            let kind = label.apply_decision(LabelAction::Confirm, decided_by, None, now);
+            write_label(&tx, &label)?;
+            append_event(
+                &tx,
+                session_id,
+                Some(previous.as_str()),
+                label.effective_label().as_str(),
+                kind,
+                None,
+                decided_by,
+                now,
+            )?;
+            confirmed.push(session_id.clone());
+        }
+        tx.commit()?;
+        Ok(confirmed)
+    }
+
+    /// Reads one label row.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or unreadable stored enum values.
+    pub fn get_label(&self, session_id: &str) -> Result<Option<SessionLabel>> {
+        let conn = self.lock()?;
+        read_label(&conn, session_id)
+    }
+
+    /// Lists label rows matching `filter`, newest update first.
+    ///
+    /// Filtering on the effective label happens in Rust rather than SQL: the
+    /// effective value is a function of two columns, and duplicating that rule
+    /// in a `WHERE` clause is how the two would drift apart.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or unreadable stored enum values.
+    pub fn list_labels(&self, filter: &LabelFilter) -> Result<Vec<SessionLabel>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SELECT_COLUMNS} FROM session_labels ORDER BY updated_at_ns DESC"
+        ))?;
+        let rows = stmt.query_map([], row_to_label)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let label = row??;
+            if !filter.effective_labels.is_empty()
+                && !filter.effective_labels.contains(&label.effective_label())
+            {
+                continue;
+            }
+            if let Some(state) = filter.confirm_state {
+                if label.confirm_state != state {
+                    continue;
+                }
+            }
+            if filter.only_changed_since_decision && !label.auto_changed_since_decision {
+                continue;
+            }
+            out.push(label);
+            if filter.limit > 0 && out.len() as i64 >= filter.limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Session ids whose effective label keeps them out of retrieval.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or unreadable stored enum values.
+    pub fn excluded_sessions(&self) -> Result<Vec<String>> {
+        Ok(self
+            .list_labels(&LabelFilter::default())?
+            .into_iter()
+            .filter(|l| l.effective_label().excluded_from_retrieval())
+            .map(|l| l.session_id)
+            .collect())
+    }
+
+    /// Reads the audit trail for one trajectory, oldest first.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or a poisoned mutex.
+    pub fn events(&self, session_id: &str) -> Result<Vec<LabelEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT event_id, session_id, from_label, to_label, action, reason,
+                    decided_by, created_at_ns
+             FROM session_label_events WHERE session_id = ?1
+             ORDER BY created_at_ns ASC, event_id ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(LabelEvent {
+                event_id: row.get(0)?,
+                session_id: row.get(1)?,
+                from_label: row.get(2)?,
+                to_label: row.get(3)?,
+                action: row.get(4)?,
+                reason: row.get(5)?,
+                decided_by: row.get(6)?,
+                created_at_ns: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Counts, per rule, how often a person accepted or replaced the verdict it
+    /// contributed to.
+    ///
+    /// A trajectory-level signal: it says at least one of the rules behind the
+    /// label was wrong, not which. That is enough to rank rules for
+    /// investigation, which is what it is for.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or unreadable stored enum values.
+    pub fn rule_override_stats(&self) -> Result<Vec<RuleOverrideStat>> {
+        let mut tally: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for label in self.list_labels(&LabelFilter::default())? {
+            let bucket = match label.confirm_state {
+                ConfirmState::Overridden => 0,
+                ConfirmState::Confirmed => 1,
+                ConfirmState::Unconfirmed => continue,
+            };
+            for rule in &label.auto_rules {
+                let entry = tally.entry(rule.clone()).or_insert((0, 0));
+                if bucket == 0 {
+                    entry.0 += 1;
+                } else {
+                    entry.1 += 1;
+                }
+            }
+        }
+        let mut out: Vec<_> = tally
+            .into_iter()
+            .map(|(rule, (overridden, confirmed))| RuleOverrideStat {
+                rule,
+                overridden,
+                confirmed,
+            })
+            .collect();
+        // Most-overturned first: that is the order someone fixing rules wants.
+        out.sort_by(|a, b| b.overridden.cmp(&a.overridden).then(a.rule.cmp(&b.rule)));
+        Ok(out)
+    }
+}
+
+// ─── Schema ──────────────────────────────────────────────────────────────────
+
+/// Brings `conn` to [`SCHEMA_VERSION`], one step at a time.
+///
+/// Each step runs in its own transaction, so an interrupted upgrade leaves the
+/// database at either the previous version or the next, never in between.
+fn ensure_schema(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap_or(0);
+    if current > SCHEMA_VERSION {
+        return Err(ReuseStoreError::SchemaTooNew {
+            found: current,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    let mut at = current;
+    while at < SCHEMA_VERSION {
+        let tx = conn.transaction()?;
+        match at {
+            0 => migrate_0_to_1(&tx)?,
+            // Future steps insert here, each bumping `at` by one.
+            n => return Err(ReuseStoreError::MissingMigration(n)),
+        }
+        at += 1;
+        tx.pragma_update(None, "user_version", at)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// Initial schema: the label row plus its append-only audit trail.
+fn migrate_0_to_1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_labels (
+            session_id TEXT PRIMARY KEY,
+            auto_label TEXT NOT NULL,
+            auto_reason TEXT NOT NULL,
+            auto_rules_json TEXT NOT NULL,
+            human_label TEXT,
+            human_reason TEXT,
+            confirm_state TEXT NOT NULL,
+            decided_by TEXT,
+            decided_at_ns INTEGER,
+            auto_changed_since_decision INTEGER NOT NULL DEFAULT 0,
+            n_steps INTEGER NOT NULL,
+            n_user_turns INTEGER NOT NULL,
+            n_tool_calls INTEGER NOT NULL,
+            max_agent_len INTEGER NOT NULL,
+            n_findings INTEGER NOT NULL,
+            source_content_hash TEXT NOT NULL,
+            triage_version TEXT NOT NULL,
+            created_at_ns INTEGER NOT NULL,
+            updated_at_ns INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_labels_auto
+            ON session_labels(auto_label);
+        CREATE INDEX IF NOT EXISTS idx_session_labels_pending
+            ON session_labels(confirm_state) WHERE confirm_state = 'unconfirmed';
+
+        CREATE TABLE IF NOT EXISTS session_label_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            from_label TEXT,
+            to_label TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT,
+            decided_by TEXT NOT NULL,
+            created_at_ns INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_label_events_session
+            ON session_label_events(session_id, created_at_ns);
+        "#,
+    )?;
+    Ok(())
+}
+
+// ─── Row mapping ─────────────────────────────────────────────────────────────
+
+/// Column list shared by every read, so the indices in [`row_to_label`] stay
+/// valid.
+const SELECT_COLUMNS: &str = "session_id, auto_label, auto_reason, auto_rules_json,
+     human_label, human_reason, confirm_state, decided_by, decided_at_ns,
+     auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
+     max_agent_len, n_findings, source_content_hash, triage_version,
+     created_at_ns, updated_at_ns";
+
+fn read_label(conn: &Connection, session_id: &str) -> Result<Option<SessionLabel>> {
+    let found = conn
+        .query_row(
+            &format!("SELECT {SELECT_COLUMNS} FROM session_labels WHERE session_id = ?1"),
+            params![session_id],
+            row_to_label,
+        )
+        .optional()?;
+    match found {
+        Some(inner) => Ok(Some(inner?)),
+        None => Ok(None),
+    }
+}
+
+/// Maps a row, deferring domain-level decoding errors to the caller.
+///
+/// The nested `Result` exists because `rusqlite` only lets the closure fail with
+/// its own error type, and a bad enum token is not a SQL error.
+fn row_to_label(row: &Row<'_>) -> rusqlite::Result<Result<SessionLabel>> {
+    Ok(build_label(row))
+}
+
+fn build_label(row: &Row<'_>) -> Result<SessionLabel> {
+    let auto_raw: String = row.get(1)?;
+    let rules_json: String = row.get(3)?;
+    let human_raw: Option<String> = row.get(4)?;
+    let state_raw: String = row.get(6)?;
+    Ok(SessionLabel {
+        session_id: row.get(0)?,
+        auto_label: parse_label(&auto_raw)?,
+        auto_reason: row.get(2)?,
+        auto_rules: serde_json::from_str(&rules_json)?,
+        human_label: human_raw.as_deref().map(parse_label).transpose()?,
+        human_reason: row.get(5)?,
+        confirm_state: ConfirmState::parse(&state_raw).ok_or_else(|| ReuseStoreError::Corrupt {
+            field: "confirm_state",
+            value: state_raw.clone(),
+        })?,
+        decided_by: row.get(7)?,
+        decided_at_ns: row.get(8)?,
+        auto_changed_since_decision: row.get::<_, i64>(9)? != 0,
+        metrics: TriageMetrics {
+            n_steps: row.get::<_, i64>(10)?.max(0) as usize,
+            n_user_turns: row.get::<_, i64>(11)?.max(0) as usize,
+            n_tool_calls: row.get::<_, i64>(12)?.max(0) as usize,
+            max_agent_len: row.get::<_, i64>(13)?.max(0) as usize,
+        },
+        n_findings: row.get::<_, i64>(14)?.max(0) as usize,
+        source_content_hash: row.get(15)?,
+        triage_version: row.get(16)?,
+        created_at_ns: row.get(17)?,
+        updated_at_ns: row.get(18)?,
+    })
+}
+
+fn parse_label(raw: &str) -> Result<TrajectoryLabel> {
+    TrajectoryLabel::parse(raw).ok_or_else(|| ReuseStoreError::Corrupt {
+        field: "trajectory label",
+        value: raw.to_string(),
+    })
+}
+
+fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_labels (
+            session_id, auto_label, auto_reason, auto_rules_json, human_label,
+            human_reason, confirm_state, decided_by, decided_at_ns,
+            auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
+            max_agent_len, n_findings, source_content_hash, triage_version,
+            created_at_ns, updated_at_ns
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+         ON CONFLICT(session_id) DO UPDATE SET
+            auto_label = ?2, auto_reason = ?3, auto_rules_json = ?4,
+            human_label = ?5, human_reason = ?6, confirm_state = ?7,
+            decided_by = ?8, decided_at_ns = ?9,
+            auto_changed_since_decision = ?10, n_steps = ?11, n_user_turns = ?12,
+            n_tool_calls = ?13, max_agent_len = ?14, n_findings = ?15,
+            source_content_hash = ?16, triage_version = ?17, updated_at_ns = ?19",
+        params![
+            label.session_id,
+            label.auto_label.as_str(),
+            label.auto_reason,
+            serde_json::to_string(&label.auto_rules)?,
+            label.human_label.map(|l| l.as_str()),
+            label.human_reason,
+            label.confirm_state.as_str(),
+            label.decided_by,
+            label.decided_at_ns,
+            label.auto_changed_since_decision as i64,
+            label.metrics.n_steps as i64,
+            label.metrics.n_user_turns as i64,
+            label.metrics.n_tool_calls as i64,
+            label.metrics.max_agent_len as i64,
+            label.n_findings as i64,
+            label.source_content_hash,
+            label.triage_version,
+            label.created_at_ns,
+            label.updated_at_ns,
+        ],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // One append-only audit row; splitting it
+// would only move the argument list.
+fn append_event(
+    conn: &Connection,
+    session_id: &str,
+    from_label: Option<&str>,
+    to_label: &str,
+    kind: LabelEventKind,
+    reason: Option<&str>,
+    decided_by: &str,
+    now_ns: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_label_events (
+            session_id, from_label, to_label, action, reason, decided_by, created_at_ns
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            session_id,
+            from_label,
+            to_label,
+            kind.as_str(),
+            reason,
+            decided_by,
+            now_ns
+        ],
+    )?;
+    Ok(())
+}
+
+/// Wall-clock nanoseconds, saturating rather than panicking past 2262.
+fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests;

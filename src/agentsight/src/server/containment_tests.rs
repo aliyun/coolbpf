@@ -282,6 +282,7 @@ impl ApiFixture {
         containment: Option<Arc<ContainmentCoordinator>>,
     ) -> web::Data<AppState> {
         web::Data::new(AppState {
+            reuse_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::clone(&self.health),

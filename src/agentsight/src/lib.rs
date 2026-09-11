@@ -26,11 +26,20 @@ pub mod atif;
 pub mod chrome_trace;
 pub mod config;
 pub mod ecs_metadata;
+// Cross-platform: the deterministic grounding engine is pure ATIF analysis with
+// no eBPF or platform dependency. It used to sit under `server::causal`, which
+// made it Linux-only by location alone and left the macOS server unable to
+// judge a trajectory at all.
+pub mod grounding;
 mod logging;
 // Cross-platform: rules run over either genai events (Linux) or collected
 // trajectories (all OSes); only the genai provider inside is Linux-gated.
 pub mod preferences;
 mod private_sqlite;
+// Cross-platform: labels are derived from collected trajectories, which exist on
+// every OS, so the Linux and macOS servers share one implementation. Nothing
+// here touches eBPF.
+pub mod reuse;
 pub mod security;
 // Cross-platform: the request/response contract and LLM ranking call behind
 // `POST /api/sessions/search`, shared by the Linux and macOS server handlers.

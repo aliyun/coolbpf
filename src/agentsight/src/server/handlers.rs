@@ -1180,6 +1180,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         let data = web::Data::new(AppState {
+            reuse_store: None,
             storage_path: blocked_parent.join("genai.db"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1393,6 +1394,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -1527,6 +1529,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1633,6 +1636,7 @@ mod tests {
         let auth_config = crate::config::ServerAuthConfig { enabled };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         web::Data::new(AppState {
+            reuse_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1791,6 +1795,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
             storage_path: storage_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1819,6 +1824,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1894,6 +1900,7 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -2485,6 +2492,7 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    reuse_store: None,
                     storage_path: db_path.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -3034,6 +3042,7 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    reuse_store: None,
                     storage_path: blocked_db.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),

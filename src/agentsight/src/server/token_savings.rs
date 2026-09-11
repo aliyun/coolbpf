@@ -937,6 +937,7 @@ mod tests {
 
     fn make_app_state(db_path: std::path::PathBuf) -> AppState {
         AppState {
+            reuse_store: None,
             storage_path: db_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
