@@ -837,3 +837,84 @@ fn a_blank_title_is_stored_as_absent() {
         Some("hello")
     );
 }
+
+#[test]
+fn sessions_with_labels_mirrors_the_rust_precedence() {
+    // The trajectory filter's SQL derives the effective label; it must agree
+    // with `SessionLabel::effective_label` (human > model > rules). A row
+    // where the two disagree would silently vanish from or leak into the
+    // label-filtered history an agent reads.
+    let store = store("label-precedence");
+    // Rules said unknown, model said good, human said bad -> effective bad.
+    store
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &[]),
+            "h1",
+            "v1",
+        )
+        .unwrap();
+    store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Good, vec![2], false))
+        .unwrap();
+    store
+        .apply_decision(
+            "s1",
+            LabelAction::Override(TrajectoryLabel::Bad),
+            "alice",
+            None,
+        )
+        .unwrap();
+
+    // Rules said useless, nobody else spoke -> effective useless.
+    store
+        .upsert_auto_label(
+            "s2",
+            identity(),
+            outcome(TrajectoryLabel::Useless, &[]),
+            "h2",
+            "v1",
+        )
+        .unwrap();
+
+    // Rules said good, model said bad (no human) -> effective bad.
+    store
+        .upsert_auto_label(
+            "s3",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h3",
+            "v1",
+        )
+        .unwrap();
+    store
+        .record_judgement("s3", &verdict(TrajectoryLabel::Bad, vec![2], false))
+        .unwrap();
+
+    let bad = store.sessions_with_labels(&[TrajectoryLabel::Bad]).unwrap();
+    assert_eq!(bad, vec!["s1".to_string(), "s3".to_string()]);
+    let useless = store
+        .sessions_with_labels(&[TrajectoryLabel::Useless])
+        .unwrap();
+    assert_eq!(useless, vec!["s2".to_string()]);
+    let good = store
+        .sessions_with_labels(&[TrajectoryLabel::Good])
+        .unwrap();
+    assert!(good.is_empty(), "nothing effective-good remains: {good:?}");
+}
+
+#[test]
+fn sessions_with_labels_empty_input_is_empty() {
+    let store = store("label-empty");
+    store
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v",
+        )
+        .unwrap();
+    assert!(store.sessions_with_labels(&[]).unwrap().is_empty());
+}

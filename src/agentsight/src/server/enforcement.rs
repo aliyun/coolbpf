@@ -931,6 +931,7 @@ mod tests {
         let state = web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::clone(&agents_health),

@@ -113,7 +113,7 @@ impl OptimizeState {
         })
     }
 
-    fn snapshot(&self) -> OptLlmConfig {
+    pub(super) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
@@ -471,6 +471,25 @@ pub async fn semantic_search_sessions(
         }
     };
     let request = body.into_inner();
+
+    // Sessions labelled `useless` are out of retrieval scope; same filter as
+    // the Linux endpoint, applied here for the same reason — one policy, every
+    // caller. A store failure degrades to unfiltered rather than failing search.
+    let request = match data.local_state.reuse_store.as_deref() {
+        Some(store) => match store.excluded_sessions() {
+            Ok(excluded) => semantic_search::filter_excluded(
+                request,
+                &excluded
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(error) => {
+                log::warn!("reuse: reading excluded sessions failed, ranking unfiltered: {error}");
+                request
+            }
+        },
+        None => request,
+    };
     semantic_search::handle_semantic_search(&client, &request).await
 }
 

@@ -5,7 +5,7 @@
  * own. Measured on real data, the deterministic rules produced seven `bad`
  * labels and every one was wrong, so `bad` is now a verdict only a person or a
  * reviewed model may reach. Confirming is therefore not busywork: it is the
- * step that turns a guess into something an artifact can rest on.
+ * step that turns a guess into a person-settled label.
  *
  * Both verdicts stay on screen for the same reason they stay in the database —
  * seeing what the rules said next to what a person decided is how a misfiring
@@ -80,10 +80,24 @@ export const ReuseLabelsPage: React.FC = () => {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  /** Batch judging progress, `done/total`. Each row is one paid request that
+   * takes seconds, so a batch of twenty can run for minutes — without this
+   * counter the only feedback was a disabled button. */
+  const [judgeProgress, setJudgeProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [triage, setTriage] = useState<TriageReport | null>(null);
   const [judge, setJudge] = useState<JudgeReport | null>(null);
   const [stats, setStats] = useState<LabelStatsResponse | null>(null);
+  /** Which result panel is shown. The buttons look like tabs, so they behave
+   * like tabs: clicking selects, the active one is highlighted, and the result
+   * area shows one panel at a time instead of stacking every result ever
+   * produced. */
+  const [panel, setPanel] = useState<'triage' | 'judge' | 'stats' | null>(null);
+  /** Which quick-pick criterion the dropdown currently shows. Tracked so the
+   * control reflects reality after a pick — including when free checkbox
+   * edits make the selection no longer match any criterion, in which case it
+   * falls back to the placeholder. */
+  const [selectMode, setSelectMode] = useState<string>('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,6 +111,7 @@ export const ReuseLabelsPage: React.FC = () => {
       setRows(response.sessions);
       // Selections that are no longer on screen would be confirmed invisibly.
       setSelected(new Set());
+      setSelectMode('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -152,25 +167,104 @@ export const ReuseLabelsPage: React.FC = () => {
 
   const onConfirmSelected = () =>
     runAction('batch', async () => {
-      await confirmReuseLabels(Array.from(selected));
+      // The selection may now include rows a person already settled (the
+      // checkboxes were freed so the model judge could aim at them); batch
+      // confirm only applies to rows still awaiting a decision.
+      const undecided = rows
+        .filter((row) => selected.has(row.session_id) && !row.human_backed)
+        .map((row) => row.session_id);
+      if (undecided.length === 0) {
+        return;
+      }
+      await confirmReuseLabels(undecided);
       await load();
     });
 
   const onTriage = () =>
     runAction('triage', async () => {
       setTriage(await runReuseTriage(1000));
+      setPanel('triage');
       await load();
     });
 
   const onJudge = () =>
     runAction('judge', async () => {
-      setJudge(await runReuseJudgements({ limit: 20 }));
+      // An explicit selection means the reviewer chose exactly what to judge —
+      // including rows the automatic candidate filter would skip (already
+      // judged, or not `unknown`). No selection keeps the automatic pick:
+      // unjudged `unknown` rows the rules could not place.
+      const picked = Array.from(selected);
+      // Judged one row per request rather than as one batch: each request is
+      // seconds of paid LLM time, and per-row requests give the reader a live
+      // counter instead of a single long request whose only feedback was a
+      // disabled button.
+      const ids =
+        picked.length > 0
+          ? picked
+          : rows
+              .filter(
+                (row) =>
+                  row.effective_label === 'unknown' &&
+                  !row.llm_label &&
+                  !row.human_backed,
+              )
+              .map((row) => row.session_id)
+              .slice(0, 20);
+      const report: JudgeReport = {
+        examined: ids.length,
+        judged: 0,
+        skipped: 0,
+        failed: 0,
+        downgraded: 0,
+        judged_good: 0,
+        judged_bad: 0,
+        judged_unclear: 0,
+      };
+      for (const [i, id] of ids.entries()) {
+        setJudgeProgress(`${i + 1}/${ids.length}`);
+        try {
+          const one = await runReuseJudgements({ sessionIds: [id] });
+          report.judged += one.judged;
+          report.skipped += one.skipped;
+          report.failed += one.failed;
+          report.downgraded += one.downgraded;
+          report.judged_good += one.judged_good;
+          report.judged_bad += one.judged_bad;
+          report.judged_unclear += one.judged_unclear;
+        } catch {
+          report.failed += 1;
+        }
+      }
+      setJudgeProgress(null);
+      setJudge(report);
+      setPanel('judge');
       await load();
+    });
+
+  /** Re-judges one row by name. Each press is a paid request, which is the
+   * reason this is a per-row button rather than something that happens on
+   * its own. A human decision still wins: the verdict lands in the model
+   * column, and the row keeps the settled label until a person changes it. */
+  const onRejudge = (row: SessionLabelView) =>
+    runAction(`rejudge:${row.session_id}`, async () => {
+      setJudge(await runReuseJudgements({ sessionIds: [row.session_id] }));
+      setPanel('judge');
+      // Refetch and swap the row in place, so the list does not reorder
+      // under the reader's cursor — the row itself may well have moved in
+      // sort order, since judging bumps `updated_at`.
+      const refreshed = await fetchReuseSessions({ limit: PAGE_LIMIT });
+      const updated = refreshed.sessions.find(
+        (fresh) => fresh.session_id === row.session_id,
+      );
+      if (updated) {
+        replaceRow(updated);
+      }
     });
 
   const onStats = () =>
     runAction('stats', async () => {
       setStats(await fetchReuseLabelStats());
+      setPanel('stats');
     });
 
   const toggle = (sessionId: string) => {
@@ -180,11 +274,38 @@ export const ReuseLabelsPage: React.FC = () => {
       else next.add(sessionId);
       return next;
     });
+    // A hand edit means the selection is no longer a pure criterion match.
+    setSelectMode('');
   };
 
   const toggleAllPending = () => {
     const pending = rows.filter((row) => !row.human_backed).map((row) => row.session_id);
     setSelected((current) => (current.size === pending.length ? new Set() : new Set(pending)));
+  };
+
+  /**
+   * Selects a slice of the rows by criterion, replacing the selection. Used by
+   * the "select" dropdown so a reviewer can aim the model judge (or batch
+   * confirm) at a coherent group — everything, the rows the rules could not
+   * place, or the rows a model has already seen — without ticking boxes one by
+   * one. Re-selecting the same criterion clears it, so the control toggles.
+   */
+  const selectBy = (mode: 'all' | 'unknown' | 'judged' | 'none') => {
+    setSelectMode(mode === 'none' ? '' : mode);
+    if (mode === 'none') {
+      setSelected(new Set());
+      return;
+    }
+    const ids = new Set(
+      rows
+        .filter((row) => {
+          if (mode === 'all') return true;
+          if (mode === 'unknown') return row.effective_label === 'unknown' && !row.human_backed;
+          return Boolean(row.llm_label);
+        })
+        .map((row) => row.session_id),
+    );
+    setSelected((current) => (ids.size === current.size ? new Set() : ids));
   };
 
   return (
@@ -199,7 +320,11 @@ export const ReuseLabelsPage: React.FC = () => {
           type="button"
           onClick={onTriage}
           disabled={busy !== null}
-          className="rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+          className={`rounded px-3 py-1.5 text-sm disabled:opacity-50 ${
+            panel === 'triage'
+              ? 'bg-blue-700 text-white ring-2 ring-blue-300'
+              : 'bg-blue-600 text-white'
+          }`}
         >
           {busy === 'triage' ? t('reuse.running') : t('reuse.runTriage')}
         </button>
@@ -207,20 +332,35 @@ export const ReuseLabelsPage: React.FC = () => {
           type="button"
           onClick={onJudge}
           disabled={busy !== null}
-          title={t('reuse.runJudgeHint')}
-          className="rounded border border-blue-600 px-3 py-1.5 text-sm text-blue-700 disabled:opacity-50"
+          title={
+            selected.size > 0 ? t('reuse.runJudgeSelectedHint') : t('reuse.runJudgeHint')
+          }
+          className={`rounded border px-3 py-1.5 text-sm disabled:opacity-50 ${
+            panel === 'judge'
+              ? 'border-blue-700 bg-blue-50 text-blue-900 ring-2 ring-blue-300'
+              : 'border-blue-600 text-blue-700'
+          }`}
         >
-          {busy === 'judge' ? t('reuse.running') : t('reuse.runJudge')}
+          {busy === 'judge'
+            ? judgeProgress
+              ? `${t('reuse.judging')} ${judgeProgress}`
+              : t('reuse.running')
+            : selected.size > 0
+              ? t('reuse.runJudgeSelected', { count: selected.size })
+              : t('reuse.runJudge')}
         </button>
         <button
           type="button"
           onClick={onStats}
           disabled={busy !== null}
-          className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:opacity-50"
+          className={`rounded border px-3 py-1.5 text-sm disabled:opacity-50 ${
+            panel === 'stats'
+              ? 'border-gray-700 bg-gray-100 text-gray-900 ring-2 ring-gray-300'
+              : 'border-gray-300 text-gray-700'
+          }`}
         >
           {t('reuse.showStats')}
         </button>
-
         <span className="mx-2 h-5 w-px bg-gray-200" />
 
         <select
@@ -262,7 +402,7 @@ export const ReuseLabelsPage: React.FC = () => {
         </div>
       )}
 
-      {triage && (
+      {panel === 'triage' && triage && (
         <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
           {t('reuse.triageResult', {
             examined: triage.examined,
@@ -277,7 +417,7 @@ export const ReuseLabelsPage: React.FC = () => {
         </div>
       )}
 
-      {judge && (
+      {panel === 'judge' && judge && (
         <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
           {t('reuse.judgeResult', {
             examined: judge.examined,
@@ -294,7 +434,7 @@ export const ReuseLabelsPage: React.FC = () => {
         </div>
       )}
 
-      {stats && (
+      {panel === 'stats' && stats && (
         <div className="rounded border border-gray-200 bg-white p-3">
           <h2 className="mb-2 text-sm font-medium text-gray-900">{t('reuse.statsTitle')}</h2>
           {stats.rules.length === 0 ? (
@@ -333,6 +473,18 @@ export const ReuseLabelsPage: React.FC = () => {
           >
             {t('reuse.selectPending')}
           </button>
+          <select
+            value={selectMode}
+            onChange={(e) => selectBy(e.target.value as 'all' | 'unknown' | 'judged' | 'none')}
+            className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700"
+            title={t('reuse.selectByHint')}
+          >
+            <option value="">{t('reuse.selectBy')}</option>
+            <option value="all">{t('reuse.selectAll')}</option>
+            <option value="unknown">{t('reuse.selectUnknown')}</option>
+            <option value="judged">{t('reuse.selectJudged')}</option>
+            <option value="none">{t('reuse.selectNone')}</option>
+          </select>
           <button
             type="button"
             onClick={onConfirmSelected}
@@ -341,6 +493,21 @@ export const ReuseLabelsPage: React.FC = () => {
           >
             {t('reuse.confirmSelected', { count: selected.size })}
           </button>
+          {selected.size > 0 && (
+            <button
+              type="button"
+              onClick={onJudge}
+              disabled={busy !== null}
+              title={t('reuse.runJudgeSelectedHint')}
+              className="rounded border border-blue-600 px-2 py-1 text-xs text-blue-700 disabled:opacity-40"
+            >
+              {busy === 'judge'
+                ? judgeProgress
+                  ? `${t('reuse.judging')} ${judgeProgress}`
+                  : t('reuse.judging')
+                : t('reuse.runJudgeSelected', { count: selected.size })}
+            </button>
+          )}
           <span className="ml-auto text-gray-500">
             {Object.entries(counts)
               .map(([label, n]) => `${label}=${n}`)
@@ -365,7 +532,6 @@ export const ReuseLabelsPage: React.FC = () => {
                     className="mt-1"
                     checked={selected.has(row.session_id)}
                     onChange={() => toggle(row.session_id)}
-                    disabled={row.human_backed}
                     title={row.human_backed ? t('reuse.alreadyDecided') : undefined}
                   />
                   <div className="min-w-0 flex-1 space-y-1">
@@ -376,16 +542,25 @@ export const ReuseLabelsPage: React.FC = () => {
                           subtitle, and a tool-only transcript with no title
                           falls back to it. */}
                       {row.title ? (
-                        <span className="truncate text-sm font-medium text-gray-900">
+                        <a
+                          href={`#/atif?type=session&id=${encodeURIComponent(row.session_id)}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={t('reuse.openTrajectoryHint')}
+                          className="truncate text-sm font-medium text-gray-900 hover:text-blue-700 hover:underline"
+                        >
                           {row.title}
-                        </span>
+                        </a>
                       ) : (
-                        <span
-                          className="truncate text-sm text-gray-500"
+                        <a
+                          href={`#/atif?type=session&id=${encodeURIComponent(row.session_id)}`}
+                          target="_blank"
+                          rel="noreferrer"
                           title={t('reuse.untitledHint')}
+                          className="truncate text-sm text-gray-500 hover:text-blue-700 hover:underline"
                         >
                           {fallbackName(row)}
-                        </span>
+                        </a>
                       )}
                       {row.is_subagent && (
                         <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">
@@ -464,6 +639,15 @@ export const ReuseLabelsPage: React.FC = () => {
                         {label}
                       </button>
                     ))}
+                    <button
+                      type="button"
+                      onClick={() => onRejudge(row)}
+                      disabled={busy !== null}
+                      title={t('reuse.rejudgeHint')}
+                      className="rounded border border-blue-600 px-2 py-1 text-xs text-blue-700 disabled:opacity-40"
+                    >
+                      {busy === `rejudge:${row.session_id}` ? t('reuse.judging') : t('reuse.rejudge')}
+                    </button>
                   </div>
                 </div>
               </li>

@@ -22,6 +22,13 @@ pub struct TrajectoryQuery {
     pub source: Option<String>,
     pub agent_name: Option<String>,
     pub limit: Option<i64>,
+    /// Keep only trajectories whose effective reuse label is one of these
+    /// (comma-separated: `good,bad`). Never-triaged sessions match nothing.
+    pub label: Option<String>,
+    /// Drop trajectories whose label is one of these (`useless` by contract).
+    pub exclude_label: Option<String>,
+    /// Keep only trajectories a person settled (`confirm`/`override`).
+    pub human_backed: Option<bool>,
 }
 
 /// GET /api/trajectories
@@ -43,11 +50,75 @@ pub async fn list_trajectories(
         query.agent_name.as_deref(),
         limit,
     ) {
-        Ok(rows) => HttpResponse::Ok().json(rows),
+        Ok(mut rows) => {
+            filter_rows_by_reuse_labels(state.as_ref(), &query, &mut rows);
+            HttpResponse::Ok().json(rows)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Applies the reuse-label query parameters; mirrors the Linux endpoint's
+/// filter so a skill gets the same answer on either platform.
+fn filter_rows_by_reuse_labels(
+    state: &LocalState,
+    query: &TrajectoryQuery,
+    rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
+) {
+    let labels_needed =
+        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
+    if !labels_needed {
+        return;
+    }
+    let Some(labels) = state.reuse_store.as_deref() else {
+        if query.label.is_some() || query.human_backed == Some(true) {
+            rows.clear();
+        }
+        return;
+    };
+    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::reuse::TrajectoryLabel::parse)
+            .collect()
+    };
+    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+        labels
+            .sessions_with_labels(&parse(raw))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    let drop: Option<std::collections::HashSet<String>> =
+        query.exclude_label.as_deref().map(|raw| {
+            labels
+                .sessions_with_labels(&parse(raw))
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        });
+    let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
+        Some(
+            labels
+                .list_labels(&crate::reuse::LabelFilter::default())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    rows.retain(|row| {
+        let id = row.session_id.as_str();
+        keep.as_ref().is_none_or(|set| set.contains(id))
+            && drop.as_ref().is_none_or(|set| !set.contains(id))
+            && backed.as_ref().is_none_or(|set| set.contains(id))
+    });
 }
 
 /// GET /api/trajectories/filters

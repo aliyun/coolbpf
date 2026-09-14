@@ -168,7 +168,7 @@ export async function fetchReuseSessions(filter: {
  * Records a human decision on one label.
  *
  * `confirm` endorses the automatic verdict; `override` replaces it. Both count
- * as a person having spoken, which is what lets a label back an artifact.
+ * as a person having spoken.
  */
 export async function decideReuseLabel(
   sessionId: string,

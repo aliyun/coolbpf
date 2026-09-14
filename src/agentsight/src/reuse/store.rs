@@ -28,7 +28,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 /// Schema version recorded in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Errors produced by [`ReuseStore`].
 #[derive(Debug, thiserror::Error)]
@@ -201,6 +201,42 @@ impl ReuseStore {
         }
         tx.commit()?;
         Ok(label)
+    }
+
+    /// Returns the sessions whose effective label is in `labels`.
+    ///
+    /// Serves the `label` filter on `/api/trajectories`: an agent pulling
+    /// history through a skill asks for "good trajectories" or "everything but
+    /// useless" and reads the full original trajectory — the label is a filter
+    /// over originals, not a summary of them. Sessions without a label row
+    /// (never triaged) match nothing: their quality is unknown, and a filter
+    /// asking for `good` must not serve them.
+    ///
+    /// # Errors
+    /// Returns a store error on SQL failure.
+    pub fn sessions_with_labels(&self, labels: &[TrajectoryLabel]) -> Result<Vec<String>> {
+        if labels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock()?;
+        let placeholders = labels
+            .iter()
+            .map(|l| format!("'{}'", l.as_str().replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // `effective_label` is derived, not stored: the human > model > rules
+        // precedence lives in `label.rs` and is resolved on read. The SQL
+        // below must mirror `SessionLabel::effective_label` exactly — a row
+        // here whose SQL and Rust disagree would silently vanish from (or leak
+        // into) the trajectory label filter.
+        let ids: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT session_id FROM session_labels
+                 WHERE COALESCE(human_label, llm_label, auto_label) IN ({placeholders})"
+            ))?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// Refreshes only the display identity of an existing row.
@@ -505,6 +541,9 @@ fn ensure_schema(conn: &mut Connection) -> Result<()> {
             0 => migrate_0_to_1(&tx)?,
             1 => migrate_1_to_2(&tx)?,
             2 => migrate_2_to_3(&tx)?,
+            // v4 created the fragment store, v5 drops it again; both steps
+            // funnel here so a v3 database never materialises the table.
+            3 | 4 => migrate_4_to_5(&tx)?,
             // Future steps insert here, each bumping `at` by one.
             n => return Err(ReuseStoreError::MissingMigration(n)),
         }
@@ -578,6 +617,20 @@ fn migrate_1_to_2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         ALTER TABLE session_labels ADD COLUMN llm_cited_steps_json TEXT;
         ALTER TABLE session_labels ADD COLUMN llm_downgraded INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE session_labels ADD COLUMN llm_at_ns INTEGER;
+        "#,
+    )?;
+    Ok(())
+}
+
+/// Drops the extracted-fragment store. Agents read whole trajectories through
+/// `/api/trajectories?label=…`; the fragment table only ever held a lossy
+/// projection of that. `IF EXISTS` covers fresh v5 databases that never had it.
+fn migrate_4_to_5(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS artifacts;
+        DROP INDEX IF EXISTS idx_artifacts_session;
+        DROP INDEX IF EXISTS idx_artifacts_role_status;
         "#,
     )?;
     Ok(())

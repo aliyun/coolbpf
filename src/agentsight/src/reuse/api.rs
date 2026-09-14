@@ -358,6 +358,10 @@ pub fn run_triage(
         };
         let hash = content_hash(&record.atif_json);
         let identity = identity_from_record(&record);
+        let Ok(doc) = serde_json::from_str::<AtifTrajectory>(&record.atif_json) else {
+            report.unparsable += 1;
+            continue;
+        };
 
         // Same bytes and same rules can only produce the same verdict, so a
         // repeat run is free — this is what makes the endpoint safe to poll.
@@ -374,11 +378,6 @@ pub fn run_triage(
                 continue;
             }
         }
-
-        let Ok(doc) = serde_json::from_str::<AtifTrajectory>(&record.atif_json) else {
-            report.unparsable += 1;
-            continue;
-        };
         let outcome = triage(&doc, &summarize_trajectory(&doc), config);
         match outcome.label {
             TrajectoryLabel::Good => report.auto_good += 1,

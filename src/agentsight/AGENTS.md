@@ -228,7 +228,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus token 指标 |
 | `/api/sessions` | GET | 会话列表 |
-| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM） |
+| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM）；排除有效标签为 `useless` 的会话，标签库不可用时退化为不过滤 |
 | `/api/sessions/{id}/traces` | GET | 会话下的 trace |
 | `/api/traces/{id}` | GET | 单次调用详情（按 per-call response_id 查询，非 conversation_id） |
 | `/api/conversations/{id}` | GET | conversation 事件详情 |
@@ -268,7 +268,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
 | `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
 | `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |
-| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`, `label`, `exclude_label`, `human_backed`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
 | `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
 | `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |

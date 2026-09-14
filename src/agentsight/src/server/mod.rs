@@ -6,6 +6,7 @@
 pub mod auth;
 mod capabilities;
 mod causal;
+pub(crate) mod causal_store;
 mod containment;
 mod enforcement;
 mod handlers;
@@ -91,6 +92,12 @@ pub struct AppState {
     /// Whether a model may be asked to label trajectories the rules could not
     /// place. Off by default: every judgement is a paid request.
     pub reuse_llm_judge_enabled: bool,
+    /// Durable causal attribution results (`causal.db`).
+    ///
+    /// `None` when the private store could not be opened: attribution still
+    /// runs and still serves from its in-memory cache, it just stops surviving
+    /// restarts — a degraded mode beats refusing to serve at all.
+    pub causal_store: Option<Arc<causal_store::CausalCaseStore>>,
 }
 
 impl AppState {
@@ -730,6 +737,16 @@ pub async fn run_server(
         }
     };
 
+    // Attribution cases are paid pipeline runs; losing them on restart means
+    // paying again for the same answer. Same degrade-don't-die rule as labels.
+    let causal_store = match causal_store::CausalCaseStore::open_private(&state_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            log::warn!("Causal case store unavailable, results will not persist: {error}");
+            None
+        }
+    };
+
     let enforcement_client = EnforcementClient::new(capabilities::enforcer_socket_path());
     let enforcement = Arc::new(EnforcementCoordinator::new(
         enforcement_client.clone(),
@@ -861,6 +878,7 @@ pub async fn run_server(
         optimize: Some(optimize_state),
         reuse_store,
         reuse_llm_judge_enabled,
+        causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
     let audit_retention =
@@ -1299,6 +1317,7 @@ mod tests {
             optimize: None,
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
@@ -1329,6 +1348,7 @@ mod tests {
             optimize: None,
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }

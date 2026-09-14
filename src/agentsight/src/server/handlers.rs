@@ -1182,6 +1182,7 @@ mod tests {
         let data = web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: blocked_parent.join("genai.db"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1397,6 +1398,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -1533,6 +1535,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1641,6 +1644,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1801,6 +1805,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: storage_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1831,6 +1836,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1908,6 +1914,7 @@ mod tests {
         web::Data::new(AppState {
             reuse_store: None,
             reuse_llm_judge_enabled: false,
+            causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -2501,6 +2508,7 @@ mod tests {
                 .app_data(web::Data::new(AppState {
                     reuse_store: None,
                     reuse_llm_judge_enabled: false,
+                    causal_store: None,
                     storage_path: db_path.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -3052,6 +3060,7 @@ mod tests {
                 .app_data(web::Data::new(AppState {
                     reuse_store: None,
                     reuse_llm_judge_enabled: false,
+                    causal_store: None,
                     storage_path: blocked_db.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -3981,6 +3990,14 @@ pub struct TrajectoryQuery {
     pub agent_name: Option<String>,
     /// Max rows returned (default 200).
     pub limit: Option<i64>,
+    /// Keep only trajectories whose effective reuse label is one of these
+    /// (comma-separated: `good,bad`). Sessions never triaged match nothing —
+    /// an agent asking for `good` history must not be served unassessed work.
+    pub label: Option<String>,
+    /// Drop trajectories whose label is one of these (`useless` by contract).
+    pub exclude_label: Option<String>,
+    /// Keep only trajectories a person settled (`confirm`/`override`).
+    pub human_backed: Option<bool>,
 }
 
 /// Default and hard-cap for the trajectory list `limit` parameter.
@@ -4013,11 +4030,82 @@ pub async fn list_trajectories(
         query.agent_name.as_deref(),
         limit,
     ) {
-        Ok(rows) => HttpResponse::Ok().json(rows),
+        Ok(mut rows) => {
+            filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            HttpResponse::Ok().json(rows)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Applies the reuse-label query parameters to trajectory summary rows.
+///
+/// The label lives in `reuse.db`, the summary in `trajectories.db`; rather
+/// than teach the collector crate about labels (it owns storage, not reuse
+/// policy), the handler resolves the label set once and keeps rows whose id is
+/// in it. Unlabelled sessions drop out of every label filter — including
+/// `exclude_label`, which only removes what has actually been assessed.
+fn filter_rows_by_reuse_labels(
+    data: &web::Data<AppState>,
+    query: &TrajectoryQuery,
+    rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
+) {
+    let labels_needed =
+        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
+    if !labels_needed {
+        return;
+    }
+    let Some(labels) = data.reuse_store.as_deref() else {
+        // No label store: nothing has been assessed, so a positive filter
+        // matches nothing. Serve the empty truth rather than unfiltered rows.
+        if query.label.is_some() || query.human_backed == Some(true) {
+            rows.clear();
+        }
+        return;
+    };
+    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::reuse::TrajectoryLabel::parse)
+            .collect()
+    };
+    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+        labels
+            .sessions_with_labels(&parse(raw))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    let drop: Option<std::collections::HashSet<String>> =
+        query.exclude_label.as_deref().map(|raw| {
+            labels
+                .sessions_with_labels(&parse(raw))
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        });
+    let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
+        Some(
+            labels
+                .list_labels(&crate::reuse::LabelFilter::default())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    rows.retain(|row| {
+        let id = row.session_id.as_str();
+        keep.as_ref().is_none_or(|set| set.contains(id))
+            && drop.as_ref().is_none_or(|set| !set.contains(id))
+            && backed.as_ref().is_none_or(|set| set.contains(id))
+    });
 }
 
 /// GET /api/trajectories/filters

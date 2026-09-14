@@ -55,7 +55,7 @@ impl TrajectoryLabel {
         }
     }
 
-    /// Whether artifacts from a trajectory with this label must be kept out of
+    /// Whether trajectories with this label must be kept out of
     /// retrieval results altogether.
     ///
     /// Only `Useless` qualifies. `Bad` explicitly does not: a trajectory that
@@ -337,7 +337,7 @@ impl SessionLabel {
     ///
     /// The gate needs this separately from [`Self::effective_label`]: an
     /// unconfirmed automatic label is good enough to filter retrieval by, but
-    /// not good enough to count as the human confirmation that lets an artifact
+    /// not good enough to count as a person having settled the label
     /// be promoted to verified. Conflating the two would let every trajectory
     /// arrive pre-blessed.
     pub fn is_human_backed(&self) -> bool {
@@ -352,10 +352,15 @@ impl SessionLabel {
 
     /// Records a human decision and returns the event kind to audit.
     ///
-    /// `Confirm` stores the automatic label as the human one as well. That
-    /// keeps `effective_label` to a single rule and closes a hole: were the
-    /// confirmed value left implicit, a later recompute would silently move the
-    /// effective label out from under a decision somebody had already made.
+    /// `Confirm` stores the label that was in force as the human one — the
+    /// verdict the person actually read and agreed with. Storing the *automatic*
+    /// label here (as an earlier version did, when the rules were the only
+    /// automatic source) silently overruled the model judge: confirming a row
+    /// the model had called `good` recorded `unknown`, because that was what the
+    /// rules had said, and the effective label moved under a decision meant to
+    /// endorse it. Pinning the in-force label also keeps `effective_label` to a
+    /// single rule: a later recompute cannot move it out from under a decision
+    /// somebody already made.
     pub fn apply_decision(
         &mut self,
         action: LabelAction,
@@ -365,7 +370,7 @@ impl SessionLabel {
     ) -> LabelEventKind {
         let (label, state, kind) = match action {
             LabelAction::Confirm => (
-                self.auto_label,
+                self.effective_label(),
                 ConfirmState::Confirmed,
                 LabelEventKind::Confirm,
             ),
@@ -439,6 +444,34 @@ mod tests {
         SessionLabel::from_outcome("s1", identity(), outcome(label), "hash-1", "triage-v1", 100)
     }
 
+    #[test]
+    fn confirming_pins_the_verdict_that_was_in_force() {
+        // Found on a live server: a row the model judge had called `good` (with
+        // the rules at `unknown`) became `unknown` when confirmed, because the
+        // confirm branch stored the rules' label as the human decision. A person
+        // confirms what they read, which is the label in force.
+        let mut label = SessionLabel::from_outcome(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown),
+            "hash-1",
+            "triage-v1",
+            100,
+        );
+        label.apply_judgement(
+            TrajectoryLabel::Good,
+            "模型理由".to_string(),
+            vec![2],
+            false,
+            200,
+        );
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+
+        label.apply_decision(LabelAction::Confirm, "alice", None, 300);
+        assert_eq!(label.human_label, Some(TrajectoryLabel::Good));
+        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+    }
+
     fn identity() -> TrajectoryIdentity {
         TrajectoryIdentity {
             title: Some("看一下版本".to_string()),
@@ -460,7 +493,7 @@ mod tests {
     #[test]
     fn unconfirmed_is_not_human_backed() {
         // The distinction the gate depends on: usable as a filter, not usable
-        // as the human sign-off that promotes an artifact.
+        // as the human sign-off on the label itself.
         assert!(!row(TrajectoryLabel::Good).is_human_backed());
     }
 
@@ -587,6 +620,10 @@ mod tests {
 
     #[test]
     fn deciding_again_clears_a_pending_disagreement() {
+        // Confirm endorses what is in force, so re-confirming after the rules
+        // moved keeps the human verdict — the amber note already said the
+        // decision stands and revisiting was optional. Wanting the rules' new
+        // verdict instead is an override, not a confirm.
         let mut label = row(TrajectoryLabel::Useless);
         label.apply_decision(LabelAction::Confirm, "alice", None, 200);
         label.apply_retriage(
@@ -599,7 +636,7 @@ mod tests {
         assert!(label.auto_changed_since_decision);
         label.apply_decision(LabelAction::Confirm, "alice", None, 400);
         assert!(!label.auto_changed_since_decision);
-        assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+        assert_eq!(label.effective_label(), TrajectoryLabel::Useless);
     }
 
     #[test]
