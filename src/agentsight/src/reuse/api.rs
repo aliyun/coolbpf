@@ -13,7 +13,7 @@ use agentsight_atif::AtifTrajectory;
 use agentsight_opt::llm::LlmClient;
 use agentsight_trajectory_collector::TrajectoryStore;
 
-use super::label::{ConfirmState, LabelAction, SessionLabel, TrajectoryLabel};
+use super::label::{ConfirmState, LabelAction, SessionLabel, TrajectoryIdentity, TrajectoryLabel};
 use super::store::{LabelFilter, ReuseStore, ReuseStoreError, RuleOverrideStat};
 use super::summarize::summarize_trajectory;
 use super::triage::{TriageConfig, triage};
@@ -217,6 +217,16 @@ pub struct TriageReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionLabelView {
     pub session_id: String,
+    /// The opening request, the closest thing to a conversation's title. Absent
+    /// for tool-only transcripts, where the client falls back to the id.
+    pub title: Option<String>,
+    /// Working directory the session ran in.
+    pub project: String,
+    /// Which product wrote it: `qoder`, `claude-code`, `codex`.
+    pub source: String,
+    pub agent_name: String,
+    pub started_at: Option<String>,
+    pub is_subagent: bool,
     pub effective_label: String,
     pub confirm_state: String,
     /// Whether a person actually signed off. Distinct from having a label:
@@ -230,6 +240,11 @@ pub struct SessionLabelView {
     pub decided_by: Option<String>,
     pub decided_at_ns: Option<i64>,
     pub auto_changed_since_decision: bool,
+    /// The model judge's verdict, absent until second-level labelling runs.
+    pub llm_label: Option<String>,
+    pub llm_reason: Option<String>,
+    pub llm_cited_steps: Vec<usize>,
+    pub llm_downgraded: bool,
     pub n_steps: usize,
     pub n_user_turns: usize,
     pub n_tool_calls: usize,
@@ -243,6 +258,12 @@ impl From<&SessionLabel> for SessionLabelView {
     fn from(label: &SessionLabel) -> Self {
         Self {
             session_id: label.session_id.clone(),
+            title: label.identity.title.clone(),
+            project: label.identity.project.clone(),
+            source: label.identity.source.clone(),
+            agent_name: label.identity.agent_name.clone(),
+            started_at: label.identity.started_at.clone(),
+            is_subagent: label.identity.is_subagent,
             effective_label: label.effective_label().as_str().to_string(),
             confirm_state: label.confirm_state.as_str().to_string(),
             human_backed: label.is_human_backed(),
@@ -254,6 +275,10 @@ impl From<&SessionLabel> for SessionLabelView {
             decided_by: label.decided_by.clone(),
             decided_at_ns: label.decided_at_ns,
             auto_changed_since_decision: label.auto_changed_since_decision,
+            llm_label: label.llm_label.map(|l| l.as_str().to_string()),
+            llm_reason: label.llm_reason.clone(),
+            llm_cited_steps: label.llm_cited_steps.clone(),
+            llm_downgraded: label.llm_downgraded,
             n_steps: label.metrics.n_steps,
             n_user_turns: label.metrics.n_user_turns,
             n_tool_calls: label.metrics.n_tool_calls,
@@ -324,26 +349,33 @@ pub fn run_triage(
 
     for session_id in session_ids {
         report.examined += 1;
-        let Some(atif_json) = trajectories
-            .get_atif_json(&session_id)
+        let Some(record) = trajectories
+            .get(&session_id)
             .map_err(|e| ReuseApiError::Trajectories(e.to_string()))?
         else {
             report.missing += 1;
             continue;
         };
-        let hash = content_hash(&atif_json);
+        let hash = content_hash(&record.atif_json);
+        let identity = identity_from_record(&record);
 
         // Same bytes and same rules can only produce the same verdict, so a
-        // repeat run is free. This is what makes the endpoint safe to poll.
+        // repeat run is free — this is what makes the endpoint safe to poll.
+        // Identity is refreshed even on that path: it is denormalised display
+        // data, so a row labelled before these columns existed would otherwise
+        // keep showing a bare session id forever.
         if let Some(existing) = labels.get_label(&session_id)? {
             if existing.source_content_hash == hash && existing.triage_version == version {
+                if existing.identity != identity {
+                    labels.set_identity(&session_id, &identity)?;
+                }
                 report.unchanged += 1;
                 tally_override(&existing, &mut report);
                 continue;
             }
         }
 
-        let Ok(doc) = serde_json::from_str::<AtifTrajectory>(&atif_json) else {
+        let Ok(doc) = serde_json::from_str::<AtifTrajectory>(&record.atif_json) else {
             report.unparsable += 1;
             continue;
         };
@@ -354,7 +386,7 @@ pub fn run_triage(
             TrajectoryLabel::Useless => report.auto_useless += 1,
             TrajectoryLabel::Unknown => report.auto_unknown += 1,
         }
-        let stored = labels.upsert_auto_label(&session_id, outcome, &hash, &version)?;
+        let stored = labels.upsert_auto_label(&session_id, identity, outcome, &hash, &version)?;
         report.labelled += 1;
         tally_override(&stored, &mut report);
     }
@@ -369,6 +401,24 @@ fn tally_override(label: &SessionLabel, report: &mut TriageReport) {
         .is_some_and(|human| human != label.auto_label)
     {
         report.human_overrides_in_force += 1;
+    }
+}
+
+/// Builds the display identity from a stored trajectory record.
+///
+/// The title is the first user message trimmed to one line; everything else is
+/// copied as-is. Kept next to the triage loop because that is the only caller
+/// and the mapping is not interesting enough to export.
+fn identity_from_record(
+    record: &agentsight_trajectory_collector::TrajectoryRecord,
+) -> TrajectoryIdentity {
+    TrajectoryIdentity {
+        title: TrajectoryIdentity::title_from_message(record.first_user_message.as_deref()),
+        project: record.project.clone(),
+        source: record.source.clone(),
+        agent_name: record.agent_name.clone(),
+        started_at: record.start_time.clone(),
+        is_subagent: record.is_subagent,
     }
 }
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::reuse::JudgeVerdict;
-use crate::reuse::label::{ConfirmState, LabelAction, TrajectoryLabel};
+use crate::reuse::label::{ConfirmState, LabelAction, TrajectoryIdentity, TrajectoryLabel};
 use crate::reuse::triage::{TriageMetrics, TriageOutcome};
 
 fn tmp_dir(tag: &str) -> PathBuf {
@@ -24,6 +24,17 @@ fn store_at(path: &std::path::Path) -> ReuseStore {
 
 fn store(tag: &str) -> ReuseStore {
     store_at(&tmp_dir(tag).join("reuse.db"))
+}
+
+fn identity() -> TrajectoryIdentity {
+    TrajectoryIdentity {
+        title: Some("看一下版本".to_string()),
+        project: "-root-demo".to_string(),
+        source: "qoder".to_string(),
+        agent_name: "qoder".to_string(),
+        started_at: None,
+        is_subagent: false,
+    }
 }
 
 fn outcome(label: TrajectoryLabel, rules: &[&str]) -> TriageOutcome {
@@ -47,7 +58,13 @@ fn schema_is_created_and_reopening_is_a_no_op() {
     {
         let store = store_at(&path);
         store
-            .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+            .upsert_auto_label(
+                "s1",
+                identity(),
+                outcome(TrajectoryLabel::Good, &[]),
+                "h1",
+                "v1",
+            )
             .unwrap();
     }
     let reopened = store_at(&path);
@@ -64,7 +81,13 @@ fn opening_privately_creates_an_owner_only_database() {
     let state_dir = tmp_dir("private").join(".agentsight-private");
     let store = ReuseStore::open_private(&state_dir).unwrap();
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
 
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -90,6 +113,7 @@ fn round_trip_preserves_metrics_and_rules() {
     store
         .upsert_auto_label(
             "s1",
+            identity(),
             outcome(TrajectoryLabel::Bad, &["failure_then_fabrication", "R1"]),
             "h1",
             "v1",
@@ -108,7 +132,13 @@ fn round_trip_preserves_metrics_and_rules() {
 fn an_unconfirmed_label_is_returned_as_effective() {
     let store = store("unconfirmed");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Bad, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     let got = store.get_label("s1").unwrap().unwrap();
     assert_eq!(got.effective_label(), TrajectoryLabel::Bad);
@@ -119,7 +149,13 @@ fn an_unconfirmed_label_is_returned_as_effective() {
 fn a_decision_survives_a_later_retriage() {
     let store = store("survives");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Bad, &["R1"]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &["R1"]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store
         .apply_decision(
@@ -131,7 +167,13 @@ fn a_decision_survives_a_later_retriage() {
         .unwrap();
 
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Useless, &["R1"]), "h2", "v2")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Useless, &["R1"]),
+            "h2",
+            "v2",
+        )
         .unwrap();
 
     let got = store.get_label("s1").unwrap().unwrap();
@@ -156,16 +198,34 @@ fn deciding_on_an_untriaged_session_is_reported_not_invented() {
 fn events_record_the_whole_history() {
     let store = store("events");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     // An unchanged recompute is not worth an audit row.
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     assert!(store.events("s1").unwrap().is_empty());
 
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Bad, &[]), "h2", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h2",
+            "v1",
+        )
         .unwrap();
     store
         .apply_decision(
@@ -189,10 +249,22 @@ fn events_record_the_whole_history() {
 fn listing_filters_on_the_effective_label_not_the_automatic_one() {
     let store = store("filter");
     store
-        .upsert_auto_label("bad-kept", outcome(TrajectoryLabel::Bad, &[]), "h", "v1")
+        .upsert_auto_label(
+            "bad-kept",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     store
-        .upsert_auto_label("bad-fixed", outcome(TrajectoryLabel::Bad, &[]), "h", "v1")
+        .upsert_auto_label(
+            "bad-fixed",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     store
         .apply_decision(
@@ -226,13 +298,31 @@ fn listing_filters_on_the_effective_label_not_the_automatic_one() {
 fn only_useless_sessions_leave_the_retrieval_scope() {
     let store = store("excluded");
     store
-        .upsert_auto_label("u", outcome(TrajectoryLabel::Useless, &[]), "h", "v1")
+        .upsert_auto_label(
+            "u",
+            identity(),
+            outcome(TrajectoryLabel::Useless, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     store
-        .upsert_auto_label("b", outcome(TrajectoryLabel::Bad, &[]), "h", "v1")
+        .upsert_auto_label(
+            "b",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     store
-        .upsert_auto_label("g", outcome(TrajectoryLabel::Good, &[]), "h", "v1")
+        .upsert_auto_label(
+            "g",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     assert_eq!(store.excluded_sessions().unwrap(), vec!["u".to_string()]);
 }
@@ -241,7 +331,13 @@ fn only_useless_sessions_leave_the_retrieval_scope() {
 fn marking_useless_by_hand_takes_effect_immediately() {
     let store = store("manual-useless");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     assert!(store.excluded_sessions().unwrap().is_empty());
     store
@@ -259,10 +355,22 @@ fn marking_useless_by_hand_takes_effect_immediately() {
 fn batch_confirm_skips_unknown_ids_instead_of_failing() {
     let store = store("batch");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     store
-        .upsert_auto_label("s2", outcome(TrajectoryLabel::Bad, &[]), "h", "v1")
+        .upsert_auto_label(
+            "s2",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
 
     let confirmed = store
@@ -283,12 +391,24 @@ fn batch_confirm_skips_unknown_ids_instead_of_failing() {
 fn confirming_pins_the_label_against_a_later_auto_change() {
     let store = store("pin");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Useless, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Useless, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store.confirm_batch(&["s1".to_string()], "alice").unwrap();
     // The trajectory grew a real follow-up, so the rules change their mind.
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h2", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h2",
+            "v1",
+        )
         .unwrap();
 
     let got = store.get_label("s1").unwrap().unwrap();
@@ -303,14 +423,32 @@ fn confirming_pins_the_label_against_a_later_auto_change() {
 fn pending_review_rows_can_be_listed() {
     let store = store("pending");
     store
-        .upsert_auto_label("done", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "done",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store.confirm_batch(&["done".to_string()], "alice").unwrap();
     store
-        .upsert_auto_label("done", outcome(TrajectoryLabel::Bad, &[]), "h2", "v1")
+        .upsert_auto_label(
+            "done",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &[]),
+            "h2",
+            "v1",
+        )
         .unwrap();
     store
-        .upsert_auto_label("fresh", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "fresh",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
 
     let unconfirmed = store
@@ -338,6 +476,7 @@ fn rule_stats_separate_overrides_from_confirmations() {
     store
         .upsert_auto_label(
             "s1",
+            identity(),
             outcome(TrajectoryLabel::Bad, &["R1", "shared"]),
             "h",
             "v1",
@@ -346,13 +485,20 @@ fn rule_stats_separate_overrides_from_confirmations() {
     store
         .upsert_auto_label(
             "s2",
+            identity(),
             outcome(TrajectoryLabel::Bad, &["R2", "shared"]),
             "h",
             "v1",
         )
         .unwrap();
     store
-        .upsert_auto_label("s3", outcome(TrajectoryLabel::Bad, &["R1"]), "h", "v1")
+        .upsert_auto_label(
+            "s3",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &["R1"]),
+            "h",
+            "v1",
+        )
         .unwrap();
 
     store
@@ -391,7 +537,13 @@ fn rule_stats_separate_overrides_from_confirmations() {
 fn unconfirmed_rows_contribute_nothing_to_rule_stats() {
     let store = store("stats-unconfirmed");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Bad, &["R1"]), "h", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Bad, &["R1"]),
+            "h",
+            "v1",
+        )
         .unwrap();
     assert!(store.rule_override_stats().unwrap().is_empty());
 }
@@ -400,7 +552,13 @@ fn unconfirmed_rows_contribute_nothing_to_rule_stats() {
 fn a_corrupt_label_token_is_reported_not_silently_defaulted() {
     let store = store("corrupt");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v1",
+        )
         .unwrap();
     {
         let conn = store.lock().unwrap();
@@ -431,7 +589,13 @@ fn a_judgement_outranks_the_rules_without_erasing_them() {
     // measured, and overwriting the rules' own would take that with it.
     let store = store("judge-over-rules");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &["r1"]),
+            "h1",
+            "v1",
+        )
         .unwrap();
 
     let label = store
@@ -450,7 +614,13 @@ fn a_judgement_outranks_the_rules_without_erasing_them() {
 fn a_person_outranks_the_model() {
     let store = store("human-over-judge");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &["r1"]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store
         .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![4], false))
@@ -476,7 +646,13 @@ fn a_person_outranks_the_model() {
 fn a_judgement_may_not_overturn_a_person() {
     let store = store("judge-under-human");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store
         .apply_decision("s1", LabelAction::Confirm, "alice", None)
@@ -501,7 +677,13 @@ fn a_judgement_may_not_overturn_a_person() {
 fn a_downgraded_judgement_records_that_it_was_downgraded() {
     let store = store("judge-downgraded");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     let label = store
         .record_judgement("s1", &verdict(TrajectoryLabel::Unknown, vec![], true))
@@ -516,7 +698,13 @@ fn a_judgement_survives_reopening_the_database() {
     {
         let store = store_at(&path);
         store
-            .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+            .upsert_auto_label(
+                "s1",
+                identity(),
+                outcome(TrajectoryLabel::Unknown, &["r1"]),
+                "h1",
+                "v1",
+            )
             .unwrap();
         store
             .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![2, 3], false))
@@ -542,7 +730,13 @@ fn judging_an_untriaged_trajectory_is_refused() {
 fn a_judgement_is_audited() {
     let store = store("judge-audit");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &["r1"]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store
         .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![1], false))
@@ -562,10 +756,84 @@ fn a_judged_bad_leaves_retrieval_alone_but_a_judged_useless_would_not() {
     // reach it. `bad` stays retrievable — it is the counterexample source.
     let store = store("judge-retrieval");
     store
-        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Unknown, &["r1"]),
+            "h1",
+            "v1",
+        )
         .unwrap();
     store
         .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![1], false))
         .unwrap();
     assert!(store.excluded_sessions().unwrap().is_empty());
+}
+
+// ─── Display identity ────────────────────────────────────────────────────────
+
+#[test]
+fn identity_round_trips() {
+    let store = store("identity-roundtrip");
+    store
+        .upsert_auto_label(
+            "s1",
+            identity(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v",
+        )
+        .unwrap();
+    let label = store.get_label("s1").unwrap().unwrap();
+    assert_eq!(label.identity.title.as_deref(), Some("看一下版本"));
+    assert_eq!(label.identity.source, "qoder");
+    assert!(!label.identity.is_subagent);
+}
+
+#[test]
+fn set_identity_backfills_without_touching_the_verdict() {
+    // The fast path uses this for rows labelled before the identity columns
+    // existed: the verdict and the human decision must be left exactly as they
+    // were, only the display fields filled in.
+    let store = store("identity-backfill");
+    store
+        .upsert_auto_label(
+            "s1",
+            TrajectoryIdentity::default(),
+            outcome(TrajectoryLabel::Good, &[]),
+            "h",
+            "v",
+        )
+        .unwrap();
+    store
+        .apply_decision("s1", LabelAction::Confirm, "alice", None)
+        .unwrap();
+
+    store.set_identity("s1", &identity()).unwrap();
+
+    let label = store.get_label("s1").unwrap().unwrap();
+    assert_eq!(label.identity.title.as_deref(), Some("看一下版本"));
+    assert_eq!(
+        label.confirm_state,
+        ConfirmState::Confirmed,
+        "decision intact"
+    );
+    assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+}
+
+#[test]
+fn set_identity_on_a_missing_row_is_refused() {
+    let store = store("identity-missing");
+    let error = store.set_identity("ghost", &identity()).unwrap_err();
+    assert!(matches!(error, ReuseStoreError::UnknownSession(_)));
+}
+
+#[test]
+fn a_blank_title_is_stored_as_absent() {
+    assert_eq!(TrajectoryIdentity::title_from_message(Some("   ")), None);
+    assert_eq!(TrajectoryIdentity::title_from_message(None), None);
+    assert_eq!(
+        TrajectoryIdentity::title_from_message(Some("  hello  ")).as_deref(),
+        Some("hello")
+    );
 }

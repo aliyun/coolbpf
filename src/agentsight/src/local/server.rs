@@ -95,7 +95,7 @@ async fn auth_status() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "auth_enabled": false,
         "mode": "local",
-        "capabilities": ["sessions", "optimization", "atif", "settings", "agent_health"]
+        "capabilities": ["sessions", "optimization", "reuse_labels", "atif", "settings", "agent_health"]
     }))
 }
 

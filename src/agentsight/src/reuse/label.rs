@@ -152,6 +152,57 @@ impl LabelEventKind {
     }
 }
 
+/// Who a trajectory is, as opposed to what the rules think of it.
+///
+/// Copied from the trajectory store rather than joined at read time. A reviewer
+/// working down a list needs to recognise the conversation, and a session id is
+/// a UUID — it identifies without describing. Denormalising is safe here because
+/// these fields only change when the source file does, and that already forces a
+/// re-triage through the content digest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajectoryIdentity {
+    /// The opening request, which is the closest thing to a title a captured
+    /// conversation has. Absent for tool-only transcripts, which record no user
+    /// text at all — real Qoder captures are frequently of that shape.
+    pub title: Option<String>,
+    /// Working directory the session ran in, encoded as the collector stores it.
+    pub project: String,
+    /// Which product wrote the file: `qoder`, `claude-code`, `codex`.
+    pub source: String,
+    pub agent_name: String,
+    /// Start of the session as the capture recorded it, left as text because
+    /// that is how it arrives and no arithmetic is done on it here.
+    pub started_at: Option<String>,
+    /// Sub-agent transcripts share a parent's id prefix and are rarely worth
+    /// reviewing on their own; flagged so the list can say so.
+    pub is_subagent: bool,
+}
+
+/// Longest title kept. Enough to tell two requests apart on one line.
+const MAX_TITLE_CHARS: usize = 160;
+
+impl TrajectoryIdentity {
+    /// Trims a first-user-message preview into a single-line title.
+    ///
+    /// Newlines become spaces because the list renders one row per trajectory,
+    /// and a blank message is stored as absent rather than as an empty string —
+    /// the two mean the same thing to a reader and one of them sorts oddly.
+    pub fn title_from_message(message: Option<&str>) -> Option<String> {
+        let cleaned: String = message?
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.chars().count() <= MAX_TITLE_CHARS {
+            return Some(trimmed.to_string());
+        }
+        Some(trimmed.chars().take(MAX_TITLE_CHARS).collect::<String>() + "…")
+    }
+}
+
 /// The label of one trajectory: automatic verdict, human verdict, and the
 /// bookkeeping needed to keep them straight.
 ///
@@ -162,6 +213,8 @@ impl LabelEventKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLabel {
     pub session_id: String,
+    /// Who the trajectory is. Empty until a triage pass has filled it in.
+    pub identity: TrajectoryIdentity,
     pub auto_label: TrajectoryLabel,
     pub auto_reason: String,
     /// Rule identifiers behind `auto_label`; see
@@ -210,6 +263,7 @@ impl SessionLabel {
     /// Builds an unconfirmed row from a fresh automatic verdict.
     pub fn from_outcome(
         session_id: impl Into<String>,
+        identity: TrajectoryIdentity,
         outcome: TriageOutcome,
         source_content_hash: impl Into<String>,
         triage_version: impl Into<String>,
@@ -217,6 +271,7 @@ impl SessionLabel {
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            identity,
             auto_label: outcome.label,
             auto_reason: outcome.reason,
             auto_rules: outcome.rules,
@@ -339,6 +394,7 @@ impl SessionLabel {
     /// rows that were overridden precisely because the rules were wrong.
     pub fn apply_retriage(
         &mut self,
+        identity: TrajectoryIdentity,
         outcome: TriageOutcome,
         source_content_hash: impl Into<String>,
         triage_version: impl Into<String>,
@@ -352,6 +408,9 @@ impl SessionLabel {
         self.n_findings = outcome.n_findings;
         self.source_content_hash = source_content_hash.into();
         self.triage_version = triage_version.into();
+        // Identity is refreshed here too: a changed source file forces a
+        // re-triage, and a re-titled conversation should show its new title.
+        self.identity = identity;
         if let Some(human) = self.human_label {
             if previous_auto != outcome.label && human != outcome.label {
                 self.auto_changed_since_decision = true;
@@ -377,7 +436,18 @@ mod tests {
     }
 
     fn row(label: TrajectoryLabel) -> SessionLabel {
-        SessionLabel::from_outcome("s1", outcome(label), "hash-1", "triage-v1", 100)
+        SessionLabel::from_outcome("s1", identity(), outcome(label), "hash-1", "triage-v1", 100)
+    }
+
+    fn identity() -> TrajectoryIdentity {
+        TrajectoryIdentity {
+            title: Some("看一下版本".to_string()),
+            project: "-root-demo".to_string(),
+            source: "qoder".to_string(),
+            agent_name: "qoder".to_string(),
+            started_at: None,
+            is_subagent: false,
+        }
     }
 
     #[test]
@@ -432,6 +502,7 @@ mod tests {
             200,
         );
         label.apply_retriage(
+            identity(),
             outcome(TrajectoryLabel::Useless),
             "hash-2",
             "triage-v2",
@@ -448,7 +519,13 @@ mod tests {
         // still governs, and the user is prompted rather than overruled.
         let mut label = row(TrajectoryLabel::Useless);
         label.apply_decision(LabelAction::Confirm, "alice", None, 200);
-        label.apply_retriage(outcome(TrajectoryLabel::Good), "hash-2", "triage-v1", 300);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
         assert_eq!(label.effective_label(), TrajectoryLabel::Useless);
         assert!(label.auto_changed_since_decision);
     }
@@ -462,7 +539,13 @@ mod tests {
             None,
             200,
         );
-        label.apply_retriage(outcome(TrajectoryLabel::Good), "hash-2", "triage-v1", 300);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
         assert!(!label.auto_changed_since_decision);
     }
 
@@ -478,14 +561,26 @@ mod tests {
             None,
             200,
         );
-        label.apply_retriage(outcome(TrajectoryLabel::Bad), "hash-2", "triage-v1", 300);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
         assert!(!label.auto_changed_since_decision);
     }
 
     #[test]
     fn retriage_on_an_undecided_row_raises_no_flag() {
         let mut label = row(TrajectoryLabel::Unknown);
-        label.apply_retriage(outcome(TrajectoryLabel::Bad), "hash-2", "triage-v1", 300);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Bad),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
         assert!(!label.auto_changed_since_decision);
         assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
     }
@@ -494,7 +589,13 @@ mod tests {
     fn deciding_again_clears_a_pending_disagreement() {
         let mut label = row(TrajectoryLabel::Useless);
         label.apply_decision(LabelAction::Confirm, "alice", None, 200);
-        label.apply_retriage(outcome(TrajectoryLabel::Good), "hash-2", "triage-v1", 300);
+        label.apply_retriage(
+            identity(),
+            outcome(TrajectoryLabel::Good),
+            "hash-2",
+            "triage-v1",
+            300,
+        );
         assert!(label.auto_changed_since_decision);
         label.apply_decision(LabelAction::Confirm, "alice", None, 400);
         assert!(!label.auto_changed_since_decision);

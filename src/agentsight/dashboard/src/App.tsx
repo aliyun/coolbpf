@@ -4,6 +4,7 @@ import { NavBar } from './components/NavBar';
 import { AgentHealthNotifier } from './components/AgentHealthNotifier';
 import { ConversationList } from './pages/ConversationList';
 import { AgentHealthPage } from './pages/AgentHealthPage';
+import { ReuseLabelsPage } from './pages/ReuseLabelsPage';
 import { AtifViewerPage } from './pages/AtifViewerPage';
 import { TokenSavingsPage } from './pages/TokenSavingsPage';
 import { SkillMetricsPage } from './pages/SkillMetricsPage';
@@ -27,6 +28,7 @@ const DEFAULT_CAPABILITIES: AppCapability[] = [
   'security',
   'system_audit',
   'enforcement',
+  'reuse_labels',
   'atif',
   'settings',
   'agent_health',
@@ -47,6 +49,7 @@ function pathAllowed(pathname: string, capabilities: AppCapability[]): boolean {
   if (pathname.startsWith('/security')) return capabilities.includes('security');
   if (pathname.startsWith('/audit')) return capabilities.includes('system_audit');
   if (pathname.startsWith('/enforcement')) return capabilities.includes('enforcement');
+  if (pathname.startsWith('/reuse')) return capabilities.includes('reuse_labels');
   if (pathname.startsWith('/atif')) return capabilities.includes('atif');
   if (pathname.startsWith('/settings')) return capabilities.includes('settings');
   if (pathname.startsWith('/health')) return capabilities.includes('agent_health');
@@ -172,6 +175,7 @@ const AppShell: React.FC<{ status: AuthStatusResponse | null }> = ({ status }) =
             <Route path="/security" element={<SecurityObservabilityPage />} />
             <Route path="/audit" element={<SystemAuditPage />} />
             <Route path="/enforcement" element={<RiskEnforcementPage />} />
+            <Route path="/reuse" element={<ReuseLabelsPage />} />
             <Route path="/atif" element={<AtifViewerPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/health" element={<AgentHealthPage />} />

@@ -20,13 +20,15 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::label::{ConfirmState, LabelAction, LabelEventKind, SessionLabel, TrajectoryLabel};
+use super::label::{
+    ConfirmState, LabelAction, LabelEventKind, SessionLabel, TrajectoryIdentity, TrajectoryLabel,
+};
 use super::triage::{TriageMetrics, TriageOutcome};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 /// Schema version recorded in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Errors produced by [`ReuseStore`].
 #[derive(Debug, thiserror::Error)]
@@ -153,6 +155,7 @@ impl ReuseStore {
     pub fn upsert_auto_label(
         &self,
         session_id: &str,
+        identity: TrajectoryIdentity,
         outcome: TriageOutcome,
         source_content_hash: &str,
         triage_version: &str,
@@ -165,7 +168,7 @@ impl ReuseStore {
         let (label, event) = match existing {
             Some(mut row) => {
                 let previous = row.auto_label;
-                row.apply_retriage(outcome, source_content_hash, triage_version, now);
+                row.apply_retriage(identity, outcome, source_content_hash, triage_version, now);
                 let changed = previous != row.auto_label;
                 let event = changed.then_some((LabelEventKind::AutoRetriage, previous));
                 (row, event)
@@ -173,6 +176,7 @@ impl ReuseStore {
             None => (
                 SessionLabel::from_outcome(
                     session_id,
+                    identity,
                     outcome,
                     source_content_hash,
                     triage_version,
@@ -197,6 +201,38 @@ impl ReuseStore {
         }
         tx.commit()?;
         Ok(label)
+    }
+
+    /// Refreshes only the display identity of an existing row.
+    ///
+    /// Used on the triage fast path, where the verdict is unchanged but the row
+    /// predates the identity columns or the conversation was re-titled. Touches
+    /// nothing else and writes no audit event: identity is not a verdict.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::UnknownSession`] when the row is gone, or a SQL
+    /// error on failure.
+    pub fn set_identity(&self, session_id: &str, identity: &TrajectoryIdentity) -> Result<()> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE session_labels
+             SET title = ?2, project = ?3, source = ?4, agent_name = ?5,
+                 started_at = ?6, is_subagent = ?7
+             WHERE session_id = ?1",
+            params![
+                session_id,
+                identity.title,
+                identity.project,
+                identity.source,
+                identity.agent_name,
+                identity.started_at,
+                identity.is_subagent as i64,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(ReuseStoreError::UnknownSession(session_id.to_string()));
+        }
+        Ok(())
     }
 
     /// Records a model judgement on an existing row.
@@ -468,6 +504,7 @@ fn ensure_schema(conn: &mut Connection) -> Result<()> {
         match at {
             0 => migrate_0_to_1(&tx)?,
             1 => migrate_1_to_2(&tx)?,
+            2 => migrate_2_to_3(&tx)?,
             // Future steps insert here, each bumping `at` by one.
             n => return Err(ReuseStoreError::MissingMigration(n)),
         }
@@ -546,12 +583,33 @@ fn migrate_1_to_2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Adds the identity columns so a reviewer can recognise a trajectory without
+/// opening it.
+///
+/// All nullable: existing rows predate the columns and the next triage pass
+/// fills them from the trajectory store. Nothing reads them before then, and an
+/// empty title simply renders as the session id.
+fn migrate_2_to_3(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        ALTER TABLE session_labels ADD COLUMN title TEXT;
+        ALTER TABLE session_labels ADD COLUMN project TEXT;
+        ALTER TABLE session_labels ADD COLUMN source TEXT;
+        ALTER TABLE session_labels ADD COLUMN agent_name TEXT;
+        ALTER TABLE session_labels ADD COLUMN started_at TEXT;
+        ALTER TABLE session_labels ADD COLUMN is_subagent INTEGER;
+        "#,
+    )?;
+    Ok(())
+}
+
 const SELECT_COLUMNS: &str = "session_id, auto_label, auto_reason, auto_rules_json,
      human_label, human_reason, confirm_state, decided_by, decided_at_ns,
      auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
      max_agent_len, n_findings, source_content_hash, triage_version,
      created_at_ns, updated_at_ns, llm_label, llm_reason, llm_cited_steps_json,
-     llm_downgraded, llm_at_ns";
+     llm_downgraded, llm_at_ns, title, project, source, agent_name, started_at,
+     is_subagent";
 
 fn read_label(conn: &Connection, session_id: &str) -> Result<Option<SessionLabel>> {
     let found = conn
@@ -617,6 +675,14 @@ fn build_label(row: &Row<'_>) -> Result<SessionLabel> {
         },
         llm_downgraded: row.get::<_, i64>(22)? != 0,
         llm_at_ns: row.get(23)?,
+        identity: TrajectoryIdentity {
+            title: row.get(24)?,
+            project: row.get::<_, Option<String>>(25)?.unwrap_or_default(),
+            source: row.get::<_, Option<String>>(26)?.unwrap_or_default(),
+            agent_name: row.get::<_, Option<String>>(27)?.unwrap_or_default(),
+            started_at: row.get(28)?,
+            is_subagent: row.get::<_, Option<i64>>(29)?.unwrap_or(0) != 0,
+        },
     })
 }
 
@@ -635,9 +701,11 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
             max_agent_len, n_findings, source_content_hash, triage_version,
             created_at_ns, updated_at_ns, llm_label, llm_reason,
-            llm_cited_steps_json, llm_downgraded, llm_at_ns
+            llm_cited_steps_json, llm_downgraded, llm_at_ns, title, project,
+            source, agent_name, started_at, is_subagent
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                   ?27, ?28, ?29, ?30)
          ON CONFLICT(session_id) DO UPDATE SET
             auto_label = ?2, auto_reason = ?3, auto_rules_json = ?4,
             human_label = ?5, human_reason = ?6, confirm_state = ?7,
@@ -646,7 +714,8 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             n_tool_calls = ?13, max_agent_len = ?14, n_findings = ?15,
             source_content_hash = ?16, triage_version = ?17, updated_at_ns = ?19,
             llm_label = ?20, llm_reason = ?21, llm_cited_steps_json = ?22,
-            llm_downgraded = ?23, llm_at_ns = ?24",
+            llm_downgraded = ?23, llm_at_ns = ?24, title = ?25, project = ?26,
+            source = ?27, agent_name = ?28, started_at = ?29, is_subagent = ?30",
         params![
             label.session_id,
             label.auto_label.as_str(),
@@ -672,6 +741,12 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             serde_json::to_string(&label.llm_cited_steps)?,
             label.llm_downgraded as i64,
             label.llm_at_ns,
+            label.identity.title,
+            label.identity.project,
+            label.identity.source,
+            label.identity.agent_name,
+            label.identity.started_at,
+            label.identity.is_subagent as i64,
         ],
     )?;
     Ok(())
