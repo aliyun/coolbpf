@@ -8,6 +8,11 @@
 //!
 //! Round boundaries are computed the same way `server::causal` computes them, so
 //! a label and an attribution run never disagree about where a round began.
+//!
+//! This summary never accuses. It reports how much was found and whether the
+//! calls came back clean, which is enough to reach `good`, `useless` or
+//! `unknown` — but `bad` requires a model review or a person, for the reasons
+//! recorded against `verdict_driving_findings` below.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -35,11 +40,23 @@ pub fn summarize_trajectory(doc: &AtifTrajectory) -> GroundingSummary {
         let index = build_index(doc, round);
 
         summary.total_findings += index.findings.len();
-        summary.verdict_driving_findings += index
-            .findings
-            .iter()
-            .filter(|finding| finding.may_drive_verdict() && stands_without_review(finding))
-            .count();
+        // Deliberately not counted here. Every finding grounding can produce rests
+        // on a claim that string matching failed to place, and the attribution
+        // pipeline reviews such claims with a model *before* letting them accuse
+        // — `causal::run_pipeline` calls `review_unplaced_claims` then
+        // `apply_review` for exactly that reason. Counting them without the
+        // review was measured against 24 real trajectories: it produced 7 `bad`
+        // labels and all 7 were wrong. 63 of 63 accusing claims were misparses
+        // — Markdown file links (`[text](file:///path)` left as `///path)`),
+        // Chinese prose, `ELF/Mach-O`, git branch names, `alibaba/anolisa#1677`
+        // — because any token containing a slash becomes a `Path` claim and
+        // `Path` is allowed to anchor a finding.
+        //
+        // Tightening the *failure* side did not help: the noise is on the claim
+        // side, and no deterministic rule can tell an asserted fact from a
+        // sentence that happens to contain a slash. An accusation therefore needs
+        // either the model review or a person, and both live outside this
+        // function.
         rules.extend(index.findings.iter().map(|f| finding_rule(f).to_string()));
 
         // `call_verdicts` covers every call up to the round's end, not just the
@@ -70,34 +87,6 @@ pub fn summarize_trajectory(doc: &AtifTrajectory) -> GroundingSummary {
 
     summary.rules = rules.into_iter().collect();
     summary
-}
-
-/// Whether a finding stands on its own without the semantic review the
-/// attribution pipeline performs before an unplaced claim may accuse.
-///
-/// Labelling runs with no model, so it may only count findings that need none.
-/// `causal::run_pipeline` calls `review_unplaced_claims` and `apply_review`
-/// *before* consuming findings, with the comment "formatting variance is
-/// unbounded, so a claim the string rules could not place gets one semantic
-/// review before it is allowed to become a finding". Skipping that review and
-/// counting the result anyway condemned every real trajectory measured: three of
-/// three collected sessions came out `bad` purely on `ungrounded_onset`, because
-/// agents paraphrase and summarise constantly and string matching cannot place a
-/// reworded observation.
-///
-/// `FailureThenFabrication` rests on an unplaced claim too, but only together
-/// with a call that failed deterministically at high confidence whose output
-/// domain covers the claim's class. That conjunction is why the engine scores it
-/// `L2` where an ungrounded assertion alone scores `L3`, and it is solid enough
-/// to accuse without a model.
-fn stands_without_review(finding: &Finding) -> bool {
-    match finding {
-        Finding::FailureThenFabrication { .. } => true,
-        // Needs the review; see above.
-        Finding::UngroundedOnset { .. } => false,
-        // Never drives a verdict in the first place, so the question is moot.
-        Finding::RepeatedIdenticalFailure { .. } => false,
-    }
 }
 
 /// Stable identifier for a finding kind, used in the override statistics.
@@ -273,23 +262,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unplaced_claim_alone_does_not_accuse_without_a_model() {
-        // Found on real data: every collected session came out `bad` on
-        // `ungrounded_onset` alone, because agents paraphrase and string matching
-        // cannot place a reworded observation. The attribution pipeline gives such
-        // a claim one semantic review before it may accuse; labelling has no
-        // model, so it must not count it.
-        assert!(!stands_without_review(&Finding::UngroundedOnset {
-            step_id: 2,
-            claim: version_claim(),
-        }));
-        assert!(stands_without_review(&Finding::FailureThenFabrication {
-            failed_step_id: 2,
-            function_name: "bash".to_string(),
-            failure_quote: None,
-            claim_step_id: 3,
-            claim: version_claim(),
-        }));
+    fn no_deterministic_finding_ever_accuses() {
+        // Measured against 24 real trajectories: counting findings without the
+        // model review produced 7 `bad` labels and all 7 were wrong — 63 of 63
+        // accusing claims were misparsed prose, Markdown links and branch names.
+        // A trajectory carrying a fabrication-shaped finding must still come out
+        // unaccused here; `bad` is the model's call or a person's.
+        let doc = trajectory(&format!(
+            r#"{{"step_id": 1, "source": "user", "message": "版本号是多少"}},
+               {},
+               {{"step_id": 3, "source": "agent", "message": "版本是 9.9.9 。"}}"#,
+            failing_call(2, "c1")
+        ));
+        let summary = summarize_trajectory(&doc);
+        assert_eq!(summary.verdict_driving_findings, 0);
+        assert!(
+            summary.total_findings > 0,
+            "the findings are still reported, just not as accusations"
+        );
     }
 
     #[test]

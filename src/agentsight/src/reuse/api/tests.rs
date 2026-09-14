@@ -425,3 +425,177 @@ fn the_content_hash_tracks_every_byte() {
     assert_ne!(a, content_hash("{\"a\": 1}"));
     assert_eq!(a.len(), 64);
 }
+
+// ─── Human decisions ─────────────────────────────────────────────────────────
+
+fn decision(action: &str, label: Option<&str>) -> LabelDecisionRequest {
+    LabelDecisionRequest {
+        action: action.to_string(),
+        label: label.map(str::to_string),
+        reason: None,
+        decided_by: Some("alice".to_string()),
+    }
+}
+
+#[test]
+fn a_person_is_the_only_way_to_reach_bad() {
+    // The deterministic rules never accuse, so this is the whole path to `bad`.
+    let (trajectories, labels) = stores("to-bad");
+    insert(&trajectories, "s1", &failing_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    let before = &list_sessions(&labels, &SessionsQuery::default()).unwrap()[0];
+    assert_ne!(before.effective_label, "bad");
+
+    let after = apply_label(&labels, "s1", &decision("override", Some("bad"))).unwrap();
+    assert_eq!(after.effective_label, "bad");
+    assert_eq!(after.confirm_state, "overridden");
+    assert!(after.human_backed);
+    // The rules' own verdict survives for the misfire statistics.
+    assert_eq!(after.auto_label, "unknown");
+}
+
+#[test]
+fn confirming_endorses_the_automatic_verdict() {
+    let (trajectories, labels) = stores("confirm-one");
+    insert(&trajectories, "s1", &substantive_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+
+    let after = apply_label(&labels, "s1", &decision("confirm", None)).unwrap();
+    assert_eq!(after.confirm_state, "confirmed");
+    assert_eq!(after.effective_label, after.auto_label);
+    assert!(after.human_backed);
+}
+
+#[test]
+fn an_override_without_a_label_is_rejected() {
+    let (trajectories, labels) = stores("no-label");
+    insert(&trajectories, "s1", &substantive_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    let err = apply_label(&labels, "s1", &decision("override", None)).unwrap_err();
+    // Reported as missing rather than unrecognised: the caller has to add the
+    // field, not correct it.
+    assert!(matches!(
+        err,
+        ReuseApiError::MissingParameter { field: "label" }
+    ));
+    assert_eq!(err.http_status(), 400);
+}
+
+#[test]
+fn a_person_may_not_assign_unknown() {
+    // `unknown` means the rules could not tell, which is not a verdict someone
+    // who has read the trajectory would be asserting.
+    let (trajectories, labels) = stores("no-unknown");
+    insert(&trajectories, "s1", &substantive_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    let err = apply_label(&labels, "s1", &decision("override", Some("unknown"))).unwrap_err();
+    assert!(matches!(
+        err,
+        ReuseApiError::BadParameter { field: "label", .. }
+    ));
+}
+
+#[test]
+fn an_unknown_action_is_rejected() {
+    let (_trajectories, labels) = stores("bad-action");
+    let err = apply_label(&labels, "s1", &decision("maybe", None)).unwrap_err();
+    assert!(matches!(
+        err,
+        ReuseApiError::BadParameter {
+            field: "action",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn deciding_on_an_untriaged_trajectory_is_refused() {
+    // A human verdict with no automatic verdict beside it cannot later be
+    // checked for rule misfires, so the row must exist first.
+    let (_trajectories, labels) = stores("decide-missing");
+    let err = apply_label(&labels, "ghost", &decision("confirm", None)).unwrap_err();
+    assert!(matches!(
+        err,
+        ReuseApiError::Store(crate::reuse::ReuseStoreError::UnknownSession(_))
+    ));
+    // A wrong id is the caller's mistake. Answering 500 would leave them unable
+    // to tell it from a broken database.
+    assert_eq!(err.http_status(), 404);
+    assert_eq!(err.code(), "session_not_labelled");
+}
+
+#[test]
+fn batch_confirm_skips_missing_ids() {
+    let (trajectories, labels) = stores("batch");
+    insert(&trajectories, "s1", &substantive_atif());
+    insert(&trajectories, "s2", &trivial_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+
+    let confirmed = confirm_labels(
+        &labels,
+        &BatchConfirmRequest {
+            session_ids: vec!["s1".to_string(), "ghost".to_string(), "s2".to_string()],
+            decided_by: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(confirmed, vec!["s1".to_string(), "s2".to_string()]);
+}
+
+#[test]
+fn overriding_feeds_the_rule_misfire_statistics() {
+    let (trajectories, labels) = stores("stats");
+    insert(&trajectories, "s1", &failing_atif());
+    run_triage(
+        Some(&trajectories),
+        &labels,
+        &TriageQuery::default(),
+        &TriageConfig::default(),
+    )
+    .unwrap();
+    // The failing call contributes its rule id to the row.
+    assert!(
+        !list_sessions(&labels, &SessionsQuery::default()).unwrap()[0]
+            .auto_rules
+            .is_empty()
+    );
+
+    assert!(
+        label_stats(&labels).unwrap().is_empty(),
+        "nothing decided yet"
+    );
+    apply_label(&labels, "s1", &decision("override", Some("good"))).unwrap();
+    let stats = label_stats(&labels).unwrap();
+    assert!(!stats.is_empty());
+    assert!(stats.iter().all(|s| s.overridden == 1 && s.confirmed == 0));
+}

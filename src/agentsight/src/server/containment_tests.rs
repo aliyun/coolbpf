@@ -283,6 +283,7 @@ impl ApiFixture {
     ) -> web::Data<AppState> {
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::clone(&self.health),

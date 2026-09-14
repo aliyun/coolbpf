@@ -24,12 +24,14 @@
 //! this module no dependency on `server`, where causal attribution lives.
 
 pub mod api;
+pub mod judge;
 pub mod label;
 pub mod store;
 pub mod summarize;
 pub mod triage;
 
 pub use api::{ReuseApiError, SessionLabelView, SessionsQuery, TriageQuery, TriageReport};
+pub use judge::{JudgeError, JudgeResponse, JudgeVerdict};
 pub use label::{ConfirmState, LabelAction, LabelEventKind, SessionLabel, TrajectoryLabel};
 pub use store::{LabelEvent, LabelFilter, ReuseStore, ReuseStoreError, RuleOverrideStat};
 pub use summarize::summarize_trajectory;

@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use agentsight_atif::AtifTrajectory;
+use agentsight_opt::llm::LlmClient;
 use agentsight_trajectory_collector::TrajectoryStore;
 
-use super::label::{ConfirmState, SessionLabel, TrajectoryLabel};
-use super::store::{LabelFilter, ReuseStore, ReuseStoreError};
+use super::label::{ConfirmState, LabelAction, SessionLabel, TrajectoryLabel};
+use super::store::{LabelFilter, ReuseStore, ReuseStoreError, RuleOverrideStat};
 use super::summarize::summarize_trajectory;
 use super::triage::{TriageConfig, triage};
 
@@ -47,6 +48,10 @@ pub enum ReuseApiError {
     Trajectories(String),
     #[error("unknown {field} {value:?}")]
     BadParameter { field: &'static str, value: String },
+    /// Kept apart from [`Self::BadParameter`] so the caller learns whether to
+    /// add the field or correct it.
+    #[error("missing required {field}")]
+    MissingParameter { field: &'static str },
 }
 
 type Result<T> = std::result::Result<T, ReuseApiError>;
@@ -60,8 +65,12 @@ impl ReuseApiError {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::TrajectoriesUnavailable => 404,
+            // The caller named a trajectory that has not been triaged. That is
+            // their mistake, not a fault here, and reporting it as a server error
+            // leaves them unable to tell a wrong id from a broken database.
+            Self::Store(ReuseStoreError::UnknownSession(_)) => 404,
             Self::ReuseUnavailable(_) => 503,
-            Self::BadParameter { .. } => 400,
+            Self::BadParameter { .. } | Self::MissingParameter { .. } => 400,
             Self::Store(_) | Self::Trajectories(_) => 500,
         }
     }
@@ -72,6 +81,8 @@ impl ReuseApiError {
             Self::TrajectoriesUnavailable => "trajectories_unavailable",
             Self::ReuseUnavailable(_) => "reuse_unavailable",
             Self::BadParameter { .. } => "bad_parameter",
+            Self::MissingParameter { .. } => "missing_parameter",
+            Self::Store(ReuseStoreError::UnknownSession(_)) => "session_not_labelled",
             Self::Store(_) => "label_store_error",
             Self::Trajectories(_) => "trajectory_store_error",
         }
@@ -94,6 +105,62 @@ pub struct TriageQuery {
     pub session_id: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+/// Body of `POST /api/reuse/sessions/{id}/label`.
+///
+/// `confirm` endorses the automatic verdict as it stands; `override` replaces
+/// it. Both are recorded as human decisions, because a person who read the
+/// trajectory and agreed has told us something the rules could not.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LabelDecisionRequest {
+    /// `confirm` or `override`.
+    pub action: String,
+    /// Required for `override`; ignored for `confirm`.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Who decided. Falls back to `dashboard` when the caller does not say, so
+    /// the audit row is never blank.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+}
+
+/// Body of `POST /api/reuse/sessions/labels:batch-confirm`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchConfirmRequest {
+    pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub decided_by: Option<String>,
+}
+
+/// Body of `POST /api/reuse/judge`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JudgeQuery {
+    /// Judge these trajectories. When absent, picks unjudged ones the rules
+    /// could not place.
+    #[serde(default)]
+    pub session_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Outcome of one judging run.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct JudgeReport {
+    pub examined: usize,
+    pub judged: usize,
+    /// Already judged, or the trajectory could not be read.
+    pub skipped: usize,
+    /// Calls that failed. Reported rather than aborting the run, so one bad
+    /// response does not waste the requests already paid for.
+    pub failed: usize,
+    /// Verdicts reduced to `unknown` for citing no step.
+    pub downgraded: usize,
+    pub judged_good: usize,
+    pub judged_bad: usize,
+    pub judged_unclear: usize,
 }
 
 /// Query of `GET /api/reuse/sessions`.
@@ -303,6 +370,179 @@ fn tally_override(label: &SessionLabel, report: &mut TriageReport) {
     {
         report.human_overrides_in_force += 1;
     }
+}
+
+/// Trajectories judged in one request when the caller does not say.
+///
+/// Each one is a paid call, so the default is small enough to be an
+/// experiment rather than a bill.
+pub const DEFAULT_JUDGE_LIMIT: i64 = 20;
+/// Ceiling regardless of what the caller asks for.
+pub const MAX_JUDGE_LIMIT: i64 = 200;
+
+/// Asks the model to label trajectories the rules could not place.
+///
+/// Only `unknown` rows are candidates by default: that is where the
+/// deterministic pass admitted it could not tell, and paying to re-confirm a
+/// verdict the rules already reached with certainty buys nothing. A row already
+/// carrying a judgement is skipped for the same reason.
+///
+/// One failed call does not end the run. The requests already issued have been
+/// paid for, and their verdicts are worth keeping.
+///
+/// # Errors
+/// Returns [`ReuseApiError::TrajectoriesUnavailable`] with no trajectory store,
+/// or a store error while reading candidates.
+pub async fn run_judgements(
+    trajectories: &TrajectoryStore,
+    labels: &ReuseStore,
+    client: &LlmClient,
+    query: &JudgeQuery,
+) -> Result<JudgeReport> {
+    let limit = clamp(query.limit, DEFAULT_JUDGE_LIMIT, MAX_JUDGE_LIMIT);
+
+    let candidates: Vec<String> = match &query.session_ids {
+        Some(ids) => ids.clone(),
+        None => labels
+            .list_labels(&LabelFilter::default())
+            .map_err(ReuseApiError::Store)?
+            .into_iter()
+            .filter(|label| {
+                label.llm_label.is_none()
+                    && label.effective_label() == TrajectoryLabel::Unknown
+                    && !label.is_human_backed()
+            })
+            .map(|label| label.session_id)
+            .collect(),
+    };
+
+    let mut report = JudgeReport::default();
+    for session_id in candidates.into_iter().take(limit as usize) {
+        report.examined += 1;
+        let Ok(Some(atif_json)) = trajectories.get_atif_json(&session_id) else {
+            report.skipped += 1;
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<AtifTrajectory>(&atif_json) else {
+            report.skipped += 1;
+            continue;
+        };
+        match super::judge::judge_last_round(client, &doc).await {
+            Ok(verdict) => {
+                if verdict.downgraded {
+                    report.downgraded += 1;
+                }
+                match verdict.label {
+                    TrajectoryLabel::Good => report.judged_good += 1,
+                    TrajectoryLabel::Bad => report.judged_bad += 1,
+                    _ => report.judged_unclear += 1,
+                }
+                match labels.record_judgement(&session_id, &verdict) {
+                    Ok(_) => report.judged += 1,
+                    Err(error) => {
+                        log::warn!("reuse: storing a judgement for {session_id} failed: {error}");
+                        report.failed += 1;
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("reuse: judging {session_id} failed: {error}");
+                report.failed += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Default author recorded when the caller does not name one.
+const DEFAULT_DECIDED_BY: &str = "dashboard";
+
+/// Records a human decision on one trajectory's label.
+///
+/// This is the only way a trajectory reaches `bad` today. The deterministic
+/// rules never accuse (see [`super::summarize`]), so an accusation is either a
+/// person's call or, once the second-level path lands, a reviewed model verdict.
+///
+/// # Errors
+/// Returns [`ReuseApiError::BadParameter`] for an unknown action or label, and
+/// [`ReuseStoreError::UnknownSession`] via [`ReuseApiError::Store`] when the
+/// trajectory has not been triaged — a human verdict with no automatic verdict
+/// beside it cannot later be checked for rule misfires.
+pub fn apply_label(
+    labels: &ReuseStore,
+    session_id: &str,
+    request: &LabelDecisionRequest,
+) -> Result<SessionLabelView> {
+    let action = match request.action.trim() {
+        "confirm" => LabelAction::Confirm,
+        "override" => {
+            let raw = request
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or(ReuseApiError::MissingParameter { field: "label" })?;
+            let label = TrajectoryLabel::parse(raw).ok_or_else(|| ReuseApiError::BadParameter {
+                field: "label",
+                value: raw.to_string(),
+            })?;
+            // `unknown` means "the rules could not tell", which is not something
+            // a person asserts about a trajectory they have read.
+            if !TrajectoryLabel::user_assignable().contains(&label) {
+                return Err(ReuseApiError::BadParameter {
+                    field: "label",
+                    value: raw.to_string(),
+                });
+            }
+            LabelAction::Override(label)
+        }
+        other => {
+            return Err(ReuseApiError::BadParameter {
+                field: "action",
+                value: other.to_string(),
+            });
+        }
+    };
+
+    let decided_by = request
+        .decided_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_DECIDED_BY);
+    let stored = labels.apply_decision(session_id, action, decided_by, request.reason.clone())?;
+    Ok(SessionLabelView::from(&stored))
+}
+
+/// Confirms several labels at once, skipping ids that are not there.
+///
+/// Working through a list is the intended way to use this, so one stale id must
+/// not fail the whole page. Returns the ids actually confirmed.
+///
+/// # Errors
+/// Returns a store error on SQL failure.
+pub fn confirm_labels(labels: &ReuseStore, request: &BatchConfirmRequest) -> Result<Vec<String>> {
+    let decided_by = request
+        .decided_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_DECIDED_BY);
+    Ok(labels.confirm_batch(&request.session_ids, decided_by)?)
+}
+
+/// Per-rule counts of how often a person accepted or overturned the verdict it
+/// contributed to.
+///
+/// The only continuously available measure of which rules misfire. The corpus
+/// the rules were originally calibrated against is gone, and the one
+/// investigation run by hand this cycle — which found that Markdown file links
+/// were being read as fabricated paths — is not something to repeat manually.
+///
+/// # Errors
+/// Returns a store error on SQL failure.
+pub fn label_stats(labels: &ReuseStore) -> Result<Vec<RuleOverrideStat>> {
+    Ok(labels.rule_override_stats()?)
 }
 
 /// Lists label rows for the dashboard.

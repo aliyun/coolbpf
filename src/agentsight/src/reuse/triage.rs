@@ -33,11 +33,12 @@ pub const DEFAULT_MAX_AGENT_LEN: usize = 2_000;
 ///
 /// History:
 /// - `triage-1` initial rules.
-/// - `triage-2` an unplaced claim alone no longer accuses; see
-///   `super::summarize::stands_without_review`.
+/// - `triage-2` an unplaced claim alone no longer accuses.
 /// - `triage-3` tool activity counts as content, so a tool-only transcript is
 ///   no longer called empty.
-const TRIAGE_RULES_VERSION: &str = "triage-3";
+/// - `triage-4` no deterministic finding accuses at all; `bad` needs a model
+///   review or a person. See `super::summarize`.
+const TRIAGE_RULES_VERSION: &str = "triage-4";
 
 /// Thresholds for [`classify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,14 +114,17 @@ impl TriageMetrics {
 /// round 1 still disqualifies the trajectory from being labelled sound.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroundingSummary {
-    /// Findings permitted to drive a verdict (`Finding::may_drive_verdict`):
-    /// a tool failed and a later step asserted what it should have supplied, or
-    /// a fact was asserted with no traceable source.
+    /// Findings the caller has established may drive a verdict.
     ///
-    /// A repeated identical failure is deliberately *not* one of them. The
-    /// grounding engine treats it as a fact about one call that says nothing
-    /// about whether the round delivered — an agent can retry the same broken
-    /// query three times, adapt, and still answer correctly.
+    /// Always zero on the deterministic path: every finding grounding produces
+    /// rests on a claim string matching could not place, and telling an asserted
+    /// fact from a sentence containing a slash is a semantic question. Measured
+    /// on 24 real trajectories, counting them anyway produced 7 `bad` labels and
+    /// all 7 were wrong.
+    ///
+    /// A non-zero value therefore means the caller has something stronger: the
+    /// model review (`GroundingIndex::apply_review`) cleared the misparses and
+    /// these findings survived it.
     pub verdict_driving_findings: usize,
     /// All findings, including ones that merely describe the round. Counted
     /// separately because a descriptive finding must not condemn a trajectory,
@@ -401,7 +405,7 @@ mod tests {
         let a = TriageConfig::default();
         let b = TriageConfig { max_agent_len: 900 };
         assert_ne!(a.version(), b.version());
-        assert!(a.version().starts_with("triage-3/"));
+        assert!(a.version().starts_with("triage-4/"));
     }
 
     #[test]

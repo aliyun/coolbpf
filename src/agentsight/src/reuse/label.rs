@@ -125,6 +125,8 @@ pub enum LabelEventKind {
     /// The automatic verdict was recomputed, which never overwrites a human
     /// decision but is recorded so a later disagreement can be explained.
     AutoRetriage,
+    /// The second-level model judge produced a verdict.
+    LlmJudge,
 }
 
 impl LabelEventKind {
@@ -134,6 +136,7 @@ impl LabelEventKind {
             Self::Confirm => "confirm",
             Self::Override => "override",
             Self::AutoRetriage => "auto_retriage",
+            Self::LlmJudge => "llm_judge",
         }
     }
 
@@ -143,6 +146,7 @@ impl LabelEventKind {
             "confirm" => Some(Self::Confirm),
             "override" => Some(Self::Override),
             "auto_retriage" => Some(Self::AutoRetriage),
+            "llm_judge" => Some(Self::LlmJudge),
             _ => None,
         }
     }
@@ -175,6 +179,20 @@ pub struct SessionLabel {
     /// with them — the trajectory grew new rounds, most likely. A prompt to
     /// take another look, never a reason to stop honouring the human label.
     pub auto_changed_since_decision: bool,
+    /// Verdict of the second-level model judge, when one has run.
+    ///
+    /// Kept in its own column rather than replacing [`Self::auto_label`]. The
+    /// two are reached by different means and both have to stay visible: the
+    /// rules' verdict is what `label-stats` measures misfires against, and
+    /// overwriting it would erase the record of what the cheap path concluded.
+    pub llm_label: Option<TrajectoryLabel>,
+    pub llm_reason: Option<String>,
+    /// Steps the model's verdict rests on. Empty for anything but `bad`.
+    pub llm_cited_steps: Vec<usize>,
+    /// Whether the model said `bad` without citing a step and was reduced to
+    /// `unknown`. Recorded so the rate can be counted rather than guessed at.
+    pub llm_downgraded: bool,
+    pub llm_at_ns: Option<i64>,
     pub metrics: TriageMetrics,
     /// Number of grounding findings behind `auto_label`; see
     /// [`crate::reuse::triage::TriageOutcome::n_findings`].
@@ -208,6 +226,11 @@ impl SessionLabel {
             decided_by: None,
             decided_at_ns: None,
             auto_changed_since_decision: false,
+            llm_label: None,
+            llm_reason: None,
+            llm_cited_steps: Vec::new(),
+            llm_downgraded: false,
+            llm_at_ns: None,
             metrics: outcome.metrics,
             n_findings: outcome.n_findings,
             source_content_hash: source_content_hash.into(),
@@ -219,10 +242,40 @@ impl SessionLabel {
 
     /// The label every downstream consumer must obey.
     ///
-    /// Falls back to the automatic verdict while unconfirmed, which is what
-    /// makes a freshly collected trajectory immediately usable.
+    /// Precedence runs human, then model, then rules. A person who read the
+    /// trajectory outranks a model that only read the last round, and the model
+    /// outranks the rules because it can tell an asserted fact from a sentence
+    /// that merely contains a slash — the distinction the rules got wrong on
+    /// every real trajectory measured.
+    ///
+    /// Falling back to the rules while nothing else has spoken is what makes a
+    /// freshly collected trajectory immediately usable.
     pub fn effective_label(&self) -> TrajectoryLabel {
-        self.human_label.unwrap_or(self.auto_label)
+        self.human_label
+            .or(self.llm_label)
+            .unwrap_or(self.auto_label)
+    }
+
+    /// Records a model judgement, returning the event kind to audit.
+    ///
+    /// Leaves the human decision and the rules' verdict alone. A model may not
+    /// overturn a person, and erasing what the rules concluded would take the
+    /// misfire statistics with it.
+    pub fn apply_judgement(
+        &mut self,
+        label: TrajectoryLabel,
+        reason: String,
+        cited_steps: Vec<usize>,
+        downgraded: bool,
+        now_ns: i64,
+    ) -> LabelEventKind {
+        self.llm_label = Some(label);
+        self.llm_reason = Some(reason);
+        self.llm_cited_steps = cited_steps;
+        self.llm_downgraded = downgraded;
+        self.llm_at_ns = Some(now_ns);
+        self.updated_at_ns = now_ns;
+        LabelEventKind::LlmJudge
     }
 
     /// Whether a person actually signed off on this label.

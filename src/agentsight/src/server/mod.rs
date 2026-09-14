@@ -88,6 +88,9 @@ pub struct AppState {
     /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
     /// (write once when the DB first appears, read on every subsequent call).
     pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
+    /// Whether a model may be asked to label trajectories the rules could not
+    /// place. Off by default: every judgement is a paid request.
+    pub reuse_llm_judge_enabled: bool,
 }
 
 impl AppState {
@@ -298,6 +301,10 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(optimize::update_optimize_config)
                 .service(optimize::semantic_search_sessions)
                 // User preference analysis API routes (export before the shorter path)
+                .service(reuse::run_judgements)
+                .service(reuse::apply_label)
+                .service(reuse::confirm_labels)
+                .service(reuse::label_stats)
                 .service(reuse::list_sessions)
                 .service(reuse::run_triage)
                 .service(preferences::export_preferences)
@@ -558,6 +565,26 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/api/reuse/sessions", "List trajectory reuse labels"),
     (
+        "POST",
+        "/api/reuse/sessions/{session_id}/label",
+        "Confirm or override one trajectory label",
+    ),
+    (
+        "POST",
+        "/api/reuse/sessions/labels:batch-confirm",
+        "Confirm automatic labels in batch",
+    ),
+    (
+        "GET",
+        "/api/reuse/label-stats",
+        "Acceptance and override statistics by rule",
+    ),
+    (
+        "POST",
+        "/api/reuse/judge",
+        "Use the configured LLM to label unresolved trajectories (feature-gated)",
+    ),
+    (
         "GET",
         "/api/preferences",
         "User preference analysis (rule + optional LLM)",
@@ -677,6 +704,7 @@ pub async fn run_server(
     storage_path: PathBuf,
     auth_config: ServerAuthConfig,
     audit_retention_days: u64,
+    reuse_llm_judge_enabled: bool,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
@@ -832,6 +860,7 @@ pub async fn run_server(
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
         reuse_store,
+        reuse_llm_judge_enabled,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
     let audit_retention =
@@ -1073,6 +1102,10 @@ mod tests {
             "/api/security/summary",
             "/api/reuse/triage",
             "/api/reuse/sessions",
+            "/api/reuse/sessions/{session_id}/label",
+            "/api/reuse/sessions/labels:batch-confirm",
+            "/api/reuse/label-stats",
+            "/api/reuse/judge",
             "/api/docs",
         ] {
             assert!(paths.contains(&expected), "missing {expected} in /api/docs");
@@ -1265,6 +1298,7 @@ mod tests {
             auth,
             optimize: None,
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
@@ -1294,6 +1328,7 @@ mod tests {
             auth,
             optimize: None,
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }

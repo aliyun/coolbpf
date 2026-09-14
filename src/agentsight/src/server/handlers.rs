@@ -1181,6 +1181,7 @@ mod tests {
         ));
         let data = web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: blocked_parent.join("genai.db"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1395,6 +1396,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -1530,6 +1532,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1637,6 +1640,7 @@ mod tests {
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1796,6 +1800,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: storage_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1825,6 +1830,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1901,6 +1907,7 @@ mod tests {
         ));
         web::Data::new(AppState {
             reuse_store: None,
+            reuse_llm_judge_enabled: false,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -2493,6 +2500,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(AppState {
                     reuse_store: None,
+                    reuse_llm_judge_enabled: false,
                     storage_path: db_path.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -3043,6 +3051,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(AppState {
                     reuse_store: None,
+                    reuse_llm_judge_enabled: false,
                     storage_path: blocked_db.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),

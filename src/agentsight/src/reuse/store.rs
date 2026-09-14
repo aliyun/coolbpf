@@ -26,7 +26,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 /// Schema version recorded in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Errors produced by [`ReuseStore`].
 #[derive(Debug, thiserror::Error)]
@@ -195,6 +195,49 @@ impl ReuseStore {
                 now,
             )?;
         }
+        tx.commit()?;
+        Ok(label)
+    }
+
+    /// Records a model judgement on an existing row.
+    ///
+    /// Requires the row to exist for the same reason a human decision does: a
+    /// verdict with no automatic verdict beside it cannot later be compared
+    /// against one.
+    ///
+    /// # Errors
+    /// Returns [`ReuseStoreError::UnknownSession`] when the trajectory has not
+    /// been triaged, or a SQL error on failure.
+    pub fn record_judgement(
+        &self,
+        session_id: &str,
+        verdict: &super::judge::JudgeVerdict,
+    ) -> Result<SessionLabel> {
+        let now = now_ns();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+
+        let mut label = read_label(&tx, session_id)?
+            .ok_or_else(|| ReuseStoreError::UnknownSession(session_id.to_string()))?;
+        let before = label.effective_label();
+        let kind = label.apply_judgement(
+            verdict.label,
+            verdict.reason.clone(),
+            verdict.cited_steps.clone(),
+            verdict.downgraded,
+            now,
+        );
+        write_label(&tx, &label)?;
+        append_event(
+            &tx,
+            session_id,
+            Some(before.as_str()),
+            label.effective_label().as_str(),
+            kind,
+            verdict.reason.as_str().into(),
+            "model",
+            now,
+        )?;
         tx.commit()?;
         Ok(label)
     }
@@ -424,6 +467,7 @@ fn ensure_schema(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         match at {
             0 => migrate_0_to_1(&tx)?,
+            1 => migrate_1_to_2(&tx)?,
             // Future steps insert here, each bumping `at` by one.
             n => return Err(ReuseStoreError::MissingMigration(n)),
         }
@@ -485,11 +529,29 @@ fn migrate_0_to_1(tx: &rusqlite::Transaction<'_>) -> Result<()> {
 
 /// Column list shared by every read, so the indices in [`row_to_label`] stay
 /// valid.
+/// Adds the model judge's verdict alongside the rules' own.
+///
+/// Separate columns rather than a `source` marker on `auto_label`: both verdicts
+/// have to survive, since comparing them is how rule misfires get measured.
+fn migrate_1_to_2(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        ALTER TABLE session_labels ADD COLUMN llm_label TEXT;
+        ALTER TABLE session_labels ADD COLUMN llm_reason TEXT;
+        ALTER TABLE session_labels ADD COLUMN llm_cited_steps_json TEXT;
+        ALTER TABLE session_labels ADD COLUMN llm_downgraded INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE session_labels ADD COLUMN llm_at_ns INTEGER;
+        "#,
+    )?;
+    Ok(())
+}
+
 const SELECT_COLUMNS: &str = "session_id, auto_label, auto_reason, auto_rules_json,
      human_label, human_reason, confirm_state, decided_by, decided_at_ns,
      auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
      max_agent_len, n_findings, source_content_hash, triage_version,
-     created_at_ns, updated_at_ns";
+     created_at_ns, updated_at_ns, llm_label, llm_reason, llm_cited_steps_json,
+     llm_downgraded, llm_at_ns";
 
 fn read_label(conn: &Connection, session_id: &str) -> Result<Option<SessionLabel>> {
     let found = conn
@@ -543,6 +605,18 @@ fn build_label(row: &Row<'_>) -> Result<SessionLabel> {
         triage_version: row.get(16)?,
         created_at_ns: row.get(17)?,
         updated_at_ns: row.get(18)?,
+        llm_label: row
+            .get::<_, Option<String>>(19)?
+            .as_deref()
+            .map(parse_label)
+            .transpose()?,
+        llm_reason: row.get(20)?,
+        llm_cited_steps: match row.get::<_, Option<String>>(21)? {
+            Some(json) => serde_json::from_str(&json)?,
+            None => Vec::new(),
+        },
+        llm_downgraded: row.get::<_, i64>(22)? != 0,
+        llm_at_ns: row.get(23)?,
     })
 }
 
@@ -560,15 +634,19 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             human_reason, confirm_state, decided_by, decided_at_ns,
             auto_changed_since_decision, n_steps, n_user_turns, n_tool_calls,
             max_agent_len, n_findings, source_content_hash, triage_version,
-            created_at_ns, updated_at_ns
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            created_at_ns, updated_at_ns, llm_label, llm_reason,
+            llm_cited_steps_json, llm_downgraded, llm_at_ns
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
          ON CONFLICT(session_id) DO UPDATE SET
             auto_label = ?2, auto_reason = ?3, auto_rules_json = ?4,
             human_label = ?5, human_reason = ?6, confirm_state = ?7,
             decided_by = ?8, decided_at_ns = ?9,
             auto_changed_since_decision = ?10, n_steps = ?11, n_user_turns = ?12,
             n_tool_calls = ?13, max_agent_len = ?14, n_findings = ?15,
-            source_content_hash = ?16, triage_version = ?17, updated_at_ns = ?19",
+            source_content_hash = ?16, triage_version = ?17, updated_at_ns = ?19,
+            llm_label = ?20, llm_reason = ?21, llm_cited_steps_json = ?22,
+            llm_downgraded = ?23, llm_at_ns = ?24",
         params![
             label.session_id,
             label.auto_label.as_str(),
@@ -589,6 +667,11 @@ fn write_label(conn: &Connection, label: &SessionLabel) -> Result<()> {
             label.triage_version,
             label.created_at_ns,
             label.updated_at_ns,
+            label.llm_label.map(|l| l.as_str()),
+            label.llm_reason,
+            serde_json::to_string(&label.llm_cited_steps)?,
+            label.llm_downgraded as i64,
+            label.llm_at_ns,
         ],
     )?;
     Ok(())

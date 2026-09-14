@@ -30,6 +30,9 @@ pub struct LocalState {
     /// dashboard feature, so the viewer still serves and the endpoints report
     /// why rather than the process refusing to start.
     pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    /// Whether a model may be asked to label trajectories the rules could not
+    /// place. Off unless a configuration file says otherwise.
+    pub reuse_llm_judge_enabled: bool,
 }
 
 impl LocalState {
@@ -343,7 +346,11 @@ pub fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
 ///
 /// Binds to the given host:port and serves local-session API endpoints + the
 /// embedded frontend. Blocks until the server is shut down.
-pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
+pub async fn run_server(
+    host: &str,
+    port: u16,
+    reuse_llm_judge_enabled: bool,
+) -> std::io::Result<()> {
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!(
         "agentsight local server listening on http://{}:{}",
@@ -404,6 +411,7 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
         trajectory_store: Arc::new(RwLock::new(initial_store)),
         db_path,
         reuse_store,
+        reuse_llm_judge_enabled,
     });
     let optimize_state = optimize::OptimizeState::init(
         local_state
@@ -463,6 +471,10 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .service(optimize::update_optimize_config)
             .service(optimize::semantic_search_sessions)
             // User preference analysis API (registered before api_fallback)
+            .service(reuse::run_judgements)
+            .service(reuse::apply_label)
+            .service(reuse::confirm_labels)
+            .service(reuse::label_stats)
             .service(reuse::list_sessions)
             .service(reuse::run_triage)
             .service(preferences::export_preferences)

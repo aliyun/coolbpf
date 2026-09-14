@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::reuse::JudgeVerdict;
 use crate::reuse::label::{ConfirmState, LabelAction, TrajectoryLabel};
 use crate::reuse::triage::{TriageMetrics, TriageOutcome};
 
@@ -411,4 +412,160 @@ fn a_corrupt_label_token_is_reported_not_silently_defaulted() {
     }
     let err = store.get_label("s1").unwrap_err();
     assert!(matches!(err, ReuseStoreError::Corrupt { .. }));
+}
+
+// ─── The model judge's lane ──────────────────────────────────────────────────
+
+fn verdict(label: TrajectoryLabel, cited: Vec<usize>, downgraded: bool) -> JudgeVerdict {
+    JudgeVerdict {
+        label,
+        reason: "模型理由".to_string(),
+        cited_steps: cited,
+        downgraded,
+    }
+}
+
+#[test]
+fn a_judgement_outranks_the_rules_without_erasing_them() {
+    // Both verdicts have to survive: comparing them is how rule misfires get
+    // measured, and overwriting the rules' own would take that with it.
+    let store = store("judge-over-rules");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .unwrap();
+
+    let label = store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![4], false))
+        .unwrap();
+    assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
+    assert_eq!(
+        label.auto_label,
+        TrajectoryLabel::Unknown,
+        "rules preserved"
+    );
+    assert_eq!(label.llm_cited_steps, vec![4]);
+}
+
+#[test]
+fn a_person_outranks_the_model() {
+    let store = store("human-over-judge");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .unwrap();
+    store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![4], false))
+        .unwrap();
+
+    let label = store
+        .apply_decision(
+            "s1",
+            LabelAction::Override(TrajectoryLabel::Good),
+            "alice",
+            None,
+        )
+        .unwrap();
+    assert_eq!(label.effective_label(), TrajectoryLabel::Good);
+    assert_eq!(
+        label.llm_label,
+        Some(TrajectoryLabel::Bad),
+        "model preserved"
+    );
+}
+
+#[test]
+fn a_judgement_may_not_overturn_a_person() {
+    let store = store("judge-under-human");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .unwrap();
+    store
+        .apply_decision("s1", LabelAction::Confirm, "alice", None)
+        .unwrap();
+
+    let label = store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![9], false))
+        .unwrap();
+    assert_eq!(
+        label.effective_label(),
+        TrajectoryLabel::Good,
+        "the human decision stands"
+    );
+    assert_eq!(
+        label.llm_label,
+        Some(TrajectoryLabel::Bad),
+        "still recorded"
+    );
+}
+
+#[test]
+fn a_downgraded_judgement_records_that_it_was_downgraded() {
+    let store = store("judge-downgraded");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Good, &[]), "h1", "v1")
+        .unwrap();
+    let label = store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Unknown, vec![], true))
+        .unwrap();
+    assert!(label.llm_downgraded);
+    assert!(label.llm_cited_steps.is_empty());
+}
+
+#[test]
+fn a_judgement_survives_reopening_the_database() {
+    let path = tmp_dir("judge-reopen").join("reuse.db");
+    {
+        let store = store_at(&path);
+        store
+            .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+            .unwrap();
+        store
+            .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![2, 3], false))
+            .unwrap();
+    }
+    let store = store_at(&path);
+    let label = store.get_label("s1").unwrap().unwrap();
+    assert_eq!(label.llm_label, Some(TrajectoryLabel::Bad));
+    assert_eq!(label.llm_cited_steps, vec![2, 3]);
+    assert_eq!(label.effective_label(), TrajectoryLabel::Bad);
+}
+
+#[test]
+fn judging_an_untriaged_trajectory_is_refused() {
+    let store = store("judge-missing");
+    let error = store
+        .record_judgement("ghost", &verdict(TrajectoryLabel::Bad, vec![1], false))
+        .unwrap_err();
+    assert!(matches!(error, ReuseStoreError::UnknownSession(_)));
+}
+
+#[test]
+fn a_judgement_is_audited() {
+    let store = store("judge-audit");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .unwrap();
+    store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![1], false))
+        .unwrap();
+    let events = store.events("s1").unwrap();
+    let judged = events
+        .iter()
+        .find(|e| e.action == LabelEventKind::LlmJudge.as_str())
+        .expect("the judgement must leave a trail");
+    assert_eq!(judged.to_label, "bad");
+    assert_eq!(judged.decided_by, "model");
+}
+
+#[test]
+fn a_judged_bad_leaves_retrieval_alone_but_a_judged_useless_would_not() {
+    // `excluded_sessions` reads the effective label, so a model verdict has to
+    // reach it. `bad` stays retrievable — it is the counterexample source.
+    let store = store("judge-retrieval");
+    store
+        .upsert_auto_label("s1", outcome(TrajectoryLabel::Unknown, &["r1"]), "h1", "v1")
+        .unwrap();
+    store
+        .record_judgement("s1", &verdict(TrajectoryLabel::Bad, vec![1], false))
+        .unwrap();
+    assert!(store.excluded_sessions().unwrap().is_empty());
 }

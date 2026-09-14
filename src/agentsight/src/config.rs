@@ -339,6 +339,8 @@ pub struct JsonFeatures {
     pub sls_logtail: Option<bool>,
     /// Qoder/QoderWork trajectory collection into trajectories.db.
     pub trajectory_collection: Option<JsonTrajectoryCollectionFeature>,
+    /// Second-level model labelling of collected trajectories.
+    pub reuse_llm_judge: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -712,6 +714,12 @@ pub struct FeatureFlags {
     pub trajectory_scan_interval_secs: u64,
     /// Optional override of the trajectory projects directories to scan.
     pub trajectory_scan_dirs: Option<Vec<String>>,
+    /// Whether a model may be asked to label collected trajectories.
+    ///
+    /// Off by default because every judgement is a paid request. The
+    /// deterministic rules keep working without it; they simply never reach
+    /// `bad`, which then only a person can assign.
+    pub reuse_llm_judge_enabled: bool,
 }
 
 impl Default for FeatureFlags {
@@ -734,6 +742,7 @@ impl Default for FeatureFlags {
             trajectory_collection_enabled: false,
             trajectory_scan_interval_secs: DEFAULT_TRAJECTORY_SCAN_INTERVAL_SECS,
             trajectory_scan_dirs: None,
+            reuse_llm_judge_enabled: false,
         }
     }
 }
@@ -1243,6 +1252,7 @@ impl AgentsightConfig {
                 audit_enabled: features.audit.unwrap_or(false),
                 token_consumption_enabled: features.token_consumption.unwrap_or(false),
                 sls_logtail_enabled: features.sls_logtail.unwrap_or(false),
+                reuse_llm_judge_enabled: features.reuse_llm_judge.unwrap_or(false),
                 trajectory_collection_enabled: features
                     .trajectory_collection
                     .as_ref()

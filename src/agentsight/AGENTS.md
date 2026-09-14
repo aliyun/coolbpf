@@ -261,6 +261,10 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
 | `/api/reuse/triage` | POST | 用确定性规则为已采集轨迹生成自动标签（可选 `session_id`, `limit`） |
 | `/api/reuse/sessions` | GET | 列出有效标签已解析的轨迹标签（支持 `label`, `confirm_state`, `changed_since_decision`, `limit`） |
+| `/api/reuse/sessions/{session_id}/label` | POST | 人工确认或覆盖单条轨迹标签；只有人工或 LLM 可以标为 `bad` |
+| `/api/reuse/sessions/labels:batch-confirm` | POST | 批量确认自动标签 |
+| `/api/reuse/label-stats` | GET | 按规则统计人工接受与覆盖情况 |
+| `/api/reuse/judge` | POST | 用已配置 LLM 判定规则无法归类的轨迹；仅在 `features.reuse_llm_judge=true` 时可用，调用会产生费用 |
 | `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
 | `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
 | `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |
@@ -311,6 +315,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
 | 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
+| 轨迹 LLM 判定 | `features.reuse_llm_judge` | `false` | 允许 `POST /api/reuse/judge` 调用已配置 LLM 判定规则无法归类的轨迹；每次调用会产生费用 |
 
 ### 运行时资源上限（`runtime_limits`）
 
