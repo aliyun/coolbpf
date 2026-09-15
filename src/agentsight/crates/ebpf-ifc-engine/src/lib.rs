@@ -2114,11 +2114,47 @@ impl PinnedEngine {
         let data = pinned_map_data(&self.paths, "rb")?;
         let mut ring =
             RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
+        let fix_fd = ring.as_raw_fd();
+
+        // Fix: advance consumer to producer pos via raw mmap, then reopen ring.
+        // This bypasses stale BPF_RINGBUF_BUSY_BIT headers at the old consumer offset.
+        unsafe {
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let cp = libc::mmap(
+                std::ptr::null_mut(),
+                pg,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fix_fd,
+                0,
+            );
+            if cp != libc::MAP_FAILED {
+                let pp = libc::mmap(
+                    std::ptr::null_mut(),
+                    pg,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    fix_fd,
+                    pg as libc::off_t,
+                );
+                if pp != libc::MAP_FAILED {
+                    let prod = (*(pp as *const std::sync::atomic::AtomicUsize))
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    (*(cp as *const std::sync::atomic::AtomicUsize))
+                        .store(prod, std::sync::atomic::Ordering::SeqCst);
+                    libc::munmap(pp, pg);
+                }
+                libc::munmap(cp, pg);
+            }
+        }
+        // Reopen ring so Aya reads the updated consumer position from mmap.
+        drop(ring);
+        let data = pinned_map_data(&self.paths, "rb")?;
+        let mut ring =
+            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("rb reopen: {e}")))?;
         let fd = ring.as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
-            // Aya initializes a reopened ring's producer cache at zero, even when
-            // the pinned map's shared consumer offset is already nonzero.
             if !ring_readable(fd, 100)? {
                 continue;
             }
@@ -2605,6 +2641,47 @@ impl Loader {
     pub fn run(&mut self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
         let mut ring = RingBuf::try_from(self.bpf.map_mut("rb").ok_or_else(|| err("rb missing"))?)
             .map_err(|e| err(format!("rb: {e}")))?;
+        let fix_fd = ring.as_raw_fd();
+
+        // Fix: advance consumer to producer pos via raw mmap, then reopen ring.
+        // This bypasses stale BPF_RINGBUF_BUSY_BIT headers at the old consumer offset.
+        unsafe {
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let cp = libc::mmap(
+                std::ptr::null_mut(),
+                pg,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fix_fd,
+                0,
+            );
+            if cp != libc::MAP_FAILED {
+                let pp = libc::mmap(
+                    std::ptr::null_mut(),
+                    pg,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    fix_fd,
+                    pg as libc::off_t,
+                );
+                if pp != libc::MAP_FAILED {
+                    let prod = (*(pp as *const std::sync::atomic::AtomicUsize))
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    (*(cp as *const std::sync::atomic::AtomicUsize))
+                        .store(prod, std::sync::atomic::Ordering::SeqCst);
+                    libc::munmap(pp, pg);
+                }
+                libc::munmap(cp, pg);
+            }
+        }
+        // Reopen ring so Aya reads the updated consumer position from mmap.
+        drop(ring);
+        let mut ring = RingBuf::try_from(
+            self.bpf
+                .map_mut("rb")
+                .ok_or_else(|| err("rb missing on reopen"))?,
+        )
+        .map_err(|e| err(format!("rb reopen: {e}")))?;
         let fd = ring.as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
