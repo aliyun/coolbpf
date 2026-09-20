@@ -29,7 +29,16 @@ export const HEALTH_PATH = '/health';
  */
 export const OBSERVABILITY_PATH = '/observability';
 
-/** Landing path of last resort, for a capability set that advertises no route. */
+/**
+ * Landing path of last resort, for a capability set that advertises no route.
+ *
+ * Deliberately not guard-accepted: `pathAllowed(LOCAL_DEFAULT_PATH, [])` is
+ * false, because an empty set advertises nothing to render. Both servers seed
+ * every capability list with `sessions` unconditionally — `detect_capabilities`
+ * in `src/server/capabilities.rs` and the fixed list in `src/local/server.rs` —
+ * so the empty set is a case production cannot currently produce, and this is a
+ * redirect target for it rather than a page it serves.
+ */
 export const LOCAL_DEFAULT_PATH = '/sessions';
 
 /** Navigation order. Doubles as the landing-page preference order. */
@@ -78,8 +87,10 @@ export function pathAllowed(pathname: string, capabilities: readonly AppCapabili
  * observability, then the first other advertised page (#2723).
  *
  * Scanning `NAV_ROUTES` instead of a fixed prefix chain keeps the answer
- * inside the advertised capability set, so the redirect target is always a
- * path `pathAllowed` accepts and the guard cannot bounce back and forth.
+ * inside the advertised capability set, so for every non-empty capability set
+ * the redirect target is a path `pathAllowed` accepts and the guard cannot
+ * bounce back and forth. The empty set is the single exception and falls
+ * through to `LOCAL_DEFAULT_PATH` — see the assumption recorded there.
  */
 export function defaultPath(capabilities: readonly AppCapability[]): string {
   const route = NAV_ROUTES.find((item) => capabilities.includes(item.capability));

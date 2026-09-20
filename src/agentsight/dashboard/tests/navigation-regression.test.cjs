@@ -37,11 +37,18 @@ test('the landing page falls back to Agent observability, then to the nav order'
 });
 
 test('a capability set advertising no page still gets a landing path', () => {
+  // The one documented exception to "the landing path is guard-accepted": an
+  // empty set advertises nothing to render, so the fallback is a redirect
+  // target rather than a page the guard lets through. Both servers seed every
+  // capability list with `sessions`, so production never reaches it — pin it
+  // anyway, so the exception stays a stated one instead of a silent gap.
   assert.equal(defaultPath([]), LOCAL_DEFAULT_PATH);
+  assert.equal(pathAllowed(LOCAL_DEFAULT_PATH, []), false);
 });
 
 test('the landing path is always one the capability guard accepts', () => {
   // A redirect target the guard rejects would bounce between the two forever.
+  // `[]` is not listed here: it is the documented exception, asserted above.
   const advertised = [
     EVERY_CAPABILITY,
     without('agent_health'),
