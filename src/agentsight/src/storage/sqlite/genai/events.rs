@@ -9,6 +9,31 @@ use crate::genai::semantic::GenAISemanticEvent;
 
 // ─── Query result types ────────────────────────────────────────────────────────
 
+/// Hard cap on rows returned by [`GenAISqliteStore::get_preference_window_events`]
+/// — preference analysis is a bounded-cost, best-effort feature. 300 keeps the
+/// per-request memory peak modest: `output_messages` alone can reach hundreds
+/// of KB per row. Counts individual event rows (one LLM call each); the
+/// trajectory source uses a much smaller per-document cap
+/// (`PREFERENCE_TRAJECTORY_MAX_ROWS`) because each document bundles a whole
+/// session.
+pub const PREFERENCE_WINDOW_MAX_ROWS: usize = 300;
+
+/// Raw `genai_events` columns for one row of a preference analysis window.
+///
+/// Deliberately unparsed: `user_query` still carries agent template noise and
+/// `output_messages` is the raw wire-capture JSON. Mapping these into the
+/// analysis shape is the preference layer's job, which keeps the dependency
+/// pointing downwards from analysis to storage.
+#[derive(Debug, Clone)]
+pub struct PreferenceWindowRow {
+    pub id: i64,
+    pub session_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub start_timestamp_ns: i64,
+    pub user_query: Option<String>,
+    pub output_messages: Option<String>,
+}
+
 /// One LLM call event within a trace
 #[derive(Debug, serde::Serialize)]
 pub struct TraceEventDetail {
@@ -99,6 +124,51 @@ impl GenAISqliteStore {
                 interruption_type: row.get(20)?,
             })
         })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Fetch the narrow column set preference analysis needs for completed
+    /// main-flow LLM calls at or after `since_ns`, oldest first, capped at
+    /// [`PREFERENCE_WINDOW_MAX_ROWS`]. Read-only: no schema or writes.
+    /// `input_messages` is deliberately not selected — no rule reads it and
+    /// it would multiply the memory peak of a window fetch.
+    ///
+    /// Rows are returned as raw columns: interpreting them (stripping agent
+    /// template noise, mining tool names) belongs to the preference layer
+    /// above, so the store does not depend upwards on it.
+    pub fn get_preference_window_events(
+        &self,
+        since_ns: i64,
+    ) -> Result<Vec<PreferenceWindowRow>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, conversation_id, start_timestamp_ns,
+                    user_query, output_messages
+             FROM genai_events
+             WHERE start_timestamp_ns >= ?1
+               AND event_type = 'llm_call'
+               AND status = 'complete'
+               AND call_kind = 'main'
+             ORDER BY start_timestamp_ns ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![since_ns, PREFERENCE_WINDOW_MAX_ROWS as i64],
+            |row| {
+                Ok(PreferenceWindowRow {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    start_timestamp_ns: row.get(3)?,
+                    user_query: row.get(4)?,
+                    output_messages: row.get(5)?,
+                })
+            },
+        )?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);

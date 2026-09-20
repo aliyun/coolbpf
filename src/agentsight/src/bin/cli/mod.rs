@@ -38,7 +38,10 @@ pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerA
 }
 
 /// Loads the server configuration, falling back to safe defaults.
-#[cfg(all(feature = "server", target_os = "linux"))]
+///
+/// Not Linux-only: every function it calls is platform-independent, and the
+/// macOS viewer needs the same flags to decide what it may switch on.
+#[cfg(feature = "server")]
 pub fn load_server_config(config_path: &str) -> agentsight::config::AgentsightConfig {
     use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
 

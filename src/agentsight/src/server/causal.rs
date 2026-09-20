@@ -16,11 +16,12 @@ use agentsight_opt::llm::{ChatMessage, LlmClient};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
+use super::causal_store;
 use crate::storage::sqlite::GenAISqliteStore;
 
 // Deterministic grounding engine: establishes what can be checked before the
 // model is asked anything.
-mod grounding;
+use crate::grounding;
 
 // ─── In-memory cache ─────────────────────────────────────────────────────────
 //
@@ -365,6 +366,52 @@ pub async fn run_causal_attribution(
                 }
             }
         }
+
+        // Missed in memory — the durable store is next, before the pipeline is
+        // paid for again. A restart empties the memory cache but not this one.
+        if let Some(store) = state.causal_store.as_deref() {
+            let key = causal_store::CaseKey {
+                session_key: &cache_key.0,
+                round: cache_key.1,
+                complaint: &req.complaint,
+            };
+            match store.get(key) {
+                Ok(Some(case_json)) => {
+                    // The stored bytes are exactly what the client received
+                    // last time; replaying them verbatim cannot drift.
+                    match serde_json::from_str::<serde_json::Value>(&case_json) {
+                        Ok(case_value) => {
+                            log::info!(
+                                "Causal attribution: restored case for {} round={:?} from causal.db",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "case": case_value,
+                                "cached": true,
+                            }));
+                        }
+                        Err(error) => {
+                            // A corrupt row must not wedge the feature: log it
+                            // and fall through to a fresh run, which overwrites.
+                            log::warn!(
+                                "Causal attribution: stored case for {} round={:?} is unparsable ({error}); re-running",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "Causal attribution: reading causal.db for {} round={:?} failed: {error}; re-running",
+                        resolved_session_id,
+                        req.round_index,
+                    );
+                }
+            }
+        }
     }
 
     let trajectory = match load_trajectory(
@@ -406,6 +453,34 @@ pub async fn run_causal_attribution(
 
     match run_pipeline(&client, &trajectory, round, &req).await {
         Ok(case_) => {
+            // Write through to the durable store first: it is what survives the
+            // restart, and the run has already been paid for.
+            if let Some(store) = state.causal_store.as_deref() {
+                let key = causal_store::CaseKey {
+                    session_key: &cache_key.0,
+                    round: cache_key.1,
+                    complaint: &req.complaint,
+                };
+                match serde_json::to_string(&case_) {
+                    Ok(case_json) => {
+                        if let Err(error) = store.put(key, &case_json) {
+                            log::warn!(
+                                "Causal attribution: persisting the case for {} round={:?} failed: {error}",
+                                resolved_session_id,
+                                req.round_index,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Causal attribution: serialising the case for {} round={:?} failed: {error}",
+                            resolved_session_id,
+                            req.round_index,
+                        );
+                    }
+                }
+            }
+
             // Stash successful run in the cache so reopening the panel is instant.
             // Bump the clock, evict the oldest entry when the cap is exceeded.
             if let Ok(mut guard) = causal_cache().lock() {

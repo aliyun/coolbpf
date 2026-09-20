@@ -1,5 +1,14 @@
 # 更新日志
 
+## 未发布
+
+### 新功能
+- 新增 `GET /api/preferences` 与 `GET /api/preferences/export`，从近期会话中识别用户的工作习惯（语言偏好、先出方案再动手、要求补测试、纠正模式、常用工具倾向），并通过 `/api/preferences/turns` 返回本次分析所依据的用户输入。分析在请求时实时计算，Linux 读取 `genai_events`，其他平台读取已采集的轨迹，因此不产生需要迁移或会过期的派生数据。
+- 新增 `GET /api/trajectories/steps`，按派生类别（`user_input`、`system`、`agent_message`、`thinking`、`tool_call`、`tool_result`）检索 ATIF 步骤，并随每个命中返回其上下文步骤。类别是多标签的：同一个 agent 步骤可能同时包含消息、推理、工具调用与观测结果。
+
+### 修复
+- macOS `trace` 路径下初始化日志，使轨迹采集失败可见，不再被静默丢弃。
+
 ## 0.12.1
 
 ### 破坏性变更

@@ -6,12 +6,14 @@
 pub mod auth;
 mod capabilities;
 mod causal;
+pub(crate) mod causal_store;
 mod containment;
 mod enforcement;
 mod handlers;
 pub mod optimize;
+mod preferences;
+mod reuse;
 mod secret;
-pub mod semantic_search;
 mod system_audit;
 mod token_savings;
 
@@ -76,11 +78,26 @@ pub struct AppState {
     pub auth: Arc<DashboardAuth>,
     /// Optimization analysis state (LLM config + result store)
     pub optimize: Option<Arc<optimize::OptimizeState>>,
+    /// Trajectory reuse labels (`reuse.db`).
+    ///
+    /// `None` when the private store could not be opened: labels are a
+    /// dashboard feature, so the rest of the server still serves and the
+    /// endpoints report why rather than the process refusing to start.
+    pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
     /// Read-only store over collected trajectories (`trajectories.db`)
     ///
     /// Wrapped in `RwLock` so `trajectory_store()` can memoize lazy opens
     /// (write once when the DB first appears, read on every subsequent call).
     pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
+    /// Whether a model may be asked to label trajectories the rules could not
+    /// place. Off by default: every judgement is a paid request.
+    pub reuse_llm_judge_enabled: bool,
+    /// Durable causal attribution results (`causal.db`).
+    ///
+    /// `None` when the private store could not be opened: attribution still
+    /// runs and still serves from its in-memory cache, it just stops surviving
+    /// restarts — a degraded mode beats refusing to serve at all.
+    pub causal_store: Option<Arc<causal_store::CausalCaseStore>>,
 }
 
 impl AppState {
@@ -290,11 +307,22 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(optimize::get_optimize_config)
                 .service(optimize::update_optimize_config)
                 .service(optimize::semantic_search_sessions)
+                // User preference analysis API routes (export before the shorter path)
+                .service(reuse::run_judgements)
+                .service(reuse::apply_label)
+                .service(reuse::confirm_labels)
+                .service(reuse::label_stats)
+                .service(reuse::list_sessions)
+                .service(reuse::run_triage)
+                .service(preferences::export_preferences)
+                .service(preferences::get_preferences)
+                .service(preferences::get_preference_turns)
                 // Causal attribution API routes
                 .service(causal::run_causal_attribution)
-                // Trajectory collection API routes (filters before the dynamic segment)
+                // Trajectory collection API routes (static paths before the dynamic segment)
                 .service(handlers::list_trajectories)
                 .service(handlers::trajectory_filters)
+                .service(handlers::list_trajectory_steps)
                 .service(handlers::get_trajectory_detail)
                 // API self-documentation
                 .service(web::resource("/docs").route(web::get().to(api_docs)))
@@ -537,12 +565,58 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/api/optimize/config", "Optimization config"),
     ("POST", "/api/optimize/config", "Update optimization config"),
+    (
+        "POST",
+        "/api/reuse/triage",
+        "Label collected trajectories with deterministic rules",
+    ),
+    ("GET", "/api/reuse/sessions", "List trajectory reuse labels"),
+    (
+        "POST",
+        "/api/reuse/sessions/{session_id}/label",
+        "Confirm or override one trajectory label",
+    ),
+    (
+        "POST",
+        "/api/reuse/sessions/labels:batch-confirm",
+        "Confirm automatic labels in batch",
+    ),
+    (
+        "GET",
+        "/api/reuse/label-stats",
+        "Acceptance and override statistics by rule",
+    ),
+    (
+        "POST",
+        "/api/reuse/judge",
+        "Use the configured LLM to label unresolved trajectories (feature-gated)",
+    ),
+    (
+        "GET",
+        "/api/preferences",
+        "User preference analysis (rule + optional LLM)",
+    ),
+    (
+        "GET",
+        "/api/preferences/export",
+        "User preferences as Markdown",
+    ),
+    (
+        "GET",
+        "/api/preferences/turns",
+        "Raw user turns for agent-side LLM reasoning",
+    ),
     ("POST", "/api/causal-attribution", "Run causal attribution"),
     ("GET", "/api/trajectories", "List collected trajectories"),
     (
         "GET",
         "/api/trajectories/filters",
         "Trajectory filter values",
+    ),
+    (
+        "GET",
+        "/api/trajectories/steps",
+        "Steps by derived category, with surrounding context",
     ),
     ("GET", "/api/trajectories/{session_id}", "Trajectory detail"),
 ];
@@ -637,6 +711,7 @@ pub async fn run_server(
     storage_path: PathBuf,
     auth_config: ServerAuthConfig,
     audit_retention_days: u64,
+    reuse_llm_judge_enabled: bool,
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
@@ -651,6 +726,26 @@ pub async fn run_server(
         EvaluationStore::new_with_path(&storage_path)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
+
+    // Labels sit beside the other private databases: opening tightens the
+    // directory to 0700, which is why it must not be the shared data directory.
+    let reuse_store = match crate::reuse::ReuseStore::open_private(&state_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            log::warn!("Reuse label store unavailable, labels disabled: {error}");
+            None
+        }
+    };
+
+    // Attribution cases are paid pipeline runs; losing them on restart means
+    // paying again for the same answer. Same degrade-don't-die rule as labels.
+    let causal_store = match causal_store::CausalCaseStore::open_private(&state_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            log::warn!("Causal case store unavailable, results will not persist: {error}");
+            None
+        }
+    };
 
     let enforcement_client = EnforcementClient::new(capabilities::enforcer_socket_path());
     let enforcement = Arc::new(EnforcementCoordinator::new(
@@ -781,6 +876,9 @@ pub async fn run_server(
         security_observability,
         auth: dashboard_auth.clone(),
         optimize: Some(optimize_state),
+        reuse_store,
+        reuse_llm_judge_enabled,
+        causal_store,
         trajectory_store: Arc::new(RwLock::new(trajectory_store)),
     });
     let audit_retention =
@@ -1020,6 +1118,12 @@ mod tests {
             "/api/token-savings",
             "/api/agent-health",
             "/api/security/summary",
+            "/api/reuse/triage",
+            "/api/reuse/sessions",
+            "/api/reuse/sessions/{session_id}/label",
+            "/api/reuse/sessions/labels:batch-confirm",
+            "/api/reuse/label-stats",
+            "/api/reuse/judge",
             "/api/docs",
         ] {
             assert!(paths.contains(&expected), "missing {expected} in /api/docs");
@@ -1211,6 +1315,9 @@ mod tests {
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             trajectory_store: Arc::new(RwLock::new(None)),
         })
     }
@@ -1239,6 +1346,9 @@ mod tests {
             security_observability: SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
     }

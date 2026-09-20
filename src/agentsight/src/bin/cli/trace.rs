@@ -53,7 +53,7 @@ impl TraceCommand {
 
         #[cfg(not(target_os = "linux"))]
         {
-            agentsight::local::trace::run_local_trace();
+            agentsight::local::trace::run_local_trace(self.verbose);
         }
     }
 }

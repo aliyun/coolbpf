@@ -19,7 +19,7 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
 use super::AppState;
 use super::secret;
-use super::semantic_search;
+use crate::semantic_search;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
@@ -177,7 +177,7 @@ impl OptimizeState {
         })
     }
 
-    fn snapshot(&self) -> OptLlmConfig {
+    pub(crate) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
@@ -231,6 +231,29 @@ pub async fn semantic_search_sessions(
         }
     };
     let request = body.into_inner();
+
+    // Sessions labelled `useless` are out of retrieval scope by design — the
+    // whole trajectory was judged to have nothing worth putting in front of a
+    // future search. Filtering here covers every caller of the endpoint, and
+    // before the minimum-count check so a fully-excluded request reads as
+    // empty rather than shrinking past the LLM threshold.
+    let request = match data.reuse_store.as_deref() {
+        Some(store) => match store.excluded_sessions() {
+            Ok(excluded) => semantic_search::filter_excluded(
+                request,
+                &excluded
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(error) => {
+                // A store failure must not take search down: the labels are a
+                // filter, not a dependency. Search everything rather than nothing.
+                log::warn!("reuse: reading excluded sessions failed, ranking unfiltered: {error}");
+                request
+            }
+        },
+        None => request,
+    };
     semantic_search::handle_semantic_search(&client, &request).await
 }
 

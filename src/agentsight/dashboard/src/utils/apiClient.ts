@@ -137,6 +137,103 @@ async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ─── Trajectory reuse labels ────────────────────────────────────────────────
+
+/**
+ * Runs the deterministic labelling pass.
+ *
+ * Safe to call repeatedly: unchanged content under unchanged rules is skipped,
+ * so this is a refresh rather than a rebuild.
+ */
+export async function runReuseTriage(limit?: number): Promise<TriageReport> {
+  const qs = limit === undefined ? '' : `?limit=${limit}`;
+  return apiFetch<TriageReport>(`${API_BASE}/api/reuse/triage${qs}`, { method: 'POST' });
+}
+
+/** Lists labelled trajectories, newest decision first. */
+export async function fetchReuseSessions(filter: {
+  label?: TrajectoryLabel;
+  confirmState?: ConfirmState;
+  limit?: number;
+} = {}): Promise<SessionsResponse> {
+  const params = new URLSearchParams();
+  if (filter.label) params.set('label', filter.label);
+  if (filter.confirmState) params.set('confirm_state', filter.confirmState);
+  if (filter.limit !== undefined) params.set('limit', String(filter.limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch<SessionsResponse>(`${API_BASE}/api/reuse/sessions${qs}`);
+}
+
+/**
+ * Records a human decision on one label.
+ *
+ * `confirm` endorses the automatic verdict; `override` replaces it. Both count
+ * as a person having spoken.
+ */
+export async function decideReuseLabel(
+  sessionId: string,
+  decision: {
+    action: 'confirm' | 'override';
+    label?: TrajectoryLabel;
+    reason?: string;
+    decidedBy?: string;
+  },
+): Promise<SessionLabelView> {
+  return apiFetch<SessionLabelView>(
+    `${API_BASE}/api/reuse/sessions/${encodeURIComponent(sessionId)}/label`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: decision.action,
+        label: decision.label,
+        reason: decision.reason,
+        decided_by: decision.decidedBy,
+      }),
+    },
+  );
+}
+
+/** Endorses several automatic verdicts at once; ids that are not there are skipped. */
+export async function confirmReuseLabels(
+  sessionIds: string[],
+  decidedBy?: string,
+): Promise<{ confirmed: number; session_ids: string[] }> {
+  return apiFetch<{ confirmed: number; session_ids: string[] }>(
+    `${API_BASE}/api/reuse/sessions/labels:batch-confirm`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_ids: sessionIds, decided_by: decidedBy }),
+    },
+  );
+}
+
+/**
+ * Per-rule counts of how often a person accepted or overturned the verdict it
+ * contributed to — the only continuously available measure of which rules
+ * misfire.
+ */
+export async function fetchReuseLabelStats(): Promise<LabelStatsResponse> {
+  return apiFetch<LabelStatsResponse>(`${API_BASE}/api/reuse/label-stats`);
+}
+
+/**
+ * Asks the model to label trajectories the rules could not place.
+ *
+ * Every judgement is a paid request, so this is off unless the server was
+ * configured for it, and answers 503 when it is not.
+ */
+export async function runReuseJudgements(
+  input: { sessionIds?: string[]; limit?: number } = {},
+): Promise<JudgeReport> {
+  return apiFetch<JudgeReport>(`${API_BASE}/api/reuse/judge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: input.sessionIds, limit: input.limit }),
+  });
+}
+
 // ─── Enforcement APIs ───────────────────────────────────────────────────────
 
 export interface EnforcementHealth {
@@ -692,6 +789,15 @@ export async function fetchTimeseries(
 // ─── ATIF export APIs ────────────────────────────────────────────────────────
 
 import type { AtifDocument, AgentHealthResponse, AgentProcessHealthResponse } from '../types';
+import type {
+  ConfirmState,
+  JudgeReport,
+  LabelStatsResponse,
+  SessionLabelView,
+  SessionsResponse,
+  TrajectoryLabel,
+  TriageReport,
+} from '../types/reuse';
 
 // ─── Token Savings types ─────────────────────────────────────────────────────
 
@@ -1885,6 +1991,7 @@ export async function fetchSkillMetrics(
 export type AppCapability =
   | 'agent_observability'
   | 'sessions'
+  | 'reuse_labels'
   | 'token_savings'
   | 'optimization'
   | 'skills'

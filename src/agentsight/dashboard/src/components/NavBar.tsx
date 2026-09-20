@@ -21,6 +21,7 @@ const navItems: NavItem[] = [
   { path: '/security', labelKey: 'nav.securityObservability', icon: '🛡️', capability: 'security' },
   { path: '/audit', labelKey: 'nav.systemAudit', icon: '📋', capability: 'system_audit' },
   { path: '/enforcement', labelKey: 'nav.riskEnforcement', icon: '⛔', capability: 'enforcement' },
+  { path: '/reuse', labelKey: 'nav.reuseLabels', icon: '🏷️', capability: 'reuse_labels' },
   { path: '/atif', labelKey: 'nav.trajectoryViewer', icon: '🔍', capability: 'atif' },
   { path: '/settings', labelKey: 'nav.settings', icon: '⚙️', capability: 'settings' },
 ];

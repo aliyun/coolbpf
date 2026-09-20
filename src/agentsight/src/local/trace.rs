@@ -11,7 +11,13 @@ use agentsight_trajectory_collector::{
 ///
 /// Opens (or creates) the trajectory SQLite DB, runs one immediate scan,
 /// then enters the polling loop until Ctrl+C.
-pub fn run_local_trace() {
+///
+/// Logging is initialized here because the collector reports per-file scan
+/// failures through `log::warn!`; without a logger installed those failures
+/// are dropped and a stalled collector looks identical to an idle one.
+pub fn run_local_trace(verbose: bool) {
+    crate::config::init_logging(verbose, None);
+
     let db_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("agentsight")

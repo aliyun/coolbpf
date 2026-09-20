@@ -12,7 +12,7 @@ use agentsight_opt_store::{Dimension, OptimizationStore};
 use agentsight_trajectory_collector::TrajectoryStore;
 use serde::{Deserialize, Serialize};
 
-use crate::server::semantic_search;
+use crate::semantic_search;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
 const DB_FILE_NAME: &str = "optimization.db";
@@ -113,11 +113,13 @@ impl OptimizeState {
         })
     }
 
-    fn snapshot(&self) -> OptLlmConfig {
+    pub(super) fn snapshot(&self) -> OptLlmConfig {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
-    fn build_client(&self) -> Result<LlmClient, HttpResponse> {
+    // `pub(super)` so the sibling preferences module can reuse the same
+    // configured client for its optional LLM layer.
+    pub(super) fn build_client(&self) -> Result<LlmClient, HttpResponse> {
         let config = self.snapshot();
         let Some(api_key) = config.effective_api_key() else {
             return Err(HttpResponse::BadRequest().json(serde_json::json!({
@@ -469,6 +471,25 @@ pub async fn semantic_search_sessions(
         }
     };
     let request = body.into_inner();
+
+    // Sessions labelled `useless` are out of retrieval scope; same filter as
+    // the Linux endpoint, applied here for the same reason — one policy, every
+    // caller. A store failure degrades to unfiltered rather than failing search.
+    let request = match data.local_state.reuse_store.as_deref() {
+        Some(store) => match store.excluded_sessions() {
+            Ok(excluded) => semantic_search::filter_excluded(
+                request,
+                &excluded
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(error) => {
+                log::warn!("reuse: reading excluded sessions failed, ranking unfiltered: {error}");
+                request
+            }
+        },
+        None => request,
+    };
     semantic_search::handle_semantic_search(&client, &request).await
 }
 

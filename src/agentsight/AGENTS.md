@@ -228,7 +228,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus token 指标 |
 | `/api/sessions` | GET | 会话列表 |
-| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM） |
+| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM）；排除有效标签为 `useless` 的会话，标签库不可用时退化为不过滤 |
 | `/api/sessions/{id}/traces` | GET | 会话下的 trace |
 | `/api/traces/{id}` | GET | 单次调用详情（按 per-call response_id 查询，非 conversation_id） |
 | `/api/conversations/{id}` | GET | conversation 事件详情 |
@@ -259,9 +259,19 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
 | `/api/optimize/results` | GET | 分析历史列表（`start_ns`, `end_ns`, `limit` ≤ 200；默认最近 30 天，仅返回各维度存在标记，不含 payload） |
 | `/api/optimize/config` | GET/POST | 优化 LLM 配置（api_key 脱敏；持久化到 `optimization_config.json`） |
-| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`；不含 `atif_json`，按采集时间倒序） |
+| `/api/reuse/triage` | POST | 用确定性规则为已采集轨迹生成自动标签（可选 `session_id`, `limit`） |
+| `/api/reuse/sessions` | GET | 列出有效标签已解析的轨迹标签（支持 `label`, `confirm_state`, `changed_since_decision`, `limit`） |
+| `/api/reuse/sessions/{session_id}/label` | POST | 人工确认或覆盖单条轨迹标签；只有人工或 LLM 可以标为 `bad` |
+| `/api/reuse/sessions/labels:batch-confirm` | POST | 批量确认自动标签 |
+| `/api/reuse/label-stats` | GET | 按规则统计人工接受与覆盖情况 |
+| `/api/reuse/judge` | POST | 用已配置 LLM 判定规则无法归类的轨迹；仅在 `features.reuse_llm_judge=true` 时可用，调用会产生费用 |
+| `/api/preferences` | GET | 用户偏好分析（规则 + 可选 LLM） |
+| `/api/preferences/export` | GET | 以 Markdown 导出用户偏好 |
+| `/api/preferences/turns` | GET | 供 Agent 侧 LLM 推理使用的原始用户轮次 |
+| `/api/trajectories` | GET | 采集轨迹列表（`project`, `source`, `agent_name`, `limit`, `label`, `exclude_label`, `human_backed`；不含 `atif_json`，按采集时间倒序） |
 | `/api/trajectories/filters` | GET | 轨迹过滤下拉选项（distinct project/source/agent_name） |
-| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤端点则降级为空 + 200） |
+| `/api/trajectories/steps` | GET | 按步骤分类检索（`category` 逗号分隔多值 OR：`user_input`/`system`/`agent_message`/`thinking`/`tool_call`/`tool_result`；另支持 `agent_name`, `project`, `source`, `session_id`, `limit`, `context`, `max_scan`）。每条命中附带同会话前后各 `context` 条步骤；分类为多标签，非法 `category` 返回 400 |
+| `/api/trajectories/{session_id}` | GET | 单条轨迹的原始 ATIF v1.7 JSON（store 不可用或 session 不存在均返回 404，消息不同；列表/过滤/步骤端点则降级为空 + 200） |
 
 ## 9. Frontend
 
@@ -305,6 +315,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | Token 消费 | `features.token_consumption` | `false` | 聚合消费记录 |
 | SLS Logtail | `features.sls_logtail` | `false` | SLS 日志文件导出 |
 | 轨迹采集 | `features.trajectory_collection.enabled` | `false` | 定时扫描 Qoder/QoderWork 会话目录，JSONL 转 ATIF v1.7 存入 trajectories.db（仅 trace 模式；`scan_interval_secs` 默认 30，`scan_dirs` 可覆盖扫描目录） |
+| 轨迹 LLM 判定 | `features.reuse_llm_judge` | `false` | 允许 `POST /api/reuse/judge` 调用已配置 LLM 判定规则无法归类的轨迹；每次调用会产生费用 |
 
 ### 运行时资源上限（`runtime_limits`）
 

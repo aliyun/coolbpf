@@ -6,6 +6,8 @@
 mod agents;
 mod local_sessions;
 mod optimize;
+mod preferences;
+mod reuse;
 mod trajectories;
 
 use actix_cors::Cors;
@@ -22,6 +24,15 @@ use std::sync::{Arc, RwLock};
 pub struct LocalState {
     pub trajectory_store: Arc<RwLock<Option<Arc<TrajectoryStore>>>>,
     pub db_path: PathBuf,
+    /// Trajectory reuse labels (`reuse.db`).
+    ///
+    /// `None` when the private store could not be opened: labels are a
+    /// dashboard feature, so the viewer still serves and the endpoints report
+    /// why rather than the process refusing to start.
+    pub reuse_store: Option<Arc<crate::reuse::ReuseStore>>,
+    /// Whether a model may be asked to label trajectories the rules could not
+    /// place. Off unless a configuration file says otherwise.
+    pub reuse_llm_judge_enabled: bool,
 }
 
 impl LocalState {
@@ -84,7 +95,7 @@ async fn auth_status() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "auth_enabled": false,
         "mode": "local",
-        "capabilities": ["sessions", "optimization", "atif", "settings", "agent_health"]
+        "capabilities": ["sessions", "optimization", "reuse_labels", "atif", "settings", "agent_health"]
     }))
 }
 
@@ -335,7 +346,11 @@ pub fn local_trajectory_scan_dirs() -> Option<Vec<std::path::PathBuf>> {
 ///
 /// Binds to the given host:port and serves local-session API endpoints + the
 /// embedded frontend. Blocks until the server is shut down.
-pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
+pub async fn run_server(
+    host: &str,
+    port: u16,
+    reuse_llm_judge_enabled: bool,
+) -> std::io::Result<()> {
     let has_frontend = FRONTEND.get_file("index.html").is_some();
     log::info!(
         "agentsight local server listening on http://{}:{}",
@@ -377,9 +392,26 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
         None
     };
 
+    // Beside the trajectory database but in its own directory: opening tightens
+    // that directory to 0700, and doing so where `trajectories.db` lives would
+    // cut off every other reader of it.
+    let private_dir = db_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".agentsight-private");
+    let reuse_store = match crate::reuse::ReuseStore::open_private(&private_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            log::warn!("Reuse label store unavailable, labels disabled: {error}");
+            None
+        }
+    };
+
     let local_state = web::Data::new(LocalState {
         trajectory_store: Arc::new(RwLock::new(initial_store)),
         db_path,
+        reuse_store,
+        reuse_llm_judge_enabled,
     });
     let optimize_state = optimize::OptimizeState::init(
         local_state
@@ -403,9 +435,10 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .wrap(cors)
             .app_data(local_state.clone())
             .app_data(optimize_data.clone())
-            // Trajectory collection API
+            // Trajectory collection API (static paths before the dynamic segment)
             .service(trajectories::list_trajectories)
             .service(trajectories::trajectory_filters)
+            .service(trajectories::list_trajectory_steps)
             .service(trajectories::get_trajectory_detail)
             // Local session discovery + ATIF conversion API
             .service(local_sessions::list_local_sessions)
@@ -437,6 +470,16 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .service(optimize::get_optimize_config)
             .service(optimize::update_optimize_config)
             .service(optimize::semantic_search_sessions)
+            // User preference analysis API (registered before api_fallback)
+            .service(reuse::run_judgements)
+            .service(reuse::apply_label)
+            .service(reuse::confirm_labels)
+            .service(reuse::label_stats)
+            .service(reuse::list_sessions)
+            .service(reuse::run_triage)
+            .service(preferences::export_preferences)
+            .service(preferences::get_preferences)
+            .service(preferences::get_preference_turns)
             .service(export_atif_unavailable)
             // Catch-all for unregistered API endpoints (returns empty array)
             .service(api_fallback)

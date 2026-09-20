@@ -2,7 +2,9 @@
 //!
 //! Both `server::optimize` and `local::server::optimize` expose
 //! `POST /api/sessions/search`. This module owns the request/response contract
-//! and the LLM ranking call so the two handlers cannot drift apart.
+//! and the LLM ranking call so the two handlers cannot drift apart. It lives at
+//! the crate root rather than under `server` because the latter is gated to
+//! Linux, which would put it out of reach of the macOS handler.
 
 use actix_web::HttpResponse;
 use agentsight_opt::LlmClient;
@@ -143,6 +145,32 @@ pub async fn rank_sessions(
     }
 }
 
+/// Drops candidates whose session is on an exclusion list.
+///
+/// The list comes from the caller — the reuse label store — because which
+/// sessions are out of scope is a labelling policy, not a ranking concern, and
+/// this module must not depend on the label store to stay a shared,
+/// platform-independent contract. Excluding after the minimum-count check would
+/// let a full request sink below the LLM threshold, so filtering happens before
+/// it: a search whose candidates are all excluded is genuinely empty, not a
+/// request that shrank.
+pub fn filter_excluded(
+    request: SemanticSearchRequest,
+    excluded: &std::collections::HashSet<String>,
+) -> SemanticSearchRequest {
+    if excluded.is_empty() {
+        return request;
+    }
+    SemanticSearchRequest {
+        query: request.query,
+        candidates: request
+            .candidates
+            .into_iter()
+            .filter(|candidate| !excluded.contains(&candidate.session_id))
+            .collect(),
+    }
+}
+
 /// Validate the request and, when eligible, rank candidates via the LLM.
 ///
 /// Rejects oversized requests, skips the LLM call below the minimum candidate
@@ -168,6 +196,50 @@ pub async fn handle_semantic_search(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn excluded_sessions_are_dropped_from_candidates() {
+        use super::*;
+        let request = SemanticSearchRequest {
+            query: "版本".to_string(),
+            candidates: vec![
+                SemanticSearchCandidate {
+                    session_id: "keep-1".to_string(),
+                    first_message: None,
+                    last_message: None,
+                    project: None,
+                },
+                SemanticSearchCandidate {
+                    session_id: "drop-1".to_string(),
+                    first_message: None,
+                    last_message: None,
+                    project: None,
+                },
+            ],
+        };
+        let mut excluded = std::collections::HashSet::new();
+        excluded.insert("drop-1".to_string());
+        let filtered = filter_excluded(request, &excluded);
+        assert_eq!(filtered.candidates.len(), 1);
+        assert_eq!(filtered.candidates[0].session_id, "keep-1");
+    }
+
+    #[test]
+    fn an_empty_exclusion_list_leaves_the_request_untouched() {
+        use super::*;
+        let request = SemanticSearchRequest {
+            query: "q".to_string(),
+            candidates: vec![SemanticSearchCandidate {
+                session_id: "s".to_string(),
+                first_message: None,
+                last_message: None,
+                project: None,
+            }],
+        };
+        let filtered = filter_excluded(request, &std::collections::HashSet::new());
+        assert_eq!(filtered.candidates.len(), 1);
+    }
+
     use super::*;
 
     #[test]

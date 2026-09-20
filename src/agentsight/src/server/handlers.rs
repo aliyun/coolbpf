@@ -7,6 +7,9 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use agentsight_atif::StepCategory;
+use agentsight_trajectory_collector::StepScanFilter;
+
 use super::AppState;
 use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
 use crate::grader::{
@@ -1177,6 +1180,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         let data = web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: blocked_parent.join("genai.db"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1390,6 +1396,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -1524,6 +1533,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1630,6 +1642,9 @@ mod tests {
         let auth_config = crate::config::ServerAuthConfig { enabled };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1788,6 +1803,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: storage_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1816,6 +1834,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -1891,6 +1912,9 @@ mod tests {
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
+            reuse_store: None,
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
             storage_path,
             start_time: Instant::now(),
@@ -2040,6 +2064,207 @@ mod tests {
         )
         .await;
         assert_eq!(filters.status(), StatusCode::OK);
+    }
+
+    // ─── Trajectory step query tests ───────────────────────────────────
+
+    /// Store holding one trajectory whose steps cover several categories.
+    fn stepped_trajectory_store(tag: &str) -> Arc<TrajectoryStore> {
+        let db = unique_handler_db(tag);
+        let store = TrajectoryStore::new_with_path(&db).unwrap();
+        let mut record = trajectory_record("s-steps", "proj-a", "qoder");
+        record.num_steps = 4;
+        record.atif_json = serde_json::json!({
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "qoder", "version": "1.0"},
+            "session_id": "s-steps",
+            "steps": [
+                {"step_id": 1, "source": "user", "message": "列一下文件"},
+                {"step_id": 2, "source": "agent", "message": "好的",
+                 "reasoning_content": "需要执行 ls",
+                 "tool_calls": [{"tool_call_id": "t1", "function_name": "bash",
+                                 "arguments": {"cmd": "ls"}}]},
+                {"step_id": 3, "source": "user", "message": "",
+                 "observation": {"results": [{"source_call_id": "t1", "content": "a.txt"}]}},
+                {"step_id": 4, "source": "agent", "message": "只有 a.txt"}
+            ]
+        })
+        .to_string();
+        store.upsert_trajectory(&record).unwrap();
+        Arc::new(store)
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_route_not_captured_by_session_id() {
+        let data =
+            test_app_state_with_trajectory_store(Some(stepped_trajectory_store("steps-route")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        // `steps` must hit the step handler (object with `hits`), not the detail
+        // handler, which would 404 on a session named "steps".
+        assert!(body["hits"].is_array());
+        assert_eq!(body["scanned_trajectories"], 1);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_filters_by_category_with_context() {
+        let data =
+            test_app_state_with_trajectory_store(Some(stepped_trajectory_store("steps-cat")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps?category=tool_call&context=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        let hits = body["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["step"]["step_id"], 2);
+        assert_eq!(hits[0]["session_id"], "s-steps");
+        assert_eq!(hits[0]["agent_name"], "qoder");
+        assert_eq!(hits[0]["step"]["tool_names"], serde_json::json!(["bash"]));
+        // context=1 yields exactly one neighbour on each side.
+        assert_eq!(hits[0]["context"]["before"][0]["step_id"], 1);
+        assert_eq!(hits[0]["context"]["after"][0]["step_id"], 3);
+        assert_eq!(hits[0]["context"]["before"].as_array().unwrap().len(), 1);
+        assert_eq!(hits[0]["context"]["after"].as_array().unwrap().len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_multi_category_is_or() {
+        let data = test_app_state_with_trajectory_store(Some(stepped_trajectory_store("steps-or")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps?category=thinking,tool_result")
+                .to_request(),
+        )
+        .await;
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        let ids: Vec<i64> = body["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["step"]["step_id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![2, 3]);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_rejects_unknown_category() {
+        let data =
+            test_app_state_with_trajectory_store(Some(stepped_trajectory_store("steps-bad")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps?category=assistant")
+                .to_request(),
+        )
+        .await;
+        // Rejecting beats silently ignoring: an ignored filter would return
+        // unrelated steps that look like a legitimate result.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        assert_eq!(body["error"], "invalid_category");
+        let valid = body["valid_categories"].as_array().unwrap();
+        assert_eq!(valid.len(), 6);
+        assert!(valid.contains(&serde_json::json!("tool_call")));
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_graceful_when_store_absent() {
+        let data = test_app_state_with_trajectory_store(None);
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        assert_eq!(body["hits"], serde_json::json!([]));
+        assert_eq!(body["scanned_trajectories"], 0);
+        assert_eq!(body["truncated"], false);
+    }
+
+    #[actix_web::test]
+    async fn trajectory_steps_caps_limit_and_marks_truncated() {
+        let data =
+            test_app_state_with_trajectory_store(Some(stepped_trajectory_store("steps-lim")));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps?limit=1")
+                .to_request(),
+        )
+        .await;
+        let body: serde_json::Value = awtest::read_body_json(resp).await;
+        assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(body["truncated"], true);
+
+        // A non-positive limit falls back to the default rather than acting as
+        // "no limit" (SQLite treats a negative LIMIT as unbounded).
+        let zero = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories/steps?limit=0")
+                .to_request(),
+        )
+        .await;
+        let zero_body: serde_json::Value = awtest::read_body_json(zero).await;
+        assert_eq!(zero_body["hits"].as_array().unwrap().len(), 4);
     }
 
     fn make_interruption_event(
@@ -2281,6 +2506,9 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    reuse_store: None,
+                    reuse_llm_judge_enabled: false,
+                    causal_store: None,
                     storage_path: db_path.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -2830,6 +3058,9 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(web::Data::new(AppState {
+                    reuse_store: None,
+                    reuse_llm_judge_enabled: false,
+                    causal_store: None,
                     storage_path: blocked_db.clone(),
                     start_time: Instant::now(),
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
@@ -3759,6 +3990,14 @@ pub struct TrajectoryQuery {
     pub agent_name: Option<String>,
     /// Max rows returned (default 200).
     pub limit: Option<i64>,
+    /// Keep only trajectories whose effective reuse label is one of these
+    /// (comma-separated: `good,bad`). Sessions never triaged match nothing —
+    /// an agent asking for `good` history must not be served unassessed work.
+    pub label: Option<String>,
+    /// Drop trajectories whose label is one of these (`useless` by contract).
+    pub exclude_label: Option<String>,
+    /// Keep only trajectories a person settled (`confirm`/`override`).
+    pub human_backed: Option<bool>,
 }
 
 /// Default and hard-cap for the trajectory list `limit` parameter.
@@ -3791,11 +4030,82 @@ pub async fn list_trajectories(
         query.agent_name.as_deref(),
         limit,
     ) {
-        Ok(rows) => HttpResponse::Ok().json(rows),
+        Ok(mut rows) => {
+            filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            HttpResponse::Ok().json(rows)
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
     }
+}
+
+/// Applies the reuse-label query parameters to trajectory summary rows.
+///
+/// The label lives in `reuse.db`, the summary in `trajectories.db`; rather
+/// than teach the collector crate about labels (it owns storage, not reuse
+/// policy), the handler resolves the label set once and keeps rows whose id is
+/// in it. Unlabelled sessions drop out of every label filter — including
+/// `exclude_label`, which only removes what has actually been assessed.
+fn filter_rows_by_reuse_labels(
+    data: &web::Data<AppState>,
+    query: &TrajectoryQuery,
+    rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
+) {
+    let labels_needed =
+        query.label.is_some() || query.exclude_label.is_some() || query.human_backed == Some(true);
+    if !labels_needed {
+        return;
+    }
+    let Some(labels) = data.reuse_store.as_deref() else {
+        // No label store: nothing has been assessed, so a positive filter
+        // matches nothing. Serve the empty truth rather than unfiltered rows.
+        if query.label.is_some() || query.human_backed == Some(true) {
+            rows.clear();
+        }
+        return;
+    };
+    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(crate::reuse::TrajectoryLabel::parse)
+            .collect()
+    };
+    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+        labels
+            .sessions_with_labels(&parse(raw))
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    let drop: Option<std::collections::HashSet<String>> =
+        query.exclude_label.as_deref().map(|raw| {
+            labels
+                .sessions_with_labels(&parse(raw))
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        });
+    let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
+        Some(
+            labels
+                .list_labels(&crate::reuse::LabelFilter::default())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.is_human_backed())
+                .map(|l| l.session_id)
+                .collect(),
+        )
+    } else {
+        None
+    };
+    rows.retain(|row| {
+        let id = row.session_id.as_str();
+        keep.as_ref().is_none_or(|set| set.contains(id))
+            && drop.as_ref().is_none_or(|set| !set.contains(id))
+            && backed.as_ref().is_none_or(|set| set.contains(id))
+    });
 }
 
 /// GET /api/trajectories/filters
@@ -3847,6 +4157,105 @@ pub async fn get_trajectory_detail(
         }
         Ok(None) => HttpResponse::NotFound()
             .json(serde_json::json!({"error": "not_found", "message": "Trajectory not found"})),
+        Err(e) => {
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Query parameters for `/api/trajectories/steps`.
+#[derive(Debug, Deserialize)]
+pub struct TrajectoryStepQuery {
+    /// Comma-separated step categories, matched as OR. Omit for every step.
+    pub category: Option<String>,
+    pub agent_name: Option<String>,
+    pub project: Option<String>,
+    pub source: Option<String>,
+    pub session_id: Option<String>,
+    /// Max hits returned (default 50).
+    pub limit: Option<i64>,
+    /// Neighbouring steps returned on each side of a hit (default 3).
+    pub context: Option<i64>,
+    /// Max trajectories read from disk (default 500).
+    pub max_scan: Option<i64>,
+}
+
+/// Defaults and hard caps for `/api/trajectories/steps`.
+const STEP_DEFAULT_LIMIT: i64 = 50;
+const STEP_MAX_LIMIT: i64 = 500;
+const STEP_DEFAULT_CONTEXT: i64 = 3;
+const STEP_MAX_CONTEXT: i64 = 10;
+const STEP_DEFAULT_MAX_SCAN: i64 = 500;
+const STEP_MAX_MAX_SCAN: i64 = 2000;
+
+/// GET /api/trajectories/steps?category=&agent_name=&project=&source=&session_id=&limit=&context=&max_scan=
+///
+/// Finds steps by derived category (`user_input`, `system`, `agent_message`,
+/// `thinking`, `tool_call`, `tool_result`), each returned with its neighbouring
+/// steps so a hit can be read in context. Categories are multi-label: a step
+/// that reasons and calls a tool matches either filter.
+///
+/// Must be registered before `/trajectories/{session_id}`.
+#[get("/trajectories/steps")]
+pub async fn list_trajectory_steps(
+    data: web::Data<AppState>,
+    query: web::Query<TrajectoryStepQuery>,
+) -> impl Responder {
+    // An unknown category is rejected rather than ignored: silently dropping it
+    // would return unrelated steps that look like a legitimate empty result.
+    let mut categories = Vec::new();
+    if let Some(raw) = query.category.as_deref() {
+        for token in raw.split(',').filter(|t| !t.trim().is_empty()) {
+            match StepCategory::parse(token) {
+                Some(c) => categories.push(c),
+                None => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "invalid_category",
+                        "message": format!("Unknown category '{}'", token.trim()),
+                        "valid_categories": StepCategory::ALL
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>(),
+                    }));
+                }
+            }
+        }
+    }
+
+    let Some(tstore) = data.trajectory_store() else {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "hits": [], "scanned_trajectories": 0,
+            "truncated": false, "skipped_unparsable": 0
+        }));
+    };
+
+    // Normalize: <= 0 falls back to default and every value is capped, so a
+    // hostile `limit` cannot turn into an unbounded scan. `context` may be 0.
+    let limit = match query.limit {
+        Some(v) if v > 0 => v.min(STEP_MAX_LIMIT),
+        _ => STEP_DEFAULT_LIMIT,
+    };
+    let context_radius = match query.context {
+        Some(v) if v >= 0 => v.min(STEP_MAX_CONTEXT),
+        _ => STEP_DEFAULT_CONTEXT,
+    };
+    let max_scan = match query.max_scan {
+        Some(v) if v > 0 => v.min(STEP_MAX_MAX_SCAN),
+        _ => STEP_DEFAULT_MAX_SCAN,
+    };
+
+    let filter = StepScanFilter {
+        project: query.project.clone(),
+        source: query.source.clone(),
+        agent_name: query.agent_name.clone(),
+        session_id: query.session_id.clone(),
+        categories,
+        limit,
+        context_radius,
+        max_scan,
+    };
+    match tstore.scan_steps(&filter) {
+        Ok(outcome) => HttpResponse::Ok().json(outcome),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
