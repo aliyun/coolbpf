@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 ### Features
 - Add `GET /api/preferences` and `GET /api/preferences/export` to surface the
@@ -14,10 +14,21 @@
   `tool_result`), returning each hit with its neighbouring steps. Categories are
   multi-label because a single agent step can carry a message, reasoning, tool
   calls and observations at once.
+- Label trajectories for reuse triage, let a person settle a trajectory's label,
+  add the reuse-label review page, and gate search to serve labelled trajectory
+  history.
+- Add an inode guard for file-delete-guard on 5.10/6.6 kernels, with domain
+  isolation, violation events, and startup cleanup.
 
 ### Fixes
 - Initialize logging in the macOS `trace` path so trajectory collection failures
   surface instead of being silently dropped.
+- Add a token-plan provider preset.
+- Fix a stale fd in the enforcer ringbuf consumer after an mmap advance.
+- Drop the trace_id alias in the traces list. (#3261)
+- Honor the RUST_LOG regex in the main logger. (#3186)
+- Resolve namespace PID to host PID with an init-ns self-check. (#3041)
+- Add the conversation_id column before its index. (#3378)
 
 ## 0.12.1
 
