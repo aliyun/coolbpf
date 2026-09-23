@@ -402,12 +402,7 @@ pub async fn list_optimization_history(
 #[get("/api/optimize/config")]
 pub async fn get_optimize_config(data: web::Data<OptimizeAppState>) -> impl Responder {
     let config = data.optimize.snapshot();
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": config.masked_api_key(),
-        "base_url": config.effective_base_url(),
-        "model": config.effective_model(),
-        "configured": config.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&config))
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,6 +410,43 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub search_timeout_secs: Option<u64>,
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+    if let Some(ref key) = update.api_key
+        && !key.is_empty()
+        && !key.contains('•')
+    {
+        config.api_key = Some(key.clone());
+    }
+    if let Some(ref url) = update.base_url
+        && !url.is_empty()
+    {
+        config.base_url = Some(url.clone());
+    }
+    if let Some(ref model) = update.model
+        && !model.is_empty()
+    {
+        config.model = Some(model.clone());
+    }
+    if let Some(timeout_secs) = update.search_timeout_secs
+        && timeout_secs > 0
+    {
+        config.search_timeout_secs = Some(timeout_secs);
+    }
+}
+
+fn config_response(config: &OptLlmConfig) -> serde_json::Value {
+    serde_json::json!({
+        "api_key": config.masked_api_key(),
+        "base_url": config.effective_base_url(),
+        "model": config.effective_model(),
+        "search_timeout_secs": config
+            .search_timeout_secs
+            .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        "configured": config.effective_api_key().is_some(),
+    })
 }
 
 /// POST /api/optimize/config
@@ -431,22 +463,7 @@ pub async fn update_optimize_config(
                     .json(serde_json::json!({"error": "config lock poisoned"}));
             }
         };
-        if let Some(ref key) = body.api_key
-            && !key.is_empty()
-            && !key.contains('•')
-        {
-            config.api_key = Some(key.clone());
-        }
-        if let Some(ref url) = body.base_url
-            && !url.is_empty()
-        {
-            config.base_url = Some(url.clone());
-        }
-        if let Some(ref model) = body.model
-            && !model.is_empty()
-        {
-            config.model = Some(model.clone());
-        }
+        apply_config_update(&mut config, &body);
         config.clone()
     };
 
@@ -456,12 +473,7 @@ pub async fn update_optimize_config(
         }));
     }
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": updated.masked_api_key(),
-        "base_url": updated.effective_base_url(),
-        "model": updated.effective_model(),
-        "configured": updated.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&updated))
 }
 
 // ─── Semantic session search ────────────────────────────────────────────────
@@ -649,6 +661,37 @@ mod tests {
         let state = OptimizeState::init(&tmp);
         assert!(state.store.is_some());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn config_update_persists_and_returns_search_timeout() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_local_opt_config_timeout_{}.json",
+            std::process::id()
+        ));
+        let mut config = OptLlmConfig::default();
+        let update = UpdateOptConfig {
+            api_key: None,
+            base_url: None,
+            model: None,
+            search_timeout_secs: Some(30),
+        };
+
+        apply_config_update(&mut config, &update);
+        config.save(&tmp).unwrap();
+        let loaded = OptLlmConfig::load(&tmp);
+        assert_eq!(loaded.search_timeout_secs, Some(30));
+        assert_eq!(config_response(&loaded)["search_timeout_secs"], 30);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn config_response_uses_default_search_timeout() {
+        assert_eq!(
+            config_response(&OptLlmConfig::default())["search_timeout_secs"],
+            semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS
+        );
     }
 
     #[test]
