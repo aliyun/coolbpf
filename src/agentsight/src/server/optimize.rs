@@ -944,12 +944,7 @@ pub async fn get_optimize_config(data: web::Data<AppState>) -> impl Responder {
         Err(resp) => return resp,
     };
     let config = state.snapshot();
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": config.masked_api_key(),
-        "base_url": config.effective_base_url(),
-        "model": config.effective_model(),
-        "configured": config.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&config))
 }
 
 /// Body for POST /api/optimize/config. Omitted fields keep their prior value.
@@ -958,6 +953,42 @@ pub struct UpdateOptConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub search_timeout_secs: Option<u64>,
+}
+
+fn apply_config_update(config: &mut OptLlmConfig, update: &UpdateOptConfig) {
+    if let Some(ref key) = update.api_key {
+        if !key.is_empty() && !key.contains('•') {
+            config.api_key = Some(key.clone());
+        }
+    }
+    if let Some(ref url) = update.base_url {
+        if !url.is_empty() {
+            config.base_url = Some(url.clone());
+        }
+    }
+    if let Some(ref model) = update.model {
+        if !model.is_empty() {
+            config.model = Some(model.clone());
+        }
+    }
+    if let Some(timeout_secs) = update.search_timeout_secs {
+        if timeout_secs > 0 {
+            config.search_timeout_secs = Some(timeout_secs);
+        }
+    }
+}
+
+fn config_response(config: &OptLlmConfig) -> serde_json::Value {
+    serde_json::json!({
+        "api_key": config.masked_api_key(),
+        "base_url": config.effective_base_url(),
+        "model": config.effective_model(),
+        "search_timeout_secs": config
+            .search_timeout_secs
+            .unwrap_or(semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS),
+        "configured": config.effective_api_key().is_some(),
+    })
 }
 
 /// POST /api/optimize/config — update LLM config (persisted to disk).
@@ -979,21 +1010,7 @@ pub async fn update_optimize_config(
                     .json(serde_json::json!({"error": "config lock poisoned"}));
             }
         };
-        if let Some(ref key) = body.api_key {
-            if !key.is_empty() && !key.contains('•') {
-                config.api_key = Some(key.clone());
-            }
-        }
-        if let Some(ref url) = body.base_url {
-            if !url.is_empty() {
-                config.base_url = Some(url.clone());
-            }
-        }
-        if let Some(ref model) = body.model {
-            if !model.is_empty() {
-                config.model = Some(model.clone());
-            }
-        }
+        apply_config_update(&mut config, &body);
         config.clone()
     };
 
@@ -1003,17 +1020,89 @@ pub async fn update_optimize_config(
         }));
     }
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": updated.masked_api_key(),
-        "base_url": updated.effective_base_url(),
-        "model": updated.effective_model(),
-        "configured": updated.effective_api_key().is_some(),
-    }))
+    HttpResponse::Ok().json(config_response(&updated))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_test_state(base_dir: &Path) -> actix_web::web::Data<AppState> {
+        use std::sync::{Arc, RwLock};
+        use std::time::Instant;
+
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            base_dir,
+        ));
+        actix_web::web::Data::new(AppState {
+            storage_path: base_dir.join("agentsight.db"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(crate::health::HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                crate::grader::EvaluationStore::new_with_path(&base_dir.join("evaluation.db"))
+                    .unwrap(),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
+            security_observability: crate::server::SecurityObservabilityConfig::default(),
+            auth,
+            optimize: Some(OptimizeState::init(base_dir)),
+            reuse_store: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+            reuse_llm_judge_enabled: false,
+            causal_store: None,
+        })
+    }
+
+    #[actix_web::test]
+    async fn config_endpoint_persists_and_returns_search_timeout() {
+        use actix_web::{App, test as awtest};
+
+        let dir = tmp_dir("search-timeout-api");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(get_optimize_config)
+                .service(update_optimize_config),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/config")
+            .set_json(serde_json::json!({"search_timeout_secs": 30}))
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert!(response.status().is_success());
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["search_timeout_secs"], 30);
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/optimize/config")
+                .to_request(),
+        )
+        .await;
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["search_timeout_secs"], 30);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_response_uses_default_search_timeout() {
+        assert_eq!(
+            config_response(&OptLlmConfig::default())["search_timeout_secs"],
+            semantic_search::DEFAULT_SEARCH_TIMEOUT_SECS
+        );
+    }
 
     /// The eBPF export feeds the optimizer through JSON, so the shared-schema
     /// document must survive the analyzer's parser with tokens and per-step
