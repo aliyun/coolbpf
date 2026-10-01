@@ -246,7 +246,20 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_db_path(name: &str) -> PathBuf {
-        PathBuf::from(format!("/tmp/test_agentsight_http_{name}.db"))
+        std::env::temp_dir().join(format!(
+            "test_agentsight_http_{name}_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
     }
 
     #[test]
@@ -286,7 +299,7 @@ mod tests {
         let count = store.count().unwrap();
         assert_eq!(count, 1);
 
-        fs::remove_file(&path).ok();
+        cleanup_db(&path);
     }
 
     #[test]
@@ -323,7 +336,7 @@ mod tests {
         let empty = store.query_by_pid(9999).unwrap();
         assert!(empty.is_empty());
 
-        fs::remove_file(&path).ok();
+        cleanup_db(&path);
     }
 
     #[test]
@@ -359,6 +372,6 @@ mod tests {
         let v1_records = store.query_by_path("/v1/%").unwrap();
         assert_eq!(v1_records.len(), 3);
 
-        fs::remove_file(&path).ok();
+        cleanup_db(&path);
     }
 }
