@@ -763,7 +763,8 @@ mod tests {
 
     #[test]
     fn test_token_store() {
-        let mut store = TokenStore::new("/tmp/test_tokens.db").unwrap();
+        let path = unique_db_path("store");
+        let mut store = TokenStore::new(&path).unwrap();
 
         let record = TokenRecord::new(1234, "python".to_string(), "openai".to_string(), 100, 50);
         let id = store.add(record).unwrap();
@@ -772,13 +773,13 @@ mod tests {
         let records = store.all();
         assert!(!records.is_empty());
 
-        // Cleanup
-        std::fs::remove_file("/tmp/test_tokens.db").ok();
+        cleanup_db(&path);
     }
 
     #[test]
     fn test_token_query() {
-        let mut store = TokenStore::new("/tmp/test_tokens_query.db").unwrap();
+        let path = unique_db_path("query");
+        let mut store = TokenStore::new(&path).unwrap();
 
         // Add some records
         store
@@ -805,8 +806,7 @@ mod tests {
 
         assert!(result.total_tokens > 0);
 
-        // Cleanup
-        std::fs::remove_file("/tmp/test_tokens_query.db").ok();
+        cleanup_db(&path);
     }
 
     fn unique_db_path(label: &str) -> PathBuf {
