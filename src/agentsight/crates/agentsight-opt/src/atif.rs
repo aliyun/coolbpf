@@ -109,7 +109,7 @@ pub struct AtifObservationResult {
 }
 
 /// Per-step LLM billing metrics.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtifStepMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
@@ -117,8 +117,10 @@ pub struct AtifStepMetrics {
     pub completion_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u32>,
+    /// Producer extension map (schema-valid per the shared `agentsight-atif`
+    /// `Metrics.extra`); the analyzer accepts and ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<()>,
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Trajectory-level aggregate metrics.
@@ -366,6 +368,34 @@ mod tests {
         assert!(agent.is_agent());
         let dur = (agent.end_ts().unwrap() - agent.start_ts().unwrap()).as_seconds_f64();
         assert!((dur - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parses_schema_valid_metrics_extra() {
+        // The shared agentsight-atif schema types Metrics.extra as an
+        // extension map; the lenient reader must accept (and ignore) it
+        // instead of failing the whole document.
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "session_id": "s1",
+            "agent": {"name": "a", "version": "1"},
+            "steps": [{
+                "step_id": 1, "source": "agent", "timestamp": "2026-01-01T00:00:00Z",
+                "message": "hi",
+                "metrics": {"prompt_tokens": 10, "completion_tokens": 5,
+                            "extra": {"provider_call_id": "call_abc"}}
+            }]
+        }"#;
+        let traj = AtifTrajectory::from_json(json).unwrap();
+        let metrics = traj.steps[0].metrics.as_ref().unwrap();
+        assert_eq!(metrics.prompt_tokens, Some(10));
+        assert_eq!(
+            metrics
+                .extra
+                .as_ref()
+                .and_then(|e| e.get("provider_call_id")),
+            Some(&serde_json::json!("call_abc"))
+        );
     }
 
     #[test]

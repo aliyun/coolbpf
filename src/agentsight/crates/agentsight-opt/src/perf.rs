@@ -266,7 +266,9 @@ fn compute_tool_agg(tool_calls: &[ToolCallRecord]) -> Vec<ToolAggStats> {
 fn extract_cache_turns(traj: &AtifTrajectory) -> Vec<CacheTurn> {
     let mut turns = Vec::new();
     for step in traj.steps.iter().filter(|s| s.is_agent()) {
-        let Some(m) = step.metrics else { continue };
+        let Some(m) = step.metrics.as_ref() else {
+            continue;
+        };
         let Some(prompt) = m.prompt_tokens else {
             continue;
         };

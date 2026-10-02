@@ -313,7 +313,7 @@ pub(crate) struct UsageBlock {
 }
 
 fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
-    let m = step.metrics?;
+    let m = step.metrics.as_ref()?;
     let prompt = m.prompt_tokens.map(u64::from);
     let completion = m.completion_tokens.map(u64::from);
     let cached = m.cached_tokens.map(u64::from);
