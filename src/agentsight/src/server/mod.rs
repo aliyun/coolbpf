@@ -896,6 +896,20 @@ fn stop_database_maintenance(manager: &DatabaseManager) {
     }
 }
 
+/// Mask a dashboard token for the startup log line: the first eight characters
+/// plus a fixed suffix, or `****` when the token is short enough that a preview
+/// would reveal all of it. Counts characters rather than bytes so a token set by
+/// hand with multi-byte characters cannot split a code point.
+fn mask_token(token: &str) -> String {
+    let mut chars = token.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{head}****")
+    } else {
+        "****".to_string()
+    }
+}
+
 /// Start the API server
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
@@ -984,11 +998,7 @@ pub async fn run_server(
     let dashboard_auth = Arc::new(DashboardAuth::init(&auth_config, storage_base));
     if dashboard_auth.enabled {
         if let Some(token) = dashboard_auth.read_token_from_file() {
-            let masked = if token.len() > 8 {
-                format!("{}****", &token[..8])
-            } else {
-                "****".to_string()
-            };
+            let masked = mask_token(&token);
             eprintln!(
                 "Dashboard auth enabled. Token: {masked}  (use `agentsight dashboard` to view)"
             );
@@ -1217,6 +1227,7 @@ fn stop_enforcement_ingestion(
 
 #[cfg(test)]
 mod tests {
+    use super::mask_token;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
     use std::time::Instant;
@@ -1621,5 +1632,19 @@ mod tests {
             causal_store: None,
             trajectory_store: Arc::new(RwLock::new(Some(Arc::new(store)))),
         })
+    }
+
+    /// The dashboard token may be set by hand in `.dashboard_token`; slicing it
+    /// by bytes panicked on the startup log line whenever the token contained a
+    /// multi-byte character at byte 8.
+    #[test]
+    fn mask_token_keeps_multi_byte_tokens_masked() {
+        assert_eq!(
+            mask_token("密碼短語密碼短語密碼短語"),
+            "密碼短語密碼短語****"
+        );
+        assert_eq!(mask_token("123456789"), "12345678****");
+        assert_eq!(mask_token("12345678"), "****");
+        assert_eq!(mask_token("密碼"), "****");
     }
 }

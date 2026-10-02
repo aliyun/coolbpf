@@ -500,7 +500,10 @@ impl TokenStore {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
 
-        let hours_ns = hours * 3600 * 1_000_000_000;
+        // Saturate so an absurd --hours degrades to "everything" (a zero
+        // start) instead of overflowing: the nanosecond product leaves u64
+        // above ~5.12 million hours, and a debug build aborts on the multiply.
+        let hours_ns = hours.saturating_mul(3_600_000_000_000);
         let start_ns = now.saturating_sub(hours_ns);
 
         self.by_time_range_owned(start_ns, now)
@@ -640,7 +643,7 @@ impl<'a> TokenQuery<'a> {
         let mut result = self.by_hours(hours);
 
         // Get previous period data
-        let prev_records = self.store.by_last_hours(hours * 2);
+        let prev_records = self.store.by_last_hours(hours.saturating_mul(2));
         let prev_records: Vec<_> = prev_records
             .into_iter()
             .filter(|r| {
@@ -649,8 +652,8 @@ impl<'a> TokenQuery<'a> {
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_nanos() as u64)
                     .unwrap_or(0);
-                let hours_ns = hours * 3600 * 1_000_000_000;
-                let start_ns = now.saturating_sub(hours_ns * 2);
+                let hours_ns = hours.saturating_mul(3_600_000_000_000);
+                let start_ns = now.saturating_sub(hours_ns.saturating_mul(2));
                 let mid_ns = now.saturating_sub(hours_ns);
                 r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
             })
@@ -992,6 +995,35 @@ mod tests {
         let rows = store.by_last_hours(1);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].agent.as_deref(), Some("recent"));
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn test_by_last_hours_saturates_for_absurd_hours() {
+        let path = unique_db_path("absurd_hours");
+        let store = TokenStore::new(&path).unwrap();
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        store
+            .insert(&make_record(
+                now_ns.saturating_sub(1_000),
+                Some("recent"),
+                1,
+                2,
+            ))
+            .unwrap();
+
+        // 5_124_096 hours is the first value whose nanosecond product leaves
+        // u64; a window wider than the recorded history must saturate to
+        // "everything" and keep the recent row instead of overflowing.
+        let rows = store.by_last_hours(5_124_096);
+        assert_eq!(rows.len(), 1, "an absurd --hours must not lose recent rows");
+        assert_eq!(rows[0].agent.as_deref(), Some("recent"));
+
+        let rows = store.by_last_hours(u64::MAX);
+        assert_eq!(rows.len(), 1, "u64::MAX hours must not overflow");
         cleanup_db(&path);
     }
 

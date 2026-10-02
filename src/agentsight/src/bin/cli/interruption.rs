@@ -501,7 +501,13 @@ fn time_range_ns(hours: u64) -> (i64, i64) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as i64;
-    let start_ns = now_ns - (hours as i64) * 3600 * 1_000_000_000;
+    let start_ns = now_ns.saturating_sub(
+        // Saturate so an absurd --last (up to u64::MAX) degrades to
+        // "everything" (start far in the past) instead of overflowing into an
+        // inverted or future-start window. Guard the u64->i64 cast first so a
+        // value >= 2^63 cannot flip sign.
+        (hours.min(i64::MAX as u64) as i64).saturating_mul(3_600_000_000_000),
+    );
     (start_ns, now_ns)
 }
 
@@ -641,5 +647,30 @@ fn print_json<T: serde::Serialize>(value: &T) {
             eprintln!("JSON serialization error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_range_never_inverts_for_absurd_last() {
+        // A requested window far wider than the recorded history must degrade
+        // to "everything", not overflow into an inverted or future-start
+        // window. Without the saturating guard `u64::MAX as i64 == -1` pushes
+        // start one hour into the future.
+        let (start, end) = time_range_ns(u64::MAX);
+        assert!(start <= end, "start {start} must not exceed end {end}");
+
+        // 3_000_000 hours (~342 years) overflows i64 nanoseconds; the window
+        // must still be ordered (debug builds abort on the multiply).
+        let (start, end) = time_range_ns(3_000_000);
+        assert!(start <= end, "start {start} must not exceed end {end}");
+
+        // A normal window is unaffected.
+        let (s2, e2) = time_range_ns(24);
+        assert!(s2 < e2);
+        assert_eq!(e2 - s2, 24 * 3600 * 1_000_000_000);
     }
 }
