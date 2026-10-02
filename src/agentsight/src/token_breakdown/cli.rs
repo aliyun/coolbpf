@@ -63,7 +63,6 @@ impl AnalyzeChatmlCommand {
 
         // Process each event directly (no intermediate extraction)
         let mut breakdowns = Vec::new();
-        let mut event_idx = 0;
 
         for event in &sorted_events {
             let classified = match event.cat.as_str() {
@@ -76,7 +75,8 @@ impl AnalyzeChatmlCommand {
                                     .ok()
                                     .map(|v| {
                                         let msgs = v.get("messages").cloned();
-                                        let tools = v.get("tools").and_then(|t| t.as_array().cloned());
+                                        let tools =
+                                            v.get("tools").and_then(|t| t.as_array().cloned());
                                         (msgs, tools)
                                     })
                                     .unwrap_or((None, None))
@@ -87,16 +87,19 @@ impl AnalyzeChatmlCommand {
                             };
 
                             if let Some(mut msgs) = messages.and_then(|v| v.as_array().cloned()) {
-                                event_idx += 1;
                                 // Process tool_calls arguments: parse JSON string to object in place
                                 for msg in msgs.iter_mut() {
-                                    if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                                    if let Some(tool_calls) =
+                                        msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut())
+                                    {
                                         for tool_call in tool_calls.iter_mut() {
                                             if let Some(func) = tool_call.get_mut("function") {
                                                 if let Some(args) = func.get("arguments") {
                                                     if let Some(args_str) = args.as_str() {
                                                         // Try to parse arguments string as JSON object
-                                                        if let Ok(parsed) = serde_json::from_str::<Value>(args_str) {
+                                                        if let Ok(parsed) =
+                                                            serde_json::from_str::<Value>(args_str)
+                                                        {
                                                             func["arguments"] = parsed;
                                                         }
                                                     }
@@ -108,12 +111,11 @@ impl AnalyzeChatmlCommand {
                                 // Requests without a tools array are ordinary
                                 // LLM traffic; the template accepts None and
                                 // renders without tool definitions.
-                                let chatml_text =
-                                    chat_template.apply_chat_template_with_tools(
-                                        &msgs,
-                                        tools.as_deref(),
-                                        false,
-                                    )?;
+                                let chatml_text = chat_template.apply_chat_template_with_tools(
+                                    &msgs,
+                                    tools.as_deref(),
+                                    false,
+                                )?;
                                 let doc = parse_chatml(&chatml_text)?;
                                 Some(classify_document(&doc.blocks, None))
                             } else {
@@ -131,7 +133,6 @@ impl AnalyzeChatmlCommand {
                     if let Some(ref args) = event.args {
                         if let Some(sse_events) = args.get("sse_events").and_then(|v| v.as_array())
                         {
-                            event_idx += 1;
                             let response = Self::extract_response_from_sse(sse_events);
                             Some(classify_document(&[], Some(response)))
                         } else {
@@ -170,7 +171,11 @@ impl AnalyzeChatmlCommand {
     /// Parse Chrome Trace file and return list of events
     fn parse_chrome_trace(path: &std::path::Path) -> anyhow::Result<Vec<ChromeTraceEvent>> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!("Failed to read Chrome Trace file '{}': {}", path.display(), e)
+            anyhow::anyhow!(
+                "Failed to read Chrome Trace file '{}': {}",
+                path.display(),
+                e
+            )
         })?;
 
         // Chrome trace files are JSON arrays, but may have trailing commas
@@ -180,7 +185,11 @@ impl AnalyzeChatmlCommand {
             Err(e) => {
                 // Try to parse with relaxed format (handle trailing commas)
                 Self::parse_trace_relaxed(&content).map_err(|_| {
-                    anyhow::anyhow!("Failed to parse Chrome Trace file '{}': {}", path.display(), e)
+                    anyhow::anyhow!(
+                        "Failed to parse Chrome Trace file '{}': {}",
+                        path.display(),
+                        e
+                    )
                 })
             }
         }
@@ -221,7 +230,7 @@ impl AnalyzeChatmlCommand {
     fn extract_response_from_sse(sse_events: &[serde_json::Value]) -> ResponseData {
         let mut content_parts = Vec::new();
         let mut reasoning_parts = Vec::new();
-        let mut tool_calls = Vec::new();
+        let tool_calls = Vec::new();
 
         for event in sse_events {
             // Parse the data field which contains JSON string
@@ -238,13 +247,16 @@ impl AnalyzeChatmlCommand {
                         for choice in choices {
                             if let Some(delta) = choice.get("delta") {
                                 // Extract content
-                                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                                if let Some(content) = delta.get("content").and_then(|v| v.as_str())
+                                {
                                     if !content.is_empty() {
                                         content_parts.push(content.to_string());
                                     }
                                 }
                                 // Extract reasoning_content
-                                if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                                if let Some(reasoning) =
+                                    delta.get("reasoning_content").and_then(|v| v.as_str())
+                                {
                                     if !reasoning.is_empty() {
                                         reasoning_parts.push(reasoning.to_string());
                                     }
