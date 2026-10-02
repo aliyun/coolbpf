@@ -143,10 +143,10 @@ impl DiscoverCommand {
             println!("    类别: {}", agent.agent_info.category);
 
             let cmdline_str = agent.cmdline_args.join(" ");
-            let cmdline = if cmdline_str.len() > 80 && !self.verbose {
-                format!("{}...", &cmdline_str[..77])
-            } else {
+            let cmdline = if self.verbose {
                 cmdline_str
+            } else {
+                shorten_cmdline(cmdline_str)
             };
             println!("    命令:  {cmdline}");
 
@@ -158,5 +158,45 @@ impl DiscoverCommand {
         }
 
         println!("总计: {} 个 Agent", agents.len());
+    }
+}
+
+/// Shorten a command line for the non-verbose listing to at most 80 bytes,
+/// cutting on a character boundary so multi-byte text is never split.
+fn shorten_cmdline(cmdline: String) -> String {
+    if cmdline.len() <= 80 {
+        return cmdline;
+    }
+    let mut end = 77;
+    while !cmdline.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &cmdline[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_cmdline_keeps_short_lines() {
+        let line = "node /usr/bin/claude --resume".to_string();
+        assert_eq!(shorten_cmdline(line.clone()), line);
+    }
+
+    #[test]
+    fn shorten_cmdline_cuts_long_ascii_lines_at_77_bytes() {
+        let line = "a".repeat(100);
+        assert_eq!(shorten_cmdline(line), format!("{}...", "a".repeat(77)));
+    }
+
+    #[test]
+    fn shorten_cmdline_does_not_split_multibyte_characters() {
+        // 76 ASCII bytes followed by a 3-byte character puts byte 77 inside
+        // it, as a Chinese project path or prompt argument would.
+        let line = format!("{}{}", "a".repeat(76), "项目".repeat(10));
+        let shortened = shorten_cmdline(line);
+        assert_eq!(shortened, format!("{}...", "a".repeat(76)));
+        assert!(shortened.len() <= 80);
     }
 }
