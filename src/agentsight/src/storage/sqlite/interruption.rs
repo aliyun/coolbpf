@@ -476,6 +476,10 @@ impl InterruptionStore {
     /// per-session breakdown, while `None` counts every event (used by the
     /// Prometheus counter and the CLI, which must stay monotonic).
     ///
+    /// `agent_name` scopes the result to one agent so the overview total matches
+    /// the per-session and per-conversation breakdowns when the dashboard has an
+    /// agent filter selected; `None` covers every agent.
+    ///
     /// Grouped by severity as well as type so a type whose severity mapping
     /// changed across versions cannot report one severity for a count that
     /// aggregates several — callers summing `by_severity` rely on this.
@@ -484,18 +488,21 @@ impl InterruptionStore {
         start_ns: i64,
         end_ns: i64,
         resolved: Option<bool>,
+        agent_name: Option<&str>,
     ) -> Result<Vec<InterruptionTypeStat>, Box<dyn std::error::Error>> {
         // Two fixed statements instead of an assembled one: the storage layer
-        // forbids building SQL by concatenation, so no future filter can turn
-        // this into unsafe query assembly.
+        // forbids building SQL by concatenation, so the agent filter is bound as
+        // `?N IS NULL OR agent_name = ?N` like the breakdown queries below.
         const STATS_ALL: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2
+               AND (?3 IS NULL OR agent_name = ?3)
              GROUP BY interruption_type, severity
              ORDER BY cnt DESC";
         const STATS_BY_RESOLVED: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2 AND resolved = ?3
+               AND (?4 IS NULL OR agent_name = ?4)
              GROUP BY interruption_type, severity
              ORDER BY cnt DESC";
 
@@ -511,13 +518,15 @@ impl InterruptionStore {
         match resolved {
             Some(r) => {
                 let mut stmt = conn.prepare(STATS_BY_RESOLVED)?;
-                for row in stmt.query_map(params![start_ns, end_ns, r as i32], map_row)? {
+                for row in
+                    stmt.query_map(params![start_ns, end_ns, r as i32, agent_name], map_row)?
+                {
                     result.push(row?);
                 }
             }
             None => {
                 let mut stmt = conn.prepare(STATS_ALL)?;
-                for row in stmt.query_map(params![start_ns, end_ns], map_row)? {
+                for row in stmt.query_map(params![start_ns, end_ns, agent_name], map_row)? {
                     result.push(row?);
                 }
             }
@@ -1179,7 +1188,7 @@ mod tests {
         e.occurred_at_ns = 5_000_000_000;
         store.insert(&e).unwrap();
 
-        let stats = store.stats(0, i64::MAX, None).unwrap();
+        let stats = store.stats(0, i64::MAX, None, None).unwrap();
         // rate_limit should have count=2, agent_crash count=1
         let rl = stats
             .iter()
@@ -1260,7 +1269,7 @@ mod tests {
             .unwrap();
         let breakdown_total: i64 = rows.iter().map(|(_, _, _, cnt)| cnt).sum();
         let overview_total: i64 = store
-            .stats(0, i64::MAX, Some(false))
+            .stats(0, i64::MAX, Some(false), None)
             .unwrap()
             .iter()
             .map(|s| s.count)
@@ -1350,12 +1359,12 @@ mod tests {
 
         let sum = |rows: Vec<InterruptionTypeStat>| -> i64 { rows.iter().map(|s| s.count).sum() };
         assert_eq!(
-            sum(store.stats(0, i64::MAX, Some(false)).unwrap()),
+            sum(store.stats(0, i64::MAX, Some(false), None).unwrap()),
             1,
             "dashboard view counts unresolved only"
         );
         assert_eq!(
-            sum(store.stats(0, i64::MAX, None).unwrap()),
+            sum(store.stats(0, i64::MAX, None, None).unwrap()),
             2,
             "Prometheus counter view keeps resolved events"
         );
@@ -1396,6 +1405,38 @@ mod tests {
     }
 
     #[test]
+    fn stats_scopes_to_the_requested_agent() {
+        // The overview card documents its total as the sum of the per-session
+        // breakdowns, and the dashboard sends the same agent filter to both, so
+        // the count query needs the same scoping the breakdowns already have.
+        let store = temp_store();
+        for (i, agent) in ["AgentA", "AgentB"].iter().enumerate() {
+            let mut e = make_event("conv-stats-agent", InterruptionType::EmptyResponse);
+            e.interruption_id = format!("int-stats-agent-{i}");
+            e.agent_name = Some((*agent).to_string());
+            store.insert(&e).unwrap();
+        }
+
+        let sum = |agent: Option<&str>| -> i64 {
+            store
+                .stats(0, i64::MAX, Some(false), agent)
+                .unwrap()
+                .iter()
+                .map(|s| s.count)
+                .sum()
+        };
+
+        assert_eq!(sum(Some("AgentA")), 1, "AgentB's row must not be counted");
+        assert_eq!(sum(Some("AgentB")), 1);
+        assert_eq!(sum(None), 2, "None must cover every agent");
+        assert_eq!(
+            sum(Some("AgentC")),
+            0,
+            "an unknown agent must not fall back to every agent"
+        );
+    }
+
+    #[test]
     fn stats_groups_by_severity_so_by_severity_sums_stay_exact() {
         let store = temp_store();
         // Same type persisted with two severities (a severity mapping that
@@ -1409,7 +1450,7 @@ mod tests {
         medium.severity = crate::interruption::types::Severity::Medium;
         store.insert(&medium).unwrap();
 
-        let rows = store.stats(0, i64::MAX, Some(false)).unwrap();
+        let rows = store.stats(0, i64::MAX, Some(false), None).unwrap();
         let empty_rows: Vec<_> = rows
             .iter()
             .filter(|s| s.interruption_type == "empty_response")
