@@ -8,7 +8,7 @@ use super::id_resolver::IdResolver;
 use super::semantic::GenAISemanticEvent;
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
-use crate::analyzer::token::TokenParser;
+use crate::analyzer::token::{TokenParser, merge_usage};
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
 use crate::runtime_metrics::StageTimer;
@@ -535,11 +535,14 @@ impl GenAIBuilder {
             }
         }
 
-        // Reverse scan for token usage (usage chunk is near the end)
+        // Merge token usage across every event. Anthropic splits it: the
+        // `message_start` event carries input_tokens plus the cache counters
+        // while the terminal `message_delta` carries only output_tokens, so
+        // keeping the last usage-bearing event would record input as 0.
         let usage = sse_events
             .iter()
-            .rev()
-            .find_map(|e| token_parser.parse_event(e));
+            .filter_map(|e| token_parser.parse_event(e))
+            .fold(None, merge_usage);
 
         let (input_tokens, output_tokens) = match &usage {
             Some(u) => (Some(u.input_tokens as i64), Some(u.output_tokens as i64)),
@@ -633,6 +636,55 @@ mod tests {
             source_event: ssl_event,
             reassembled_body: None,
         }
+    }
+
+    /// Build a zero-copy `ParsedSseEvent` whose single `data:` line is `data`.
+    fn make_sse_event(data: &str) -> ParsedSseEvent {
+        let buf = data.as_bytes().to_vec();
+        let ssl_event = Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns: 1000,
+            delta_ns: 0,
+            pid: 1234,
+            tid: 1,
+            uid: 0,
+            len: buf.len() as u32,
+            rw: 0,
+            comm: "test".to_string(),
+            buf,
+            is_handshake: false,
+            ssl_ptr: 0x1,
+        });
+        ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
+
+    /// Anthropic splits usage across SSE events: `message_start` carries
+    /// input_tokens plus the cache counters, while the terminal
+    /// `message_delta` carries only output_tokens. The drain path must merge
+    /// both, exactly like the analyzer's SSE token extractor, instead of
+    /// letting the last usage-bearing event win and recording input as 0.
+    #[test]
+    fn test_extract_sse_enrichment_merges_anthropic_split_usage() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1,"cache_creation_input_tokens":5678,"cache_read_input_tokens":90}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from anthropic SSE");
+        assert_eq!(
+            enrichment.input_tokens,
+            Some(1234),
+            "input_tokens from message_start must survive the message_delta"
+        );
+        assert_eq!(enrichment.output_tokens, Some(42));
     }
 
     #[test]
