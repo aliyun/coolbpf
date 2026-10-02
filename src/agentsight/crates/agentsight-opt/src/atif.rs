@@ -106,6 +106,11 @@ pub struct AtifObservationResult {
     pub source_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Producer extension data; `extra.is_error` carries the provider's
+    /// out-of-band tool-failure flag (`EXTRA_IS_ERROR` in the shared
+    /// `agentsight-atif` schema, written by both in-repo producers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Per-step LLM billing metrics.
@@ -251,9 +256,10 @@ fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
     raw.parse::<DateTime<Utc>>().ok()
 }
 
-/// Heuristic error detection for tool observations — ATIF carries no explicit
-/// `is_error` flag, so we scan the head of the content for common failure
-/// markers. Conservative: prefer false negatives over false positives.
+/// Heuristic error detection for tool observations — fallback for documents
+/// that carry no structured `extra.is_error` flag: scan the head of the
+/// content for common failure markers. Conservative: prefer false negatives
+/// over false positives.
 pub(crate) fn observation_looks_like_error(content: &str) -> bool {
     const MARKERS: &[&str] = &[
         "error:",
