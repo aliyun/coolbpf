@@ -27,9 +27,10 @@ use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
 
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
+use super::token::merge_usage;
 use super::{
-    AnalysisResult, AuditAnalyzer, HttpRecord, LLMProvider, MessageParser, ParsedApiMessage,
-    TokenParser, TokenRecord, TokenUsage,
+    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
+    TokenRecord, TokenUsage,
 };
 
 /// Token count result for request messages
@@ -687,7 +688,7 @@ impl Analyzer {
         let mut usage = sse_events
             .iter()
             .filter_map(|e| self.token.parse_event(e))
-            .fold(None, Self::merge_usage);
+            .fold(None, merge_usage);
 
         if usage.is_none() {
             // Fallback: OpenAI Responses API embeds usage in a final
@@ -705,7 +706,7 @@ impl Analyzer {
                     .events
                     .iter()
                     .filter_map(|e| self.token.parse_data(&e.data))
-                    .fold(None, Self::merge_usage);
+                    .fold(None, merge_usage);
                 if usage.is_none() {
                     usage = self.token.parse_data(&text);
                     if usage.is_none() {
@@ -742,43 +743,6 @@ impl Analyzer {
         }
 
         Some(record)
-    }
-
-    /// Merge two token-usage snapshots from the same SSE stream.
-    ///
-    /// All counters are cumulative within a stream, so the max resolves the
-    /// split-across-events case (message_start input/cache vs message_delta
-    /// output) and tolerates zero-placeholder events without ever regressing a
-    /// larger value. Model and provider are taken from the first event that
-    /// carries them.
-    fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<TokenUsage> {
-        let Some(mut cur) = acc else {
-            return Some(next);
-        };
-        cur.input_tokens = cur.input_tokens.max(next.input_tokens);
-        cur.output_tokens = cur.output_tokens.max(next.output_tokens);
-        cur.cache_creation_input_tokens = Self::max_opt(
-            cur.cache_creation_input_tokens,
-            next.cache_creation_input_tokens,
-        );
-        cur.cache_read_input_tokens =
-            Self::max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
-        if cur.model.is_none() {
-            cur.model = next.model;
-        }
-        if cur.provider == LLMProvider::Unknown {
-            cur.provider = next.provider;
-        }
-        Some(cur)
-    }
-
-    /// Max of two optional counters, preserving a value when only one is set.
-    fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-        match (a, b) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (x, None) => x,
-            (None, y) => y,
-        }
     }
 
     fn extract_token_from_json_body(

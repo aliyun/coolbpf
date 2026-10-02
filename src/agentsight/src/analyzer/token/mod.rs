@@ -239,6 +239,46 @@ pub fn extract_usage_object(
     })
 }
 
+/// Merge two token-usage snapshots from the same SSE stream.
+///
+/// All counters are cumulative within a stream, so the max resolves the
+/// split-across-events case (message_start input/cache vs message_delta
+/// output) and tolerates zero-placeholder events without ever regressing a
+/// larger value. Model and provider are taken from the first event that
+/// carries them.
+///
+/// Anthropic and Anthropic-compatible proxies split usage this way, so every
+/// consumer that folds SSE events must merge rather than let one event win.
+pub(crate) fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<TokenUsage> {
+    let Some(mut cur) = acc else {
+        return Some(next);
+    };
+    cur.input_tokens = cur.input_tokens.max(next.input_tokens);
+    cur.output_tokens = cur.output_tokens.max(next.output_tokens);
+    cur.cache_creation_input_tokens = max_opt(
+        cur.cache_creation_input_tokens,
+        next.cache_creation_input_tokens,
+    );
+    cur.cache_read_input_tokens =
+        max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
+    if cur.model.is_none() {
+        cur.model = next.model;
+    }
+    if cur.provider == LLMProvider::Unknown {
+        cur.provider = next.provider;
+    }
+    Some(cur)
+}
+
+/// Max of two optional counters, preserving a value when only one is set.
+fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
 /// Detect provider from usage object structure
 ///
 /// Note: `total_tokens` is deliberately NOT used to discriminate DashScope from
