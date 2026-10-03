@@ -502,26 +502,34 @@ impl Analyzer {
         if let Some(http_record) = self.extract_http_record(result) {
             if token_result.is_none() && http_record.is_sse {
                 if let Some(body) = &http_record.response_body {
-                    if let Ok(x) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
-                        if let Some(last) = x.last() {
-                            let parser = TokenParser::new();
-                            if let Some(usage) = parser.parse_json(last) {
-                                let record = TokenRecord::new(
-                                    http_record.pid,
-                                    http_record.comm.clone(),
-                                    usage.provider.to_string(),
-                                    usage.input_tokens,
-                                    usage.output_tokens,
-                                )
-                                .with_model(usage.model.clone().unwrap_or_default())
-                                .with_cache_tokens(
-                                    usage.cache_creation_input_tokens.unwrap_or(0),
-                                    usage.cache_read_input_tokens.unwrap_or(0),
-                                );
-
-                                token_result = Some(record);
-                            }
-                        }
+                    // An HTTP/2 SSE body has no `ParsedSseEvent`s, so the h2
+                    // path never reaches `extract_token_from_sse`; this array is
+                    // its only token source. It must merge like every other SSE
+                    // path: Anthropic splits usage across `message_start`
+                    // (input + cache) and `message_delta` (output) and ends with
+                    // a usage-free `message_stop`, so taking the last event
+                    // yields either no record at all or one with a zero input
+                    // count.
+                    if let Ok(events) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
+                        let parser = TokenParser::new();
+                        let usage = events
+                            .iter()
+                            .filter_map(|event| parser.parse_json(event))
+                            .fold(None, merge_usage);
+                        token_result = usage.map(|usage| {
+                            TokenRecord::new(
+                                http_record.pid,
+                                http_record.comm.clone(),
+                                usage.provider.to_string(),
+                                usage.input_tokens,
+                                usage.output_tokens,
+                            )
+                            .with_model(usage.model.clone().unwrap_or_default())
+                            .with_cache_tokens(
+                                usage.cache_creation_input_tokens.unwrap_or(0),
+                                usage.cache_read_input_tokens.unwrap_or(0),
+                            )
+                        });
                     }
                 }
             }
@@ -1657,6 +1665,44 @@ mod tests {
                 _ => None,
             })
             .expect("Analyzer must emit HttpRecord")
+    }
+
+    /// An HTTP/2 SSE stream splits Anthropic usage across events and ends with a
+    /// usage-free `message_stop`. Parsing only the last event therefore produced
+    /// no token record at all, so h2 streaming calls were missing from the token
+    /// database while the same call's genai trace showed the right usage.
+    #[test]
+    fn http2_sse_token_record_merges_usage_across_events() {
+        let analyzer = Analyzer::new();
+        let request_body = br#"{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}"#;
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1234,",
+            "\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
+            "\"usage\":{\"output_tokens\":42}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let stream = build_http2_stream(
+            "/v1/messages",
+            request_body,
+            body.as_bytes().to_vec(),
+            "text/event-stream",
+        );
+
+        let record = analyzer
+            .analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream))
+            .into_iter()
+            .find_map(|result| match result {
+                AnalysisResult::Token(record) => Some(record),
+                _ => None,
+            })
+            .expect("an Anthropic h2 SSE stream must yield a merged TokenRecord");
+
+        assert_eq!(record.input_tokens, 1234, "input comes from message_start");
+        assert_eq!(record.output_tokens, 42, "output comes from message_delta");
+        assert_eq!(record.cache_read_tokens, Some(90));
+        assert_eq!(record.provider, "anthropic");
     }
 
     #[test]
