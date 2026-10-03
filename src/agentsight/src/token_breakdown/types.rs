@@ -166,8 +166,14 @@ mod tests {
 
     #[test]
     fn test_conversation_turn_type_eq() {
-        assert_eq!(ConversationTurnType::UserMessage, ConversationTurnType::UserMessage);
-        assert_ne!(ConversationTurnType::ToolCall, ConversationTurnType::ToolResponse);
+        assert_eq!(
+            ConversationTurnType::UserMessage,
+            ConversationTurnType::UserMessage
+        );
+        assert_ne!(
+            ConversationTurnType::ToolCall,
+            ConversationTurnType::ToolResponse
+        );
     }
 
     #[test]

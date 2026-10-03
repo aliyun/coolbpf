@@ -111,7 +111,10 @@ mod tests {
         let blocks = vec![
             make_block("system", "sys"),
             make_block("user", "query"),
-            make_block("assistant", "<tool_call>\n<function=read>\n</function>\n</tool_call>"),
+            make_block(
+                "assistant",
+                "<tool_call>\n<function=read>\n</function>\n</tool_call>",
+            ),
         ];
         let turns = classify_conversation(&blocks);
         assert_eq!(turns[1].turn_type, ConversationTurnType::ToolCall);
@@ -169,10 +172,7 @@ mod tests {
 
     #[test]
     fn test_classify_document_with_response() {
-        let blocks = vec![
-            make_block("system", "sys"),
-            make_block("user", "Hello"),
-        ];
+        let blocks = vec![make_block("system", "sys"), make_block("user", "Hello")];
         let response = ResponseData {
             content: vec!["Hello!".to_string()],
             reasoning_content: Some("thinking...".to_string()),
