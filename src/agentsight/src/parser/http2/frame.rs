@@ -328,10 +328,12 @@ impl ParsedHttp2Frame {
         // Check if more length bytes follow (this is a simplification)
         // In full HPACK, length can be multi-byte
         if length == 0x7F && pos < payload.len() {
-            // Extended length encoding (not common in practice)
+            // Extended length encoding (not common in practice). A truncated
+            // header block can end in the middle of the variable-length
+            // integer, so stop at the payload end instead of indexing past it.
             length = 0;
             loop {
-                let b = payload[pos];
+                let Some(&b) = payload.get(pos) else { break };
                 pos += 1;
                 length += (b & 0x7F) as usize;
                 if b & 0x80 == 0 {
@@ -644,5 +646,19 @@ mod tests {
         let frame = data_frame(payload.into_bytes());
         let rendered = format!("{frame:?}");
         assert!(rendered.contains("你"));
+    }
+
+    /// A literal string whose extended length never terminates must not read
+    /// past the payload. 0xFF = Huffman flag plus the 0x7F extended-length
+    /// prefix; 0x80 is a continuation byte, so the loop keeps looking for the
+    /// next byte after the payload ends. The helper's contract for
+    /// corrupt/truncated input is a lossy result, not a panic — this input is
+    /// reachable from captured bytes (HPACK header blocks are decoded from
+    /// observed traffic).
+    #[test]
+    fn test_decode_literal_string_truncated_extended_length_does_not_panic() {
+        let (value, consumed) = ParsedHttp2Frame::decode_literal_string(&[0xff, 0x80], 0);
+        assert_eq!(value, "");
+        assert_eq!(consumed, 2, "the whole payload is consumed");
     }
 }

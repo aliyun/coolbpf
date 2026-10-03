@@ -460,9 +460,14 @@ pub async fn get_token_savings(
     query: web::Query<TokenSavingsQuery>,
 ) -> impl Responder {
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match super::handlers::start_or_default(
+        query.start_ns,
+        end_ns,
+        super::handlers::DEFAULT_WINDOW_NS,
+    ) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let agent_name = query.agent_name.as_deref();
 
     // Step 1: Query sessions from genai_events.db
