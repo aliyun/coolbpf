@@ -41,6 +41,32 @@ pub async fn health(data: web::Data<AppState>) -> impl Responder {
     }))
 }
 
+// ─── Time range helpers ──────────────────────────────────────────────────────
+
+/// One day in nanoseconds: the default window for query endpoints that are
+/// called without an explicit `start_ns`.
+pub(super) const DEFAULT_WINDOW_NS: i64 = 86_400_000_000_000;
+
+/// Start of a requested time range, defaulting to `window_ns` before `end_ns`.
+///
+/// Returns the 400 response to answer with when that default is not
+/// representable. `end_ns` is a plain query parameter, so a value near
+/// `i64::MIN` overflows the subtraction, and the wrapped result is a start far
+/// *after* the end — an inverted window that matches nothing while still
+/// answering 200. `/metrics/latency` already rejects the same input.
+pub(super) fn start_or_default(
+    requested: Option<i64>,
+    end_ns: i64,
+    window_ns: i64,
+) -> Result<i64, HttpResponse> {
+    match requested {
+        Some(start_ns) => Ok(start_ns),
+        None => end_ns.checked_sub(window_ns).ok_or_else(|| {
+            HttpResponse::BadRequest().json(json!({"error": "default time range is out of bounds"}))
+        }),
+    }
+}
+
 // ─── Authentication endpoints ────────────────────────────────────────────────
 
 /// POST /api/auth/login
@@ -146,9 +172,10 @@ pub async fn list_sessions(
     query: web::Query<SessionQuery>,
 ) -> impl Responder {
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = data.genai_store.as_deref() else {
         return HttpResponse::InternalServerError()
@@ -517,9 +544,10 @@ pub async fn list_agent_names(
     query: web::Query<TimeRangeQuery>,
 ) -> impl Responder {
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = data.genai_store.as_deref() else {
         return HttpResponse::InternalServerError()
@@ -550,9 +578,10 @@ pub async fn get_timeseries(
     query: web::Query<TimeseriesQuery>,
 ) -> impl Responder {
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let buckets = query.buckets.unwrap_or(30);
     let agent_name = query.agent_name.as_deref();
 
@@ -2395,6 +2424,50 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    /// `end_ns` is a plain `i64` query parameter, so a value near `i64::MIN`
+    /// makes the default 24 h start wrap into a huge positive bound. The query
+    /// then runs on an inverted (always empty) window and still answers 200,
+    /// which a client cannot tell apart from "this range has no data".
+    /// `/metrics/latency` already rejects the same input with 400.
+    #[actix_web::test]
+    async fn interruption_count_rejects_an_unrepresentable_default_window() {
+        let interruption_path = unique_handler_db("interruptions-default-window");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count),
+        )
+        .await;
+
+        let rejected = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?end_ns=-9223372036854775808")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "an unrepresentable default window must be rejected, not wrapped"
+        );
+
+        // Guard: the ordinary default window still answers.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        cleanup_db(&interruption_path);
+    }
+
     #[actix_web::test]
     async fn health_reports_status_version_and_uptime() {
         let app =
@@ -3744,9 +3817,10 @@ pub async fn list_interruptions(
     };
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
     let limit = query.limit.unwrap_or(200);
 
     match istore.list(
@@ -3782,9 +3856,10 @@ pub async fn interruption_count(
     };
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => {
@@ -3833,9 +3908,10 @@ pub async fn interruption_stats(
     };
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => HttpResponse::Ok().json(stats),
@@ -3859,9 +3935,10 @@ pub async fn interruption_session_counts(
     };
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.count_unresolved_by_session_detailed(start_ns, end_ns, query.agent_name.as_deref())
     {
@@ -3930,9 +4007,10 @@ pub async fn interruption_conversation_counts(
     };
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     match istore.count_unresolved_by_conversation_detailed(
         start_ns,
@@ -4497,10 +4575,10 @@ fn compute_skill_metrics_response(
     }
 
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
-    // Default: 7 days
-    let start_ns = query
-        .start_ns
-        .unwrap_or_else(|| end_ns - 7 * 86_400_000_000_000i64);
+    let start_ns = match start_or_default(query.start_ns, end_ns, 7 * DEFAULT_WINDOW_NS) {
+        Ok(start_ns) => start_ns,
+        Err(response) => return response,
+    };
 
     let Some(store) = genai_store else {
         return HttpResponse::InternalServerError()
