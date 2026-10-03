@@ -276,6 +276,25 @@ pub(crate) fn observation_looks_like_error(content: &str) -> bool {
     MARKERS.iter().any(|m| head.contains(m))
 }
 
+/// Whether one observation result failed: the producer's structured
+/// `extra.is_error` flag wins when recorded (either polarity); the text
+/// heuristic is only the fallback for flag-less documents. Single source of
+/// truth for every reader that derives a failure bit from an observation.
+pub(crate) fn observation_result_is_error(result: &AtifObservationResult) -> bool {
+    result
+        .extra
+        .as_ref()
+        .and_then(|e| e.get("is_error"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| {
+            result
+                .content
+                .as_deref()
+                .map(observation_looks_like_error)
+                .unwrap_or(false)
+        })
+}
+
 /// UTF-8 safe truncation with an ellipsis suffix.
 pub(crate) fn truncate_chars(raw: &str, max_chars: usize) -> String {
     if raw.chars().count() > max_chars {

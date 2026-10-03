@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::atif::{observation_looks_like_error, AtifStep, AtifTrajectory};
+use crate::atif::{observation_result_is_error, AtifStep, AtifTrajectory};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
     RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
@@ -506,10 +506,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
                     && !step.results().is_empty()
-                    && step
-                        .results()
-                        .iter()
-                        .all(|r| observation_looks_like_error(r.content.as_deref().unwrap_or("")));
+                    && step.results().iter().all(observation_result_is_error);
 
                 let turn_ts = step.end_ts().unwrap_or(origin);
                 b.finalize(
@@ -964,7 +961,7 @@ pub(crate) fn build_turn_ledger(
                 let err = step
                     .results()
                     .iter()
-                    .find(|r| observation_looks_like_error(r.content.as_deref().unwrap_or("")));
+                    .find(|r| observation_result_is_error(r));
                 let files: Vec<String> = step.calls().iter().filter_map(write_target).collect();
                 let backtrack = step
                     .calls()
@@ -1699,6 +1696,75 @@ mod tests {
         assert!(text.contains("| FILES: src/p.rs"));
         assert!(text.contains("| BACKTRACK"));
         assert!(text.contains("| USER→: 命名要用 snake_case"));
+    }
+
+    /// The structured provider flag must reach the turn ledger the same way it
+    /// reaches `PerfStats`: a clean-text failure the producer flagged is still a
+    /// failure, and a success that merely mentions an error is not.
+    #[test]
+    fn ledger_honors_structured_observation_is_error() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"make test"}}],
+             "observation":{"results":[{"source_call_id":"c1",
+               "content":"make: *** Tool execution aborted, exit status 1",
+               "extra":{"is_error":true}}]}},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"true"}}],
+             "observation":{"results":[{"source_call_id":"c2",
+               "content":"Error: connection reset (recovered, retry succeeded)",
+               "extra":{"is_error":false}}]}}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        let ledger = build_turn_ledger(&cost, &t);
+
+        assert!(
+            ledger[0].is_error,
+            "producer set extra.is_error=true on a clean-text failure, \
+             but the ledger dropped it: {ledger:?}"
+        );
+        assert!(
+            !ledger[1].is_error,
+            "extra.is_error=false must beat the error-mentioning text"
+        );
+    }
+
+    /// Flag-less documents keep the text-heuristic fallback.
+    #[test]
+    fn ledger_keeps_text_heuristic_for_flagless_observations() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"cargo test"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"error: cannot find value"}]}}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        let ledger = build_turn_ledger(&cost, &t);
+        assert!(ledger[0].is_error);
+    }
+
+    /// `all_calls_errored` feeds `removable_turn`: a failed turn the producer
+    /// flagged must not look error-free just because its output text is clean.
+    #[test]
+    fn removable_turn_honors_structured_observation_is_error() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"make test"}}],
+             "observation":{"results":[{"source_call_id":"c1",
+               "content":"make: *** Tool execution aborted, exit status 1",
+               "extra":{"is_error":true}}]}},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"done"}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        assert!(
+            cost.calls[0].removable_turn,
+            "a turn whose every tool call failed must be removable, flag or not"
+        );
     }
 
     /// Model-supplied turn numbers are untrusted input: unknown turns are
