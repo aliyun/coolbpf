@@ -160,8 +160,12 @@ pub fn convert_codex_events(
                         .get("message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    step_id += 1;
-                    steps.push(user_step(step_id, ts, text.to_string()));
+                    // Like the role=user fallback, skip message-less
+                    // events so no empty user step consumes a step id.
+                    if !text.is_empty() {
+                        step_id += 1;
+                        steps.push(user_step(step_id, ts, text.to_string()));
+                    }
                 }
                 "token_count" => {
                     if let Some(info) = payload.get("info") {
@@ -592,6 +596,26 @@ mod tests {
         assert_eq!(traj.steps[0].source, StepSource::User);
         assert_eq!(traj.steps[0].message, "hello");
         assert_eq!(traj.steps[1].message, "hi");
+    }
+
+    #[test]
+    fn test_message_less_user_message_emits_no_step() {
+        // Some event_msg/user_message records carry no message payload;
+        // like the role=user fallback, they must not produce an empty
+        // user step that consumes a step id.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-2\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        traj.validate_step_ids().unwrap();
+        assert_eq!(traj.steps.len(), 1, "steps: {:?}", traj.steps);
+        assert_eq!(traj.steps[0].source, StepSource::Agent);
+        assert_eq!(traj.steps[0].message, "hi");
+        // The skipped user step must not leave a gap in the id ordering.
+        assert_eq!(traj.steps[0].step_id, 1);
     }
 
     #[test]
