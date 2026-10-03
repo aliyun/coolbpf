@@ -705,7 +705,11 @@ pub struct AnthropicSseMessageDelta {
 /// delta with `message_start` rather than trusting either alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicSseUsageDelta {
-    /// Output tokens
+    /// Output tokens. Optional like every other counter: a proxy that splits the
+    /// terminal usage between `message_start` and this delta may omit it, and a
+    /// required field would fail the whole event, losing the `stop_reason` and
+    /// the counters the delta did carry.
+    #[serde(default)]
     pub output_tokens: u64,
     /// Input tokens, when the provider reports them in the delta
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -346,7 +346,7 @@ impl InterruptionCommand {
                 let (start_ns, end_ns) = time_range_ns(*last);
                 // `None`: the CLI reports what happened in the window,
                 // resolved or not, unlike the dashboard's unresolved-only card.
-                match store.stats(start_ns, end_ns, None) {
+                match store.stats(start_ns, end_ns, None, None) {
                     Ok(stats) => {
                         if *json {
                             print_json(&stats);

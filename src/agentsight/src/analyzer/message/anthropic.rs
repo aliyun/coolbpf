@@ -845,6 +845,46 @@ mod tests {
         assert_eq!(resp.usage.cache_read_input_tokens, Some(7));
     }
 
+    /// Test: SSE stream whose terminal `message_delta` reports only the cache
+    /// counters and the input count, without `usage.output_tokens`.
+    ///
+    /// `AnthropicSseUsageDelta`'s own contract says every counter is optional
+    /// because compatible proxies move the terminal usage between
+    /// `message_start` and the delta. A required `output_tokens` made the whole
+    /// event fail to deserialize, so the delta was skipped and `stop_reason`
+    /// plus the counters it carried were lost.
+    #[test]
+    fn test_aggregate_sse_message_delta_without_output_tokens() {
+        let events = serde_json::json!([
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {
+                    "input_tokens": 1111,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 24576
+                }
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("should aggregate");
+        assert_eq!(
+            resp.stop_reason.as_deref(),
+            Some("end_turn"),
+            "a delta without output_tokens must still carry its stop_reason"
+        );
+        assert_eq!(resp.usage.input_tokens, 1111);
+        assert_eq!(
+            resp.usage.output_tokens, 0,
+            "an absent output_tokens is an absent counter, not a reason to drop the event"
+        );
+        assert_eq!(resp.usage.cache_creation_input_tokens, Some(0));
+        assert_eq!(resp.usage.cache_read_input_tokens, Some(24576));
+    }
+
     /// Test: SSE stream with multiple tool calls
     #[test]
     fn test_aggregate_sse_multiple_tool_calls() {

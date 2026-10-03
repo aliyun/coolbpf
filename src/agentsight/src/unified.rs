@@ -1398,14 +1398,12 @@ impl AgentSight {
     /// Check and drain the pending_logtail mailbox.
     /// If the config watcher deposited a new LogtailExporter, register it.
     fn check_pending_logtail(&mut self) {
-        if let Ok(mut guard) = self.pending_logtail.try_lock() {
-            if let Some(exporter) = guard.take() {
-                log::info!(
-                    "Registering dynamically-activated LogtailExporter: '{}'",
-                    exporter.name()
-                );
-                self.genai_exporters.push(exporter);
-            }
+        if let Some(exporter) = crate::background::take_pending_logtail(&self.pending_logtail) {
+            log::info!(
+                "Registering dynamically-activated LogtailExporter: '{}'",
+                exporter.name()
+            );
+            self.genai_exporters.push(exporter);
         }
     }
 

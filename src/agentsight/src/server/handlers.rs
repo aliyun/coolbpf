@@ -2316,6 +2316,86 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn interruption_count_scopes_to_the_requested_agent() {
+        // The overview total is documented and used as the sum of the
+        // per-session breakdowns, and the dashboard sends the same agent filter
+        // to both. Counting every agent here made the card disagree with the
+        // per-session badges whenever an agent was selected.
+        let interruption_path = unique_handler_db("interruptions-agent-count");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        for (i, agent) in ["Agent-A", "Agent-B"].iter().enumerate() {
+            let mut event = make_interruption_event(
+                &format!("int-agent-count-{i}"),
+                &format!("sess-agent-count-{i}"),
+                &format!("conv-agent-count-{i}"),
+                crate::interruption::InterruptionType::RateLimit,
+            );
+            event.agent_name = Some((*agent).to_string());
+            istore.insert(&event).unwrap();
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_count)
+                .service(interruption_session_counts),
+        )
+        .await;
+
+        let all = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/interruptions/count?start_ns=0&end_ns=9223372036854775807")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(service_response_json(all).await["total"], 2);
+
+        let only_a = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(
+                    "/interruptions/count?start_ns=0&end_ns=9223372036854775807&agent_name=Agent-A",
+                )
+                .to_request(),
+        )
+        .await;
+        let only_a_body = service_response_json(only_a).await;
+        assert_eq!(
+            only_a_body["total"], 1,
+            "an agent filter must exclude the other agent's events: {only_a_body}"
+        );
+        assert_eq!(only_a_body["by_severity"]["high"], 1);
+
+        // Same filter, same expectation as the per-session breakdown the card is
+        // documented to agree with.
+        let breakdown = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(
+                    "/interruptions/session-counts?start_ns=0&end_ns=9223372036854775807&agent_name=Agent-A",
+                )
+                .to_request(),
+        )
+        .await;
+        let breakdown_body = service_response_json(breakdown).await;
+        let breakdown_total: i64 = breakdown_body
+            .as_array()
+            .expect("session-counts returns an array")
+            .iter()
+            .map(|row| row["total"].as_i64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            breakdown_total,
+            only_a_body["total"].as_i64().unwrap_or(-1),
+            "the overview total must equal the sum of its breakdown: {breakdown_body}"
+        );
+
+        cleanup_db(&interruption_path);
+    }
+
+    #[actix_web::test]
     async fn health_reports_status_version_and_uptime() {
         let app =
             awtest::init_service(App::new().app_data(test_app_state(0)).service(health)).await;
@@ -3240,7 +3320,7 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
     if let Some(ref istore) = data.interruption_store {
         // `None`: a Prometheus counter must never decrease, so resolving an
         // event may not remove it from this total.
-        if let Ok(stats) = istore.stats(0, i64::MAX, None) {
+        if let Ok(stats) = istore.stats(0, i64::MAX, None, None) {
             out.push_str(
                 "# HELP agentsight_interruptions_total Total interruption events by type\n",
             );
@@ -3706,7 +3786,7 @@ pub async fn interruption_count(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.stats(start_ns, end_ns, Some(false)) {
+    match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => {
             let mut total = 0u64;
             let mut critical = 0u64;
@@ -3757,7 +3837,7 @@ pub async fn interruption_stats(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.stats(start_ns, end_ns, Some(false)) {
+    match istore.stats(start_ns, end_ns, Some(false), query.agent_name.as_deref()) {
         Ok(stats) => HttpResponse::Ok().json(stats),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))

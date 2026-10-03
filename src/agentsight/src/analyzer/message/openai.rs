@@ -31,6 +31,23 @@ use super::types::{
     OpenAiSseChunk,
 };
 
+/// Emit an in-flight Responses-API function call, if there is one.
+///
+/// Called both when the stream says the call is finished and before a new call
+/// starts, because a Responses stream may carry several calls at once (parallel
+/// tool use) and is not required to send `function_call_arguments.done` for each
+/// of them.
+fn push_tool_call(tool_calls: &mut Vec<serde_json::Value>, id: &str, name: &str, arguments: &str) {
+    if name.is_empty() {
+        return;
+    }
+    tool_calls.push(serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments}
+    }));
+}
+
 /// Parser for OpenAI Chat Completions API
 ///
 /// Provides methods to parse JSON request and response bodies
@@ -301,6 +318,12 @@ impl OpenAIParser {
                 "response.output_item.added" => {
                     if let Some(item) = chunk.get("item") {
                         if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                            // A Responses stream can carry several calls in
+                            // flight (parallel tool use) and is not required to
+                            // send `function_call_arguments.done` for each, so
+                            // starting a new call must not discard the previous
+                            // one's name, id and arguments.
+                            push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
                             tc_name = item
                                 .get("name")
                                 .and_then(|v| v.as_str())
@@ -321,16 +344,10 @@ impl OpenAIParser {
                     }
                 }
                 "response.function_call_arguments.done" => {
-                    if !tc_name.is_empty() {
-                        tool_calls.push(serde_json::json!({
-                            "id": tc_id,
-                            "type": "function",
-                            "function": {"name": tc_name, "arguments": tc_args}
-                        }));
-                        tc_name.clear();
-                        tc_id.clear();
-                        tc_args.clear();
-                    }
+                    push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
+                    tc_name.clear();
+                    tc_id.clear();
+                    tc_args.clear();
                 }
                 "response.completed" => {
                     if let Some(resp) = chunk.get("response") {
@@ -369,13 +386,7 @@ impl OpenAIParser {
         }
 
         // Flush any in-flight tool call (truncated stream without "done" event)
-        if !tc_name.is_empty() {
-            tool_calls.push(serde_json::json!({
-                "id": tc_id,
-                "type": "function",
-                "function": {"name": tc_name, "arguments": tc_args}
-            }));
-        }
+        push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
 
         let mut message = serde_json::json!({
             "role": "assistant",
@@ -1051,6 +1062,68 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"q\":\"test\"}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_two_calls_without_done() {
+        // Two function calls in flight with no
+        // `response.function_call_arguments.done` (the truncated shape the
+        // post-loop flush exists for). Starting the second call used to clear
+        // the first one's name/id/arguments, so only the last call survived.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_par", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_1"}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"city\":\"Beijing\"}"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_time", "call_id": "call_2"}}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "delta": "{\"zone\":\"UTC\"}"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_par", "model": "gpt-5", "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("should aggregate");
+
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("both calls must be reported");
+        assert_eq!(
+            tc.len(),
+            2,
+            "a second in-flight call must not discard the first: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_1");
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "get_weather"
+        );
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+        assert_eq!(tc[1].get("id").unwrap().as_str().unwrap(), "call_2");
+        assert_eq!(
+            tc[1]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "{\"zone\":\"UTC\"}"
         );
     }
 
