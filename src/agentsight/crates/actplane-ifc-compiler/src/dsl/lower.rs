@@ -426,6 +426,49 @@ mod tests {
     }
 
     #[test]
+    fn five_octet_endpoint_pattern_must_be_rejected_or_warned() {
+        let pol = crate::dsl::parse::parse(
+            r#"source NET = endpoint "1.2.3.4.5"
+            rule r:
+              block connect endpoint "*" if NET
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert_eq!(
+            c.endpoint_resolutions.get("1.2.3.4.5"),
+            Some(&Vec::new()),
+            "five-octet pattern must be recorded in endpoint_resolutions"
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("1.2.3.4.5") && w.contains("match-nothing")),
+            "five-octet pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn numeric_ipv4_patterns_keep_exact_semantics() {
+        assert_eq!(
+            lower_numeric_ipv4("10.0.0.5"),
+            Some((ipv4_to_kernel(Ipv4Addr::new(10, 0, 0, 5)), u32::MAX))
+        );
+        assert_eq!(
+            lower_numeric_ipv4("10.0.0."),
+            Some((ipv4_to_kernel(Ipv4Addr::new(10, 0, 0, 0)), 0x00ff_ffff))
+        );
+        assert_eq!(lower_numeric_ipv4("10.0.0.256"), None);
+        assert_eq!(
+            lower_numeric_ipv4("1.2.3.4."),
+            Some((ipv4_to_kernel(Ipv4Addr::new(1, 2, 3, 4)), u32::MAX))
+        );
+        assert_eq!(lower_numeric_ipv4("1.2.3.4.5"), None);
+        assert_eq!(lower_numeric_ipv4("1.2.3.4.5."), None);
+    }
+
+    #[test]
     fn file_path_at_abi_limit_compiles() {
         // 63 bytes: exactly PAT - 1, fits with NUL terminator in [u8; 64]
         let path = format!("/{}", "a".repeat(62)); // "/" + 62 × 'a' = 63 bytes
@@ -622,7 +665,10 @@ fn lower_numeric_ipv4(pat: &str) -> Option<(u32, u32)> {
     let mut k = 0u32;
     for tok in body.split('.') {
         if k >= 4 {
-            break;
+            // A fifth numeric token means this is not an IPv4 literal; the
+            // (net, mask) ABI cannot express it without silently dropping
+            // octets, so reject it and let the caller warn.
+            return None;
         }
         match tok.parse::<u8>() {
             Ok(o) => {
