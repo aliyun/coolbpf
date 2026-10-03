@@ -42,7 +42,13 @@ pub fn extract_private_metadata(
             cwd = e.get("cwd").and_then(|v| v.as_str()).map(String::from);
         }
         match e.get("type").and_then(|v| v.as_str()) {
-            Some("user") => user_count += 1,
+            // Claude-style tool results also ride in type=="user" events;
+            // they are observations, not user messages.
+            Some("user") => {
+                if !carries_only_tool_results(e.get("message")) {
+                    user_count += 1;
+                }
+            }
             Some("assistant") => assistant_count += 1,
             _ => {}
         }
@@ -65,6 +71,27 @@ pub fn extract_private_metadata(
         serde_json::Value::String(project.to_string()),
     );
     extra
+}
+
+/// Return `true` when a Claude-style user event only carries tool results:
+/// a `message.content` array with at least one `tool_result` block and no
+/// `text` block. This mirrors the discrimination the ATIF converter in
+/// `atif.rs` applies when classifying such events as observations instead
+/// of user turns.
+fn carries_only_tool_results(message: Option<&serde_json::Value>) -> bool {
+    let Some(content) = message.and_then(|m| m.get("content")) else {
+        return false;
+    };
+    let Some(blocks) = content.as_array() else {
+        return false;
+    };
+    let has_tool_result = blocks
+        .iter()
+        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
+    let has_text = blocks
+        .iter()
+        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"));
+    has_tool_result && !has_text
 }
 
 #[cfg(test)]
@@ -92,5 +119,36 @@ mod tests {
         assert_eq!(extra["user_message_count"], 1);
         assert_eq!(extra["assistant_message_count"], 1);
         assert_eq!(extra["project"], "myapp");
+    }
+
+    #[test]
+    fn test_extract_private_metadata_skips_tool_result_carriers() {
+        // Claude-style tool results ride in type=="user" events; they are
+        // observations, not user messages, so only the first event counts.
+        let content = concat!(
+            "{\"type\":\"user\",\"cwd\":\"/data/myapp\",\"message\":{\"role\":\"user\",\"content\":\"list the files\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"exec\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"file-a\\nfile-b\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"read_file\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t2\",\"content\":\"file-a contents\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let extra = extract_private_metadata(&events, "myapp");
+        assert_eq!(extra["user_message_count"], 1);
+        assert_eq!(extra["assistant_message_count"], 2);
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_text_user_events() {
+        // Plain-text user events (string content or text blocks, including
+        // one mixed with a tool_result) are genuine user messages.
+        let content = concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello again\"}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"x\"},{\"type\":\"text\",\"text\":\"and this too\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let extra = extract_private_metadata(&events, "myapp");
+        assert_eq!(extra["user_message_count"], 3);
     }
 }

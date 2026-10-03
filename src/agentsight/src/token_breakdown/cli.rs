@@ -230,7 +230,11 @@ impl AnalyzeChatmlCommand {
     fn extract_response_from_sse(sse_events: &[serde_json::Value]) -> ResponseData {
         let mut content_parts = Vec::new();
         let mut reasoning_parts = Vec::new();
-        let tool_calls = Vec::new();
+        // OpenAI-compatible streams deliver each tool call across deltas
+        // keyed by `index`: the function name arrives once (usually in the
+        // first fragment) and the arguments stream as string fragments that
+        // must be concatenated per index before rendering "name: arguments".
+        let mut tool_calls: Vec<(usize, String, String)> = Vec::new();
 
         for event in sse_events {
             // Parse the data field which contains JSON string
@@ -261,12 +265,57 @@ impl AnalyzeChatmlCommand {
                                         reasoning_parts.push(reasoning.to_string());
                                     }
                                 }
+                                // Extract tool_calls - merge function name and
+                                // streamed arguments fragments by index
+                                if let Some(calls) =
+                                    delta.get("tool_calls").and_then(|t| t.as_array())
+                                {
+                                    for call in calls {
+                                        let index =
+                                            call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                                as usize;
+                                        let function = call.get("function");
+                                        let name = function
+                                            .and_then(|f| f.get("name"))
+                                            .and_then(|n| n.as_str())
+                                            .unwrap_or("");
+                                        let arguments = function
+                                            .and_then(|f| f.get("arguments"))
+                                            .and_then(|a| a.as_str())
+                                            .unwrap_or("");
+                                        match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
+                                            Some((_, slot_name, slot_arguments)) => {
+                                                if !name.is_empty() {
+                                                    *slot_name = name.to_string();
+                                                }
+                                                slot_arguments.push_str(arguments);
+                                            }
+                                            None => {
+                                                tool_calls.push((
+                                                    index,
+                                                    name.to_string(),
+                                                    arguments.to_string(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+
+        let tool_calls: Vec<String> = {
+            let mut calls = tool_calls;
+            calls.sort_by_key(|(index, _, _)| *index);
+            calls
+                .into_iter()
+                .filter(|(_, name, arguments)| !name.is_empty() || !arguments.is_empty())
+                .map(|(_, name, arguments)| format!("{name}: {arguments}"))
+                .collect()
+        };
 
         ResponseData {
             content: content_parts,
@@ -277,5 +326,84 @@ impl AnalyzeChatmlCommand {
             },
             tool_calls,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sse(payload: &str) -> serde_json::Value {
+        json!({ "data": payload })
+    }
+
+    #[test]
+    fn sse_tool_call_delta_is_extracted() {
+        let events = vec![
+            sse(r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_tool_call_arguments_fragments_merge_by_index() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![r#"get_weather: {"city":"Beijing"}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_multiple_tool_calls_keep_index_order() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"name":"second_tool","arguments":"{}"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"first_tool","arguments":"{}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_content_and_reasoning_unchanged_alongside_tool_calls() {
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"reasoning_content":"thinking","content":"hi "}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"content":"there","tool_calls":[{"index":0,"function":{"name":"noop","arguments":""}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["hi ".to_string(), "there".to_string()]);
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(resp.tool_calls, vec!["noop: ".to_string()]);
     }
 }
