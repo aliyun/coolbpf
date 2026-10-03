@@ -670,6 +670,11 @@ pub struct PerfReport {
     pub items: Vec<PerfIssue>, // selected strategy rows
     pub considered: usize,     // data signals evaluated
     pub dismissed: usize,      // signals not matched by any strategy
+    /// Judgments that errored (transport/parse) — neither kept nor dismissed.
+    /// A report whose judgments all failed is returned as an error instead,
+    /// so this is only non-zero for partial failures.
+    #[serde(default)]
+    pub failed: usize,
     pub wall_secs: f64,
     /// Causal graph: signal → cause → strategy analysis chain.
     #[serde(skip_serializing_if = "Option::is_none")]

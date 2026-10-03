@@ -99,12 +99,37 @@ pub struct AtifObservation {
     pub results: Vec<AtifObservationResult>,
 }
 
+/// Flatten observation content to the text the analyzers consume.
+///
+/// The shared ATIF schema types `ObservationResult.content` as any JSON
+/// (`agentsight-atif::ObservationResult`), and the in-repo producers flatten
+/// structured responses before writing them (`src/atif/converter.rs`). A
+/// document from any other producer may keep the structured shape, so the
+/// lenient reader accepts it instead of rejecting the whole document with
+/// "invalid type: map, expected a string".
+fn de_observation_content<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<serde_json::Value>::deserialize(deserializer)?.map(|v| match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        }),
+    )
+}
+
 /// One tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtifObservationResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Tool output as text, flattened from the schema's any-JSON shape.
+    #[serde(
+        default,
+        deserialize_with = "de_observation_content",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub content: Option<String>,
     /// Producer extension data; `extra.is_error` carries the provider's
     /// out-of-band tool-failure flag (`EXTRA_IS_ERROR` in the shared
@@ -276,6 +301,25 @@ pub(crate) fn observation_looks_like_error(content: &str) -> bool {
     MARKERS.iter().any(|m| head.contains(m))
 }
 
+/// Whether one observation result failed: the producer's structured
+/// `extra.is_error` flag wins when recorded (either polarity); the text
+/// heuristic is only the fallback for flag-less documents. Single source of
+/// truth for every reader that derives a failure bit from an observation.
+pub(crate) fn observation_result_is_error(result: &AtifObservationResult) -> bool {
+    result
+        .extra
+        .as_ref()
+        .and_then(|e| e.get("is_error"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| {
+            result
+                .content
+                .as_deref()
+                .map(observation_looks_like_error)
+                .unwrap_or(false)
+        })
+}
+
 /// UTF-8 safe truncation with an ellipsis suffix.
 pub(crate) fn truncate_chars(raw: &str, max_chars: usize) -> String {
     if raw.chars().count() > max_chars {
@@ -401,6 +445,57 @@ mod tests {
                 .as_ref()
                 .and_then(|e| e.get("provider_call_id")),
             Some(&serde_json::json!("call_abc"))
+        );
+    }
+
+    #[test]
+    fn parses_schema_valid_structured_observation_content() {
+        // The shared agentsight-atif schema types ObservationResult.content as
+        // any JSON ("ATIF allows any JSON for observation content" — see
+        // src/atif/converter.rs, which flattens for this very reason). The
+        // lenient reader must accept a structured result instead of rejecting
+        // the whole document with "invalid type: map, expected a string".
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "session_id": "s1",
+            "agent": {"name": "a", "version": "1"},
+            "steps": [{
+                "step_id": 1, "source": "agent", "timestamp": "2026-01-01T00:00:01Z",
+                "tool_calls": [{"tool_call_id": "c1", "function_name": "Read",
+                                "arguments": {"file_path": "a.rs"}}],
+                "observation": {"results": [{"source_call_id": "c1",
+                    "content": {"exit_code": 1, "stdout": "boom"}}]}
+            }]
+        }"#;
+        let traj = AtifTrajectory::from_json(json).unwrap();
+        let result = &traj.steps[0].results()[0];
+        let text = result.content.as_deref().expect("content must survive");
+        assert!(
+            text.contains("exit_code"),
+            "structured content must be flattened to text: {text}"
+        );
+    }
+
+    #[test]
+    fn keeps_string_observation_content_verbatim() {
+        // Guard: flattening is a no-op for the string shape the in-repo
+        // producers write.
+        let json = r#"{
+            "schema_version": "ATIF-v1.7",
+            "session_id": "s1",
+            "agent": {"name": "a", "version": "1"},
+            "steps": [{
+                "step_id": 1, "source": "agent", "timestamp": "2026-01-01T00:00:01Z",
+                "tool_calls": [{"tool_call_id": "c1", "function_name": "Read",
+                                "arguments": {"file_path": "a.rs"}}],
+                "observation": {"results": [{"source_call_id": "c1",
+                    "content": "boom\n"}]}
+            }]
+        }"#;
+        let traj = AtifTrajectory::from_json(json).unwrap();
+        assert_eq!(
+            traj.steps[0].results()[0].content.as_deref(),
+            Some("boom\n")
         );
     }
 

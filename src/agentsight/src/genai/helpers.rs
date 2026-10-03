@@ -128,11 +128,19 @@ pub(super) fn classify_call_kind_from_raw(
     system_instructions: &Option<String>,
     first_user_text: &str,
 ) -> &'static str {
+    // The system prompt reaches this classifier in two shapes: an array of
+    // message objects (the structured path stores it that way) and a bare JSON
+    // string (the pending/crash path serialises Anthropic's top-level `system`
+    // or the Responses API's `instructions` directly). Both must extract the
+    // same text, or a recap call that is interrupted before `complete_pending`
+    // runs is persisted as `main` and never corrected.
     let sys_text = system_instructions
         .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
-        .map(|arr| {
-            arr.iter()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| match v {
+            serde_json::Value::String(text) => text,
+            serde_json::Value::Array(arr) => arr
+                .iter()
                 .filter_map(|m| {
                     let c = m.get("content")?;
                     if let Some(s) = c.as_str() {
@@ -157,7 +165,8 @@ pub(super) fn classify_call_kind_from_raw(
                     None
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            _ => String::new(),
         })
         .unwrap_or_default();
 
@@ -1672,5 +1681,37 @@ mod tests {
         assert_eq!(cache.get_agent_name(&1), Some(&"Agent1".to_string()));
         assert_eq!(cache.get_agent_name(&2), Some(&"Agent2".to_string()));
         assert_eq!(cache.get_agent_name(&3), None);
+    }
+
+    /// The pending/crash path serialises a top-level system prompt (Anthropic's
+    /// `system` field, the Responses API's `instructions`) as a bare JSON
+    /// string, while the structured path carries the same prompt as an array of
+    /// message objects. Both shapes must yield the same call kind: otherwise a
+    /// recap call that is interrupted before `complete_pending` runs is
+    /// persisted as `main` and never corrected.
+    #[test]
+    fn test_raw_system_prompt_as_json_string_is_recap() {
+        let system_instructions =
+            Some(serde_json::to_string("You are a specialized context summarizer.").unwrap());
+        assert_eq!(
+            classify_call_kind_from_raw(&system_instructions, "hi"),
+            "recap"
+        );
+    }
+
+    /// Guard: the array shape keeps working exactly as before.
+    #[test]
+    fn test_raw_system_prompt_as_array_is_recap() {
+        let system_instructions = Some(
+            serde_json::to_string(&vec![serde_json::json!({
+                "role": "system",
+                "content": "managed memory extraction subagent"
+            })])
+            .unwrap(),
+        );
+        assert_eq!(
+            classify_call_kind_from_raw(&system_instructions, "hi"),
+            "recap"
+        );
     }
 }

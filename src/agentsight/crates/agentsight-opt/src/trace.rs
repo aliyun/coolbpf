@@ -3,7 +3,7 @@
 //! Extracts structured data from ATIF trajectories that all analysis
 //! dimensions (accuracy, perf, cost) consume.
 
-use crate::atif::{observation_looks_like_error, AtifTrajectory};
+use crate::atif::{observation_result_is_error, AtifTrajectory};
 use crate::types::ToolCallRecord;
 
 // ── Public types ──
@@ -178,20 +178,8 @@ pub fn collect_tool_calls_with(traj: &AtifTrajectory, cmd_chars: usize) -> Vec<T
                 .iter()
                 .find(|r| r.source_call_id.as_deref() == Some(call.tool_call_id.as_str()))
                 .or_else(|| step.results().get(k));
-            // The producer's structured flag wins when recorded (either way);
-            // the text heuristic is only the fallback for flag-less documents.
-            let flagged = result.and_then(|r| {
-                r.extra
-                    .as_ref()
-                    .and_then(|e| e.get("is_error"))
-                    .and_then(|v| v.as_bool())
-            });
-            let err = flagged.unwrap_or_else(|| {
-                result
-                    .and_then(|r| r.content.as_deref())
-                    .map(observation_looks_like_error)
-                    .unwrap_or(false)
-            });
+            // Structured flag first, text heuristic only for flag-less documents.
+            let err = result.map(observation_result_is_error).unwrap_or(false);
             out.push(ToolCallRecord {
                 name: call.display_name(),
                 call_id: call.tool_call_id.clone(),
