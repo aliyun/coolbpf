@@ -157,7 +157,7 @@ impl GenAISqliteStore {
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?3
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE
              GROUP BY session_id
              ORDER BY MAX(start_timestamp_ns) DESC"
             )
