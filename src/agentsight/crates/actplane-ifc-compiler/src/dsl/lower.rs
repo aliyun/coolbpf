@@ -224,6 +224,20 @@ fn lower_path(pat: &str) -> (u8, String) {
     (M_EXACT, pat.to_string())
 }
 
+/// True when `pat` is absolute and its lowering discards the path segments
+/// after the first `*`: only the part before the star survives in the lowered
+/// prefix literal (`/tmp/*/secret` -> prefix `/tmp/`), so the installed
+/// matcher is wider than the pattern.
+fn absolute_path_discards_after_star(pat: &str, lowered: &(u8, String)) -> bool {
+    if !pat.starts_with('/') {
+        return false;
+    }
+    let Some(idx) = pat.find('*') else {
+        return false;
+    };
+    pat[idx + 1..].contains('/') && lowered.0 == M_PREFIX && lowered.1 == pat[..idx]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +286,82 @@ mod tests {
         assert_eq!(
             lower_path("/tmp/guarded/file.txt"),
             (M_EXACT, "/tmp/guarded/file.txt".into())
+        );
+    }
+
+    #[test]
+    fn absolute_mid_star_lowering_pins_prefix_and_detects_widening() {
+        // Current (pinned) lowering: everything after the first '*' is
+        // discarded and the matcher becomes a plain prefix.
+        assert_eq!(lower_path("/tmp/*/secret"), (M_PREFIX, "/tmp/".into()));
+        assert_eq!(lower_path("/tmp/*"), (M_PREFIX, "/tmp/".into()));
+        // A trailing star keeps everything before it; no segments after the
+        // star are discarded.
+        assert_eq!(
+            lower_path("/tmp/guarded/**"),
+            (M_PREFIX, "/tmp/guarded/".into())
+        );
+
+        let widened = lower_path("/tmp/*/secret");
+        assert!(absolute_path_discards_after_star("/tmp/*/secret", &widened));
+        assert!(!absolute_path_discards_after_star(
+            "/tmp/*",
+            &lower_path("/tmp/*")
+        ));
+        assert!(!absolute_path_discards_after_star(
+            "/tmp/guarded/**",
+            &lower_path("/tmp/guarded/**")
+        ));
+        // Repo-relative mid-star degradation stays warning-free.
+        assert!(!absolute_path_discards_after_star(
+            "src/*/secret",
+            &lower_path("src/*/secret")
+        ));
+    }
+
+    #[test]
+    fn absolute_mid_star_glob_widens_with_warning() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/tmp/*/secret" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("/tmp/*/secret") && w.contains("wider")),
+            "absolute mid-star pattern must produce a compile warning: {:?}",
+            c.warnings
+        );
+        // Pin the matcher: still a PREFIX on the part before the star.
+        let cfg: CConfig = unsafe { std::ptr::read_unaligned(c.bytes.as_ptr() as *const CConfig) };
+        assert_eq!(cfg.n_rules, 1);
+        assert_eq!(cfg.rules[0].m, M_PREFIX);
+        let target = cfg.rules[0].target;
+        let lit = target.split(|b| *b == 0).next().unwrap_or(&[]);
+        assert_eq!(lit, b"/tmp/");
+    }
+
+    #[test]
+    fn absolute_trailing_star_and_relative_mid_star_do_not_warn() {
+        let pol = crate::dsl::parse::parse(
+            r#"
+            rule r:
+              block write file "/tmp/guarded/**" if true
+              because "x"
+            rule r2:
+              block write file "src/*/secret" if true
+              because "x""#,
+        )
+        .expect("parse");
+        let c = compile(&pol).expect("compile");
+        assert!(
+            c.warnings.is_empty(),
+            "trailing-star and repo-relative mid-star patterns must not warn: {:?}",
+            c.warnings
         );
     }
 
@@ -736,6 +826,7 @@ struct Ctx {
     endpoint_cache: HashMap<String, Vec<(u32, u32)>>,
     endpoint_resolutions: HashMap<String, Vec<String>>,
     endpoint_cond_warned: std::collections::HashSet<String>,
+    path_warned: std::collections::HashSet<String>,
     warnings: Vec<String>,
 }
 impl Ctx {
@@ -880,6 +971,39 @@ impl Ctx {
         self.labels.insert(name.to_string(), b);
         Ok(b)
     }
+
+    /// Lower a path pattern for a file source/gate, warning once per pattern
+    /// when an absolute pattern's lowering discards the segments after its
+    /// first `*` (a widening to a prefix matcher).
+    fn lower_path_warned(&mut self, pat: &str) -> (u8, String) {
+        let lowered = lower_path(pat);
+        self.warn_absolute_mid_star(pat, &lowered);
+        lowered
+    }
+
+    /// Path-target lowering with the same widening warning as
+    /// `lower_path_warned`; exec/connect/recv targets use other matchers and
+    /// never warn here.
+    fn lower_target_warned(&mut self, op: u8, kind: Kind, pat: &str) -> (u8, String) {
+        let lowered = lower_target(op, kind, pat);
+        if op != OP_EXEC && op != OP_CONNECT && op != OP_RECV {
+            self.warn_absolute_mid_star(pat, &lowered);
+        }
+        lowered
+    }
+
+    fn warn_absolute_mid_star(&mut self, pat: &str, lowered: &(u8, String)) {
+        if absolute_path_discards_after_star(pat, lowered)
+            && self.path_warned.insert(pat.to_string())
+        {
+            self.warnings.push(format!(
+                "absolute path pattern '{pat}' lowers to a prefix matcher on '{}' \
+                 (the segments after its first '*' are discarded), so the matcher is \
+                 wider than the pattern and every path under the prefix matches",
+                lowered.1
+            ));
+        }
+    }
     /// Returns (gate bit, gate slot index). The index is what the engine uses to
     /// look up the gate's epoch for staleness; the bit is the v1 latching mask.
     fn gate_bit(
@@ -894,11 +1018,11 @@ impl Ctx {
                 (OP_EXEC, m, l)
             }
             Op::Read | Op::Open => {
-                let (m, l) = lower_path(pat);
+                let (m, l) = self.lower_path_warned(pat);
                 (OP_OPEN, m, l)
             }
             Op::Write | Op::Unlink => {
-                let (m, l) = lower_path(pat);
+                let (m, l) = self.lower_path_warned(pat);
                 (OP_WRITE, m, l)
             }
             other => {
@@ -950,7 +1074,7 @@ impl Ctx {
         let (m, lit) = if op == OP_EXEC {
             lower_exec(pat)
         } else {
-            lower_target(op, kind, pat)
+            self.lower_target_warned(op, kind, pat)
         };
         let arg_s = arg.unwrap_or("");
         let key = (op, m, lit.clone(), arg_s.to_string());
@@ -1206,6 +1330,7 @@ pub fn compile_with_labels(
         endpoint_cache: HashMap::new(),
         endpoint_resolutions: HashMap::new(),
         endpoint_cond_warned: std::collections::HashSet::new(),
+        path_warned: std::collections::HashSet::new(),
         warnings: Vec::new(),
     };
     for name in &sorted_labels {
@@ -1223,7 +1348,7 @@ pub fn compile_with_labels(
                 (OP_EXEC, m, lit, 0, 0)
             }
             Kind::File => {
-                let (m, lit) = lower_path(&s.pattern);
+                let (m, lit) = ctx.lower_path_warned(&s.pattern);
                 if lit.len() >= PAT {
                     return Err(format!(
                         "source '{}': file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
@@ -1309,7 +1434,8 @@ pub fn compile_with_labels(
                         .map(|(ipv4, ipv4_mask)| (M_ANY, String::new(), ipv4, ipv4_mask))
                         .collect::<Vec<_>>()
                 } else {
-                    let (tm, tlit) = lower_target(op, cl.target.kind, &cl.target.pattern);
+                    let (tm, tlit) =
+                        ctx.lower_target_warned(op, cl.target.kind, &cl.target.pattern);
                     if (op == OP_OPEN || op == OP_WRITE) && tlit.len() >= PAT {
                         return Err(format!(
                             "rule '{}': target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
@@ -1347,7 +1473,7 @@ pub fn compile_with_labels(
                                 cipv4 = n;
                                 cipv4_mask = mk;
                             } else {
-                                let (m, l) = lower_target(op, cl.target.kind, pattern);
+                                let (m, l) = ctx.lower_target_warned(op, cl.target.kind, pattern);
                                 if (op == OP_OPEN || op == OP_WRITE) && l.len() >= PAT {
                                     return Err(format!(
                                         "rule '{}': condition target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
