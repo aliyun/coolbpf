@@ -315,15 +315,19 @@ pub fn dechunk_body(raw: &[u8]) -> Vec<u8> {
         if size == 0 {
             break; // terminating zero-size chunk
         }
-        if i + size > raw.len() {
-            // Incomplete final chunk: salvage what is present.
+        // `size` is attacker-controlled: add it with `checked_add` so a value
+        // near `usize::MAX` cannot wrap the guard below and slice backwards.
+        let Some(end) = i.checked_add(size).filter(|end| *end <= raw.len()) else {
+            // Incomplete or overflowing final chunk: salvage what is present.
             out.extend_from_slice(&raw[i..]);
             break;
-        }
-        out.extend_from_slice(&raw[i..i + size]);
-        i += size;
-        // Skip the CRLF that follows the chunk data.
-        i += 2;
+        };
+        out.extend_from_slice(&raw[i..end]);
+        i = match end.checked_add(2) {
+            // Skip the CRLF that follows the chunk data.
+            Some(next) => next,
+            None => break,
+        };
     }
     out
 }
@@ -362,10 +366,15 @@ pub fn chunked_stream_complete(raw: &[u8]) -> bool {
         if size == 0 {
             return true; // terminating zero-size chunk reached
         }
-        if i + size > raw.len() {
+        // Same checked arithmetic as `dechunk_body`: a wrapped `i + size` used
+        // to walk onto garbage framing instead of reporting an incomplete chunk.
+        let Some(end) = i.checked_add(size).filter(|end| *end <= raw.len()) else {
             return false; // incomplete final chunk
-        }
-        i += size + 2; // skip chunk data + its trailing CRLF
+        };
+        i = match end.checked_add(2) {
+            Some(next) => next, // skip chunk data + its trailing CRLF
+            None => return false,
+        };
     }
     false
 }
@@ -498,6 +507,26 @@ mod tests {
         let raw = b"5hello";
         let result = dechunk_body(raw);
         assert!(result.is_empty());
+    }
+
+    /// 16 f's parse as `usize::MAX`: the `i + size` guard wraps below the
+    /// payload length, so the incomplete-final-chunk branch is skipped and the
+    /// `raw[i..i + size]` slice runs backwards. Truncated input must degrade to
+    /// partial output (the function's documented behavior), not panic.
+    #[test]
+    fn dechunk_survives_an_overflowing_chunk_size() {
+        let raw = b"ffffffffffffffff\r\n";
+        assert!(dechunk_body(raw).is_empty());
+    }
+
+    /// The completeness probe shares the framing arithmetic. Regression guard:
+    /// the wrap must not turn into "complete" (the pre-fix value is `false`
+    /// here too, but the same wrap shifts the parse onto garbage framing, so
+    /// both copies are fixed together).
+    #[test]
+    fn chunked_stream_complete_rejects_an_overflowing_chunk_size() {
+        let raw = b"fffffffffffffffe\r\n0123456789abcdef\r\n";
+        assert!(!chunked_stream_complete(raw));
     }
 
     #[test]
