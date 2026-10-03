@@ -31,12 +31,10 @@ pub fn classify_conversation(blocks: &[ChatMLBlock]) -> Vec<ConversationTurn> {
             } else {
                 ConversationTurnType::AssistantText
             }
+        } else if block.raw_content.contains("<tool_response>") {
+            ConversationTurnType::ToolResponse
         } else {
-            if block.raw_content.contains("<tool_response>") {
-                ConversationTurnType::ToolResponse
-            } else {
-                ConversationTurnType::UserMessage
-            }
+            ConversationTurnType::UserMessage
         };
 
         turns.push(ConversationTurn {
