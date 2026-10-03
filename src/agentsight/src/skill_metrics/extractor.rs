@@ -377,22 +377,32 @@ fn parse_available_skills(text: &str) -> Vec<String> {
 
     for block_match in RE_AVAILABLE_SKILLS.captures_iter(text) {
         let block = &block_match[1];
+        // Names found in this block only: the XML-vs-Hermes format decision
+        // must be made per block, so a plain-text block is never suppressed
+        // by skills already collected from an earlier one.
+        let mut block_names = Vec::new();
 
         // Try XML format first (cosh/generic agents)
         for name_match in RE_SKILL_NAME.captures_iter(block) {
             let name = name_match[1].trim().to_string();
-            if !name.is_empty() && !skill_names.contains(&name) {
-                skill_names.push(name);
+            if !name.is_empty() && !block_names.contains(&name) {
+                block_names.push(name);
             }
         }
 
-        // If no XML skills found, try Hermes plain-text format
-        if skill_names.is_empty() {
+        // If no XML skills found in this block, try Hermes plain-text format
+        if block_names.is_empty() {
             for name_match in RE_HERMES_SKILL_ENTRY.captures_iter(block) {
                 let name = name_match[1].to_string();
-                if !name.is_empty() && !skill_names.contains(&name) {
-                    skill_names.push(name);
+                if !name.is_empty() && !block_names.contains(&name) {
+                    block_names.push(name);
                 }
+            }
+        }
+
+        for name in block_names {
+            if !skill_names.contains(&name) {
+                skill_names.push(name);
             }
         }
     }
@@ -510,6 +520,41 @@ Some text after"#;
 
         let result = parse_available_skills(text);
         assert_eq!(result, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_available_skills_two_hermes_blocks() {
+        // Hermes agents re-emit the skill list mid-conversation; every
+        // plain-text block must be parsed, not only the first one.
+        let text = "<available_skills>
+  - pdf: Read and write PDF files
+  - excel: Work with spreadsheets
+</available_skills>
+
+the list is refreshed later in the prompt:
+
+<available_skills>
+  - web-search: Search the web
+</available_skills>";
+
+        let result = parse_available_skills(text);
+        assert_eq!(result, vec!["pdf", "excel", "web-search"]);
+    }
+
+    #[test]
+    fn test_parse_available_skills_xml_then_hermes_block() {
+        // A Hermes plain-text block after an XML (cosh) block must still
+        // contribute its skills.
+        let text = "<available_skills>
+<skill><name>ui-designer</name><description>Web UI design expert</description></skill>
+</available_skills>
+
+<available_skills>
+  - create-skill: Create a new skill from a template
+</available_skills>";
+
+        let result = parse_available_skills(text);
+        assert_eq!(result, vec!["ui-designer", "create-skill"]);
     }
 
     #[test]
