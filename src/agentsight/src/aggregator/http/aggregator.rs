@@ -646,9 +646,12 @@ impl HttpConnectionAggregator {
                     .map(|v| v.contains("chunked"))
                     .unwrap_or(false);
                 if is_chunked {
-                    // Check if body contains chunked terminator
-                    let body = request.body();
-                    body.windows(5).any(|w| w == b"0\r\n\r\n")
+                    // Detect completion by walking the chunk framing, not by
+                    // scanning for the terminator bytes: the 5-byte pattern can
+                    // occur inside chunk *data* (a prompt quoting a chunked
+                    // example), which ended the body mid-stream. Same helper the
+                    // compressed-response path uses (e6c787258).
+                    crate::utils::decompress::chunked_stream_complete(request.body())
                 } else {
                     true // No Content-Length and not chunked → body is complete
                 }
@@ -880,8 +883,8 @@ impl HttpConnectionAggregator {
                 let complete = match expected_body_len {
                     Some(cl) => body_buffer.len() >= cl,
                     None => {
-                        // chunked: check for terminator
-                        body_buffer.windows(5).any(|w| w == b"0\r\n\r\n")
+                        // chunked: same framed check as process_request
+                        crate::utils::decompress::chunked_stream_complete(&body_buffer)
                     }
                 };
 
@@ -3195,5 +3198,73 @@ mod tests {
         assert_eq!(combined.pending_connection_count, usize::MAX);
         assert_eq!(combined.pending_connection_bytes, usize::MAX);
         assert_eq!(combined.eviction_count, u64::MAX);
+    }
+
+    #[test]
+    fn test_chunked_request_body_with_embedded_terminator_is_not_complete() {
+        // Valid chunked framing whose first chunk's *data* contains the 5-byte
+        // terminator pattern (an agent prompt quoting a chunked example, say).
+        // The compressed-response path detects completion by walking the chunk
+        // framing (`chunked_stream_complete`, e6c787258); the request paths
+        // still scan for the byte pattern, so the body is declared complete
+        // mid-stream and the remaining chunks are parsed as a new request.
+        let mut aggregator = HttpConnectionAggregator::new();
+
+        let headers_and_partial =
+            b"POST /chat HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nAB0\r\n\r\nCD\r\n";
+        let event1 = create_mock_ssl_event_with_buf(9101, 0xE000, headers_and_partial.to_vec(), 1);
+        let header_end = headers_and_partial
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let body_len = headers_and_partial.len() - header_end;
+
+        let mut headers = HashMap::new();
+        headers.insert("transfer-encoding".to_string(), "chunked".to_string());
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers,
+            body_offset: header_end,
+            body_len,
+            source_event: event1,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        let conn_id = ConnectionId {
+            pid: 9101,
+            ssl_ptr: 0xE000,
+        };
+        assert!(
+            matches!(
+                aggregator.connections.peek(&conn_id),
+                Some(ConnectionState::RequestBodyPending { .. })
+            ),
+            "an embedded terminator pattern must not complete a chunked request body"
+        );
+
+        // The real terminating chunk completes it.
+        let rest = SslEvent {
+            source: 0,
+            timestamp_ns: 2000,
+            delta_ns: 0,
+            pid: 9101,
+            tid: 1,
+            uid: 0,
+            len: 12,
+            rw: 1,
+            comm: String::new(),
+            buf: b"2\r\nEF\r\n0\r\n\r\n".to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0xE000,
+        };
+        aggregator.process_raw_body_data(&rest);
+        assert!(
+            aggregator.has_pending_request(&conn_id),
+            "the real terminating chunk completes the body"
+        );
     }
 }
