@@ -421,7 +421,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?4
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx
              ORDER BY bucket_idx ASC"
             )
@@ -500,7 +500,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND agent_name = ?4
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx, model
              ORDER BY bucket_idx ASC"
             )

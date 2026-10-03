@@ -457,6 +457,130 @@ fn test_get_model_timeseries_with_agent_filter() {
     cleanup_db(&path);
 }
 
+// ─── agent filter parity with latency metrics (#4394) ────────────────────────
+
+/// Insert one llm_call row whose agent identity survives only in process_name
+/// (agent_name NULL) — the shape latency metrics and agent activity already
+/// attribute via COALESCE(agent_name, process_name).
+fn insert_process_only_row(store: &GenAISqliteStore, call_id: &str, process_name: &str) {
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,'openai','gpt-4',?5,?6,?7,\
+               ?8,?9,?10,NULL,100,'complete',NULL,'{}',?11,NULL)";
+    let conn = store.conn.lock().unwrap();
+    conn.execute(
+        sql,
+        params![
+            call_id,
+            BASE_NS,
+            BASE_NS + STEP_NS,
+            STEP_NS,
+            111_i64,
+            222_i64,
+            333_i64,
+            "sess-x",
+            "trace-x",
+            "conv-x",
+            process_name
+        ],
+    )
+    .unwrap();
+}
+
+#[test]
+fn token_timeseries_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("ts_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"), 1)
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].total_tokens, 333);
+    cleanup_db(&path);
+}
+
+#[test]
+fn token_timeseries_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("ts_case");
+    let lower = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"), 1)
+        .unwrap();
+    let upper = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"), 1)
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    assert_eq!(upper[0].total_tokens, lower[0].total_tokens);
+    cleanup_db(&path);
+}
+
+#[test]
+fn model_timeseries_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("mts_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"), 1)
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].model, "gpt-4");
+    assert_eq!(r[0].total_tokens, 333);
+    cleanup_db(&path);
+}
+
+#[test]
+fn model_timeseries_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("mts_case");
+    let lower = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"), 1)
+        .unwrap();
+    let upper = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"), 1)
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    cleanup_db(&path);
+}
+
+#[test]
+fn savings_sessions_agent_filter_falls_back_to_process_name() {
+    let (store, path) = create_populated_store("sav_fallback");
+    insert_process_only_row(&store, "call-x", "proc-x");
+    let r = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("proc-x"))
+        .unwrap();
+    assert_eq!(r.len(), 1, "process-name rows must be attributable");
+    assert_eq!(r[0].session_id, "sess-x");
+    assert_eq!(r[0].request_count, 1);
+    cleanup_db(&path);
+}
+
+#[test]
+fn savings_sessions_agent_filter_matches_case_insensitively() {
+    let (store, path) = create_populated_store("sav_case");
+    let lower = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("agent-a"))
+        .unwrap();
+    let upper = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, Some("AGENT-A"))
+        .unwrap();
+    assert_eq!(
+        upper.len(),
+        lower.len(),
+        "agent match must be case-insensitive"
+    );
+    assert_eq!(upper[0].session_id, lower[0].session_id);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_agent_token_summary() {
     let (store, path) = create_populated_store("agent_summary");
