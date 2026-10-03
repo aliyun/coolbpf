@@ -109,7 +109,12 @@ impl TimePeriod {
         (start_ns, end_ns)
     }
 
-    /// Get previous period for comparison
+    /// The paired period used for view switching: Today <-> Yesterday,
+    /// Week <-> LastWeek, Month <-> LastMonth.
+    ///
+    /// For the three "last" periods the pair is the *current, unfinished*
+    /// period, which is later in time — not an earlier window. Comparisons must
+    /// therefore not treat it as a baseline (see `by_period_with_compare`).
     pub fn previous_period(&self) -> TimePeriod {
         match self {
             TimePeriod::Today => TimePeriod::Yesterday,
@@ -599,8 +604,16 @@ impl<'a> TokenQuery<'a> {
     pub fn by_period_with_compare(&self, period: TimePeriod) -> TokenQueryResult {
         let mut result = self.by_period(period);
 
-        // Get previous period data
+        // Only compare against a window that starts before this one.
+        // `previous_period()` is the view-switching pair-mate, so for
+        // yesterday / last_week / last_month it hands back the current,
+        // unfinished period; reporting that as "the previous period" compares a
+        // complete period against a partial one.
         let prev_period = period.previous_period();
+        if prev_period.time_range().0 >= period.time_range().0 {
+            return result;
+        }
+
         let prev_result = self.by_period(prev_period);
 
         let change = result.total_tokens as i64 - prev_result.total_tokens as i64;
@@ -1218,6 +1231,59 @@ mod tests {
 
         let result = TokenQuery::new(&store).by_period(TimePeriod::Today);
         assert_eq!(result.total_tokens, 60);
+        cleanup_db(&path);
+    }
+
+    /// `previous_period()` is the pair-mate used for view switching, so for
+    /// last_week it hands back the *current*, unfinished week. Comparing a
+    /// complete week against a partial one is not "the previous period", and
+    /// the CLI prints that fabricated baseline as `比上一时段（N）`. Without an
+    /// earlier window to compare against, the query must not report one.
+    #[test]
+    fn last_week_does_not_compare_against_the_unfinished_week() {
+        let path = unique_db_path("compare_last_week");
+        let store = TokenStore::new(&path).unwrap();
+
+        let (last_week_start, _) = TimePeriod::LastWeek.time_range();
+        store
+            .insert(&make_record(last_week_start, Some("A"), 60, 40))
+            .unwrap();
+        let (week_start, _) = TimePeriod::Week.time_range();
+        store
+            .insert(&make_record(week_start, Some("A"), 6, 4))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::LastWeek);
+        assert_eq!(result.total_tokens, 100, "last week's own total");
+        assert!(
+            result.comparison.is_none(),
+            "last week has no earlier period to compare against, got {:?}",
+            result.comparison
+        );
+        cleanup_db(&path);
+    }
+
+    /// Guard for the direction that is genuinely earlier: today still compares
+    /// against the complete yesterday.
+    #[test]
+    fn today_compares_against_yesterday() {
+        let path = unique_db_path("compare_today");
+        let store = TokenStore::new(&path).unwrap();
+
+        let (yesterday_start, _) = TimePeriod::Yesterday.time_range();
+        store
+            .insert(&make_record(yesterday_start, Some("A"), 60, 40))
+            .unwrap();
+        let (today_start, _) = TimePeriod::Today.time_range();
+        store
+            .insert(&make_record(today_start, Some("A"), 6, 4))
+            .unwrap();
+
+        let result = TokenQuery::new(&store).by_period_with_compare(TimePeriod::Today);
+        assert_eq!(result.total_tokens, 10, "today's own total");
+        let comparison = result.comparison.expect("today compares against yesterday");
+        assert_eq!(comparison.previous_total, 100);
+        assert_eq!(comparison.trend, Trend::Down);
         cleanup_db(&path);
     }
 }
