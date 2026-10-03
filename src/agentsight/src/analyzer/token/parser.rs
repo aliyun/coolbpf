@@ -605,6 +605,31 @@ mod tests {
         let usage = parser.parse_data(data).expect("usage should parse");
         assert_eq!(usage.input_tokens, 57);
         assert_eq!(usage.output_tokens, 3);
+        // The nested counter must survive the strict JSON path too: the same
+        // payload truncated recovers it through the scan fallback, so dropping
+        // it here would make the complete buffer the less accurate of the two.
+        assert_eq!(usage.cache_read_input_tokens, Some(0));
+    }
+
+    #[test]
+    fn test_parse_responses_usage_with_nested_cached_tokens() {
+        // The Responses API nests the cache-hit counter under
+        // `input_tokens_details.cached_tokens`. Nothing read that key, so a
+        // complete payload reported no cache reads at all even though the
+        // counter was present.
+        let data = r#"{"sequence_number":10,"type":"response.completed","response":{"usage":{"total_tokens":60,"input_tokens_details":{"cached_tokens":2},"output_tokens":3,"input_tokens":57},"model":"qwen3-coder-plus"}}"#;
+        let parser = TokenParser::new();
+        let usage = parser.parse_data(data).expect("usage should parse");
+        assert_eq!(usage.input_tokens, 57);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(
+            usage.cache_read_input_tokens,
+            Some(2),
+            "input_tokens_details.cached_tokens is the Responses-API cache counter"
+        );
+        // Guard the ordering the fallback already pinned for the truncated
+        // variant: an OpenAI-style nested counter must not relabel the provider.
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
     }
 
     #[test]
