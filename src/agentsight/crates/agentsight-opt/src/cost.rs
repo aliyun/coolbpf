@@ -1138,7 +1138,7 @@ pub(crate) fn extract_waste_candidates_from(
             "agent" => {
                 turn_idx += 1;
                 let step_no = turn_idx.max(0) as usize;
-                for result in step.results() {
+                for (k, result) in step.results().iter().enumerate() {
                     let text = result.content.as_deref().unwrap_or("");
                     let toks = estimate_tokens(text);
                     if toks >= TOOL_TRIM_MIN {
@@ -1151,7 +1151,20 @@ pub(crate) fn extract_waste_candidates_from(
                                     .find(|c| c.tool_call_id == id)
                                     .map(|c| c.function_name.clone())
                             })
-                            .or_else(|| step.calls().first().map(|c| c.function_name.clone()))
+                            .or_else(|| {
+                                // Positional pairing is only for documents whose
+                                // results carry no ids at all (the same rule
+                                // `collect_tool_calls_with` applies). Falling
+                                // back whenever the id misses would blame the
+                                // first tool of the step for a sibling's output
+                                // and feed that name into the candidate's facts.
+                                step.results()
+                                    .iter()
+                                    .all(|r| r.source_call_id.is_none())
+                                    .then(|| step.calls().get(k))
+                                    .flatten()
+                                    .map(|c| c.function_name.clone())
+                            })
                             .unwrap_or_else(|| "unknown".to_string());
                         tool_outputs.push((step_no, name, toks, trunc(text, SNIPPET_CHARS)));
                     }
@@ -1575,6 +1588,71 @@ mod tests {
         assert_eq!(tool.optimization, "工具输出截断");
         assert!(tool.facts.contains("Read"));
         assert!(set.total_input_tokens > 0);
+    }
+
+    /// A big observation whose id matches no call (its result never arrived, or
+    /// the producer dropped the id) must not borrow the first tool's name: the
+    /// name lands in the candidate's facts and in the LLM's evidence.
+    #[test]
+    fn unmatched_observation_id_does_not_borrow_the_first_tools_name() {
+        let big = "x ".repeat(6000);
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[
+                {{"tool_call_id":"c1","function_name":"Read","arguments":{{"file_path":"/a"}}}},
+                {{"tool_call_id":"c2","function_name":"Bash","arguments":{{"command":"ls"}}}}],
+             "observation":{{"results":[{{"source_call_id":"c9","content":"{big}"}}]}}}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"ok"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let tool = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "tool_output")
+            .expect("tool_output candidate");
+        assert!(
+            !tool.facts.contains("Read"),
+            "a result whose id matches no call must not inherit the first tool's name: {}",
+            tool.facts
+        );
+        assert!(tool.facts.contains("unknown"), "facts: {}", tool.facts);
+    }
+
+    /// Two id-less results pair positionally with the calls, not all with the
+    /// first one.
+    #[test]
+    fn id_less_observations_pair_positionally_not_all_to_the_first_call() {
+        let big = "x ".repeat(6000);
+        let t = traj(&format!(
+            r#"[
+            {{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"}},
+            {{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[
+                {{"tool_call_id":"c1","function_name":"Read","arguments":{{"file_path":"/a"}}}},
+                {{"tool_call_id":"c2","function_name":"Bash","arguments":{{"command":"ls"}}}}],
+             "observation":{{"results":[{{"content":"{big}"}},{{"content":"{big}"}}]}}}},
+            {{"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"ok"}}
+        ]"#
+        ));
+        let set = extract_waste_candidates(&t).unwrap();
+        let tool = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "tool_output")
+            .expect("tool_output candidate");
+        assert!(
+            tool.facts.contains("Read"),
+            "first result pairs with the first call: {}",
+            tool.facts
+        );
+        assert!(
+            tool.facts.contains("Bash"),
+            "second result pairs with the second call: {}",
+            tool.facts
+        );
     }
 
     #[test]
