@@ -2239,6 +2239,55 @@ fn test_enrich_pending_from_sse_records_tool_call_ids() {
     cleanup_db(&path);
 }
 
+/// A completed call must not be enriched: `insert_pending` returns early
+/// when the same call_id already exists (leaving a completed row in place),
+/// so a late SSE enrichment targeting that replay must leave the row's
+/// authoritative full-response values untouched.
+#[test]
+fn test_enrich_pending_from_sse_skips_completed_call() {
+    let (store, path) = create_populated_store("enrich_sse_done");
+    let e = SseEnrichment {
+        model: Some("gpt-4-turbo".to_string()),
+        trace_id: Some("trace-enriched".to_string()),
+        provider: Some("openai-e".to_string()),
+        output_messages: Some(
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"late_call","name":"read_file","arguments":{"path":"a"}}]}]"#
+                .to_string(),
+        ),
+        sse_event_count: Some(42),
+        input_tokens: Some(999),
+        output_tokens: Some(888),
+    };
+    // call-1 is status='complete' in the fixture.
+    store.enrich_pending_from_sse("call-1", &e).unwrap();
+    let conn = store.conn.lock().unwrap();
+    let (model, tid, it, ot): (String, String, i64, i64) = conn
+        .query_row(
+            "SELECT model, trace_id, input_tokens, output_tokens \
+             FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(model, "gpt-4");
+    assert_eq!(tid, "trace-1");
+    assert_eq!(it, 100);
+    assert_eq!(ot, 50);
+    // The guard must also cover the tool_call_ids column the drain path now
+    // writes (COALESCE(?9, …)): a completed row keeps the ids its own
+    // completion recorded, and never adopts the replay's tool calls.
+    let ids: String = conn
+        .query_row(
+            "SELECT tool_call_ids FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ids, r#"["tc-1","tc-2"]"#);
+    drop(conn);
+    cleanup_db(&path);
+}
+
 // ─── schema.rs tests ──────────────────────────────────────────────────────────
 
 #[test]
