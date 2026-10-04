@@ -2040,7 +2040,9 @@ export async function login(token: string): Promise<boolean> {
     credentials: 'same-origin',
     body: JSON.stringify({ token }),
   });
-  return res.ok;
+  if (res.status === 401) return false;
+  if (!res.ok) throw new Error(`POST /api/auth/login -> ${res.status}`);
+  return true;
 }
 
 // ─── Storage status API ─────────────────────────────────────────────────────
