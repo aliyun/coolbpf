@@ -421,6 +421,59 @@ fn test_get_model_timeseries_respects_requested_bucket_count() {
 }
 
 #[test]
+fn test_get_token_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // When the range is an exact multiple of the bucket count, the ceil-based
+    // width is exact, and the inclusive BETWEEN lets a row at end_ns compute
+    // index == bucket_count - a phantom bucket starting at end_ns itself
+    // (call-4 sits exactly at BASE+3*STEP, so buckets=3 over a 3*STEP span
+    // produced four buckets on main). The index must clamp into the last
+    // requested bucket.
+    let (store, path) = create_populated_store("ts_end_ns_cap");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    assert!(
+        r.len() <= 3,
+        "requested 3 buckets, got {}: {:?}",
+        r.len(),
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    assert!(
+        r.iter().all(|b| b.bucket_start_ns < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    // The end-aligned row merges into the last bucket instead of opening a
+    // phantom one.
+    let last = r.last().unwrap();
+    assert_eq!(last.bucket_start_ns, BASE_NS + 2 * STEP_NS);
+    assert_eq!(last.total_tokens, 675); // 225 (call-3) + 450 (call-4)
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // Model twin: the phantom bucket at end_ns inflated the distinct bucket
+    // starts beyond the requested count.
+    let (store, path) = create_populated_store("mts_end_ns_cap");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    let distinct: std::collections::HashSet<i64> = r.iter().map(|b| b.bucket_start_ns).collect();
+    assert!(
+        distinct.len() <= 3,
+        "requested 3 buckets, got {}",
+        distinct.len()
+    );
+    assert!(
+        distinct.iter().all(|s| *s < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        distinct
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_token_timeseries_empty_range() {
     let (store, path) = create_populated_store("ts_empty");
     let r = store.get_token_timeseries(0, 1, None, 1).unwrap();

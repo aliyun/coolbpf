@@ -416,7 +416,11 @@ impl GenAISqliteStore {
         // Round the width UP: floor division lets the last bucket index reach
         // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
         // just under twice the requested count), so callers got more buckets
-        // than they asked for. With ceil, every index stays < bucket_count.
+        // than they asked for. With ceil, every index stays < bucket_count —
+        // except when the range is an exact multiple of the count: the width
+        // is then exact, and the inclusive BETWEEN puts a row at end_ns in
+        // index == bucket_count, a phantom bucket starting at end_ns itself.
+        // Clamp the index in SQL so that row merges into the last bucket.
         let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
         let bucket_ns = bucket_ns.max(1);
 
@@ -426,8 +430,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
@@ -445,8 +449,8 @@ impl GenAISqliteStore {
         } else {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(SUM(",
                 billed_input_col!(),
                 "), 0)                AS input_tokens,
@@ -464,25 +468,31 @@ impl GenAISqliteStore {
 
         let rows: Vec<TimeseriesBucket> = if let Some(name) = agent_name {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns, name], |row| {
-                Ok(TimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    total_tokens: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, name, bucket_count as i64],
+                |row| {
+                    Ok(TimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        input_tokens: row.get(2)?,
+                        output_tokens: row.get(3)?,
+                        total_tokens: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
-                Ok(TimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    total_tokens: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, bucket_count as i64],
+                |row| {
+                    Ok(TimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        input_tokens: row.get(2)?,
+                        output_tokens: row.get(3)?,
+                        total_tokens: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -504,7 +514,11 @@ impl GenAISqliteStore {
         // Round the width UP: floor division lets the last bucket index reach
         // range_ns / bucket_ns >= bucket_count (up to ~2x when the span is
         // just under twice the requested count), so callers got more buckets
-        // than they asked for. With ceil, every index stays < bucket_count.
+        // than they asked for. With ceil, every index stays < bucket_count —
+        // except when the range is an exact multiple of the count: the width
+        // is then exact, and the inclusive BETWEEN puts a row at end_ns in
+        // index == bucket_count, a phantom bucket starting at end_ns itself.
+        // Clamp the index in SQL so that row merges into the last bucket.
         let bucket_ns = range_ns.saturating_add(bucket_count as i64 - 1) / bucket_count as i64;
         let bucket_ns = bucket_ns.max(1);
 
@@ -513,8 +527,8 @@ impl GenAISqliteStore {
         let sql: &str = if agent_name.is_some() {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?5 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
                 COALESCE(SUM((",
                 billed_input_col!(),
@@ -529,8 +543,8 @@ impl GenAISqliteStore {
         } else {
             concat!(
                 "SELECT
-                (start_timestamp_ns - ?1) / ?3            AS bucket_idx,
-                ?1 + ((start_timestamp_ns - ?1) / ?3) * ?3 AS bucket_start_ns,
+                MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1)            AS bucket_idx,
+                ?1 + MIN((start_timestamp_ns - ?1) / ?3, ?4 - 1) * ?3  AS bucket_start_ns,
                 COALESCE(model, 'unknown')                 AS model,
                 COALESCE(SUM((",
                 billed_input_col!(),
@@ -545,23 +559,29 @@ impl GenAISqliteStore {
 
         let rows: Vec<ModelTimeseriesBucket> = if let Some(name) = agent_name {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns, name], |row| {
-                Ok(ModelTimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    model: row.get(2)?,
-                    total_tokens: row.get(3)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, name, bucket_count as i64],
+                |row| {
+                    Ok(ModelTimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        model: row.get(2)?,
+                        total_tokens: row.get(3)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(sql)?;
-            stmt.query_map(params![start_ns, end_ns, bucket_ns], |row| {
-                Ok(ModelTimeseriesBucket {
-                    bucket_start_ns: row.get(1)?,
-                    model: row.get(2)?,
-                    total_tokens: row.get(3)?,
-                })
-            })?
+            stmt.query_map(
+                params![start_ns, end_ns, bucket_ns, bucket_count as i64],
+                |row| {
+                    Ok(ModelTimeseriesBucket {
+                        bucket_start_ns: row.get(1)?,
+                        model: row.get(2)?,
+                        total_tokens: row.get(3)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
 
