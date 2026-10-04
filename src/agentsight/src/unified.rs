@@ -1115,10 +1115,17 @@ impl AgentSight {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let status = match fs::read_to_string(proc_root.join(format!("{pid}/status"))) {
-                Ok(s) => s,
+            let status = match fs::read(proc_root.join(format!("{pid}/status"))) {
+                Ok(bytes) => bytes,
                 Err(_) => continue,
             };
+            // `/proc/<pid>/status` embeds the process name, and the kernel
+            // allows non-UTF-8 bytes in a name (`prctl(PR_SET_NAME)`, or an
+            // executable whose name is not valid UTF-8). `read_to_string`
+            // rejected the whole file, so that pid and its whole subtree
+            // dropped out of the descendant set. The `PPid:` line is ASCII, so
+            // a lossy decode still finds it.
+            let status = String::from_utf8_lossy(&status);
             let ppid = status
                 .lines()
                 .find_map(|line| line.strip_prefix("PPid:\t"))
@@ -4173,6 +4180,28 @@ mod tests {
         let got = AgentSight::collect_descendant_pids_impl(1, &dir);
         let mut want = HashSet::new();
         want.extend([1, 2]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_reads_a_status_with_a_non_utf8_name() {
+        // `/proc/<pid>/status` embeds the process name, and the kernel allows
+        // non-UTF-8 bytes in a name. `read_to_string` rejected the whole file,
+        // so that pid and everything below it dropped out of the descendant
+        // set and never entered the traced_processes map.
+        let dir = unique_tmp_dir("non-utf8-name");
+        write_fake_status(&dir, 1, 0);
+        let child_dir = dir.join("2");
+        std::fs::create_dir_all(&child_dir).expect("create fake proc dir");
+        std::fs::write(child_dir.join("status"), b"Name:\tnode\xa0-22\nPPid:\t1\n")
+            .expect("write non-UTF-8 status");
+        write_fake_status(&dir, 3, 2);
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 2, 3]);
         assert_eq!(got, want);
 
         let _ = std::fs::remove_dir_all(&dir);
