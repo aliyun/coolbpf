@@ -421,6 +421,59 @@ fn test_get_model_timeseries_respects_requested_bucket_count() {
 }
 
 #[test]
+fn test_get_token_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // When the range is an exact multiple of the bucket count, the ceil-based
+    // width is exact, and the inclusive BETWEEN lets a row at end_ns compute
+    // index == bucket_count - a phantom bucket starting at end_ns itself
+    // (call-4 sits exactly at BASE+3*STEP, so buckets=3 over a 3*STEP span
+    // produced four buckets on main). The index must clamp into the last
+    // requested bucket.
+    let (store, path) = create_populated_store("ts_end_ns_cap");
+    let r = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    assert!(
+        r.len() <= 3,
+        "requested 3 buckets, got {}: {:?}",
+        r.len(),
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    assert!(
+        r.iter().all(|b| b.bucket_start_ns < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        r.iter().map(|b| b.bucket_start_ns).collect::<Vec<_>>()
+    );
+    // The end-aligned row merges into the last bucket instead of opening a
+    // phantom one.
+    let last = r.last().unwrap();
+    assert_eq!(last.bucket_start_ns, BASE_NS + 2 * STEP_NS);
+    assert_eq!(last.total_tokens, 675); // 225 (call-3) + 450 (call-4)
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_get_model_timeseries_row_at_end_ns_stays_within_bucket_count() {
+    // Model twin: the phantom bucket at end_ns inflated the distinct bucket
+    // starts beyond the requested count.
+    let (store, path) = create_populated_store("mts_end_ns_cap");
+    let r = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 3 * STEP_NS, None, 3)
+        .unwrap();
+    let distinct: std::collections::HashSet<i64> = r.iter().map(|b| b.bucket_start_ns).collect();
+    assert!(
+        distinct.len() <= 3,
+        "requested 3 buckets, got {}",
+        distinct.len()
+    );
+    assert!(
+        distinct.iter().all(|s| *s < BASE_NS + 3 * STEP_NS),
+        "a bucket starts at or beyond end_ns: {:?}",
+        distinct
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_get_token_timeseries_empty_range() {
     let (store, path) = create_populated_store("ts_empty");
     let r = store.get_token_timeseries(0, 1, None, 1).unwrap();
@@ -969,6 +1022,49 @@ fn test_get_tool_call_turn_indices() {
     cleanup_db(&path);
 }
 
+/// A single `llm_call` row with a NULL `call_id` must not error the whole
+/// turn map (which `get_token_savings` would then drop via `unwrap_or_default`
+/// for EVERY session). The Rust writer always binds a non-NULL call_id, so a
+/// NULL row can only come from a foreign writer of the same DB; the reader
+/// must still keep all valid entries.
+#[test]
+fn turn_indices_survive_a_null_call_id_row() {
+    let (store, path) = create_populated_store("tc_null_call_id");
+    {
+        // Fixture-only raw insert: simulate a foreign writer's malformed
+        // pending row, timestamped after every valid sess-1 row so the
+        // expected turn indices below are order-independent.
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (\
+             call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+             provider, model, input_tokens, output_tokens, total_tokens,\
+             session_id, trace_id, conversation_id, agent_name, pid,\
+             status, tool_call_ids, event_json, process_name, user_query\
+             ) VALUES (NULL,'llm_call',?1,?2,?3,'openai','gpt-4',1,1,2,\
+             'sess-1','trace-1','conv-1','agent-a',100,'pending',NULL,'{}','proc-a',NULL)",
+            params![BASE_NS + 6 * STEP_NS, BASE_NS + 7 * STEP_NS, STEP_NS],
+        )
+        .unwrap();
+    }
+
+    let m = store
+        .get_tool_call_turn_indices(&["sess-1", "sess-2"])
+        .unwrap();
+
+    // Valid sess-1 entries survive with their expected turns.
+    assert_eq!(m["tc-1"].turn_index, 1);
+    assert_eq!(m["tc-2"].turn_index, 1);
+    assert_eq!(m["call-1"].turn_index, 1);
+    assert_eq!(m["call-2"].turn_index, 2);
+    assert_eq!(m["call-3"].turn_index, 3);
+    assert_eq!(m["call-6"].turn_index, 4);
+    // The malformed row must not poison other sessions either.
+    assert_eq!(m["call-4"].turn_index, 1);
+    assert!(m.contains_key("call-5"));
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_list_traces_by_session() {
     let (store, path) = create_populated_store("traces");
@@ -986,14 +1082,79 @@ fn test_list_traces_by_session() {
 }
 
 #[test]
+fn test_list_traces_by_session_user_query_is_the_earliest() {
+    // MIN(user_query) is a lexicographic aggregate: with the conversation
+    // opening on "zebra" and a later turn asking "apple" it reported "apple"
+    // as the conversation's first query.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_trace_first_query_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               session_id, trace_id, conversation_id, agent_name, pid,\
+               status, tool_call_ids, event_json, process_name, user_query\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,\
+               ?10,?11,?12,?13,?14,?15,?16,'{}',?17,?18)";
+    {
+        let conn = store.conn.lock().unwrap();
+        for (call_id, offset, query) in [
+            ("call-zebra", 0_i64, "zebra"),
+            ("call-apple", STEP_NS, "apple"),
+        ] {
+            conn.execute(
+                sql,
+                params![
+                    call_id,
+                    BASE_NS + offset,
+                    BASE_NS + offset + STEP_NS,
+                    STEP_NS,
+                    "openai",
+                    "gpt-4",
+                    1_i64,
+                    1_i64,
+                    2_i64,
+                    "sess-q",
+                    "trace-q",
+                    "conv-q",
+                    "agent-a",
+                    100_i64,
+                    "complete",
+                    "[]",
+                    "proc",
+                    query
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let r = store
+        .list_traces_by_session("sess-q", None, None, true)
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        r[0].user_query.as_deref(),
+        Some("zebra"),
+        "the first query is the earliest in time, not the smallest string"
+    );
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_list_traces_by_session_with_time_range() {
     let (store, path) = create_populated_store("traces_range");
     let r = store
         .list_traces_by_session("sess-1", Some(BASE_NS), Some(BASE_NS + STEP_NS), true)
         .unwrap();
     assert_eq!(r.len(), 1); // only conv-1
-    assert_eq!(r[0].call_count, 2); // call-1, call-2
-    cleanup_db(&path);
+    assert_eq!(r[0].call_count, 2); // call-1, call-2    cleanup_db(&path);
 }
 
 #[test]
@@ -1362,6 +1523,72 @@ fn test_insert_pending() {
         .unwrap();
     assert_eq!(status, "pending");
     drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn adopting_an_interrupted_idle_snapshot_restores_pending() {
+    // The stale sweep flips idle snapshots to interrupted after the timeout,
+    // even while their request is still in flight. When the live capture then
+    // adopts the snapshot, crash correlation must see the row again: it only
+    // lists pending rows for the pid.
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_adopt_interrupted_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let pending_info = |call_id: &str, origin: PendingOrigin| PendingCallInfo {
+        call_id: call_id.to_string(),
+        trace_id: Some("t-idle".to_string()),
+        conversation_id: None,
+        session_id: None,
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "test-proc".to_string(),
+        agent_name: None,
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/chat".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: None,
+        is_sse: true,
+        model: None,
+        provider: None,
+        call_kind: "main".to_string(),
+        pending_origin: origin,
+        pending_match_key: Some("match-1".to_string()),
+    };
+
+    store
+        .insert_pending(&pending_info("idle-1", PendingOrigin::IdleDrain))
+        .unwrap();
+    assert_eq!(store.mark_interrupted_stale(0).unwrap(), 1);
+
+    store
+        .insert_pending(&pending_info("live-1", PendingOrigin::RequestCapture))
+        .unwrap();
+
+    {
+        let conn = store.conn.lock().unwrap();
+        let (status, itype): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, interruption_type FROM genai_events WHERE call_id = 'live-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the adopted row is in flight again");
+        assert_eq!(itype, None, "the stale interruption type must be dropped");
+    }
+
+    let pending = store.list_pending_for_pid(42).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, "live-1");
+
     cleanup_db(&path);
 }
 

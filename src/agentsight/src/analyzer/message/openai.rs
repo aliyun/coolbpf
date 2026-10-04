@@ -94,7 +94,27 @@ impl OpenAIParser {
             return None;
         }
 
-        match serde_json::from_value::<OpenAIRequest>(body.clone()) {
+        // Modern chat clients send the output cap as `max_completion_tokens`
+        // (the o-series accepts only that spelling). Copy it onto the legacy
+        // key the typed request reads — an explicit `max_tokens` always wins —
+        // the same way `normalize_responses_request` maps `max_output_tokens`.
+        // Only a value the typed field can hold is copied: a malformed or
+        // out-of-range value used to be ignored as an unknown key, and it must
+        // not turn the whole request into a parse failure. A serde alias would
+        // instead reject a request carrying both spellings as a duplicate
+        // field, losing the request.
+        let mut body = body.clone();
+        if body.get("max_tokens").is_none() {
+            if let Some(cap) = body
+                .get("max_completion_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                body["max_tokens"] = serde_json::json!(cap);
+            }
+        }
+
+        match serde_json::from_value::<OpenAIRequest>(body) {
             Ok(request) => {
                 log::debug!(
                     "Parsed OpenAI request: model={}, messages={}",
@@ -409,6 +429,14 @@ impl OpenAIParser {
                     }
                 }
                 "response.function_call_arguments.done" => {
+                    // The done event carries the complete arguments; the
+                    // deltas are a stream that may be missing (capture
+                    // started mid-stream, events dropped). Prefer the
+                    // authoritative value when it is there.
+                    if let Some(arguments) = chunk.get("arguments").and_then(|a| a.as_str()) {
+                        tc_args.clear();
+                        tc_args.push_str(arguments);
+                    }
                     push_tool_call(&mut tool_calls, &tc_id, &tc_name, &tc_args);
                     tc_name.clear();
                     tc_id.clear();
@@ -708,6 +736,68 @@ mod tests {
 
         let request = request.unwrap();
         assert_eq!(request.model, "gpt-4");
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Modern chat clients send the output cap as `max_completion_tokens`
+    /// (the o-series accepts only that spelling); the typed request used to
+    /// drop it, so `LLMRequest.max_tokens` stayed `None` and neither the
+    /// TokenLimit rule nor the `gen_ai.request.max_tokens` telemetry saw it.
+    #[test]
+    fn test_parse_request_reads_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("modern chat request");
+        assert_eq!(request.max_tokens, Some(2048));
+    }
+
+    /// A request carrying both spellings must still parse, with `max_tokens`
+    /// winning — a serde alias would reject it as a duplicate field and lose
+    /// the whole request.
+    #[test]
+    fn test_parse_request_prefers_max_tokens_over_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("both spellings must parse");
+        assert_eq!(request.max_tokens, Some(100));
+    }
+
+    /// A malformed cap used to be ignored as an unknown key; reading it must
+    /// not turn the whole request into a parse failure.
+    #[test]
+    fn test_parse_request_ignores_a_malformed_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": "2048"
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// A cap that does not fit the typed u32 field must be ignored like any
+    /// other malformed value, not copied over and rejected by serde.
+    #[test]
+    fn test_parse_request_ignores_an_out_of_range_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 4_294_967_296u64
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
         assert_eq!(request.messages.len(), 1);
     }
 
@@ -1489,6 +1579,34 @@ mod tests {
         assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_weather");
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_tool_call_from_done_event() {
+        // The done event carries the complete arguments. A capture that
+        // missed the deltas (stream joined late, events dropped) must not
+        // record an empty argument list.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_d01", "model": "qwen-plus"}}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "function_call", "name": "get_weather", "call_id": "call_d01"}}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "arguments": "{\"city\":\"Beijing\"}"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_d01", "model": "qwen-plus", "status": "completed", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("response parses");
+        let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(
+            tc[0]
+                .get("function")
+                .unwrap()
+                .get("arguments")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "{\"city\":\"Beijing\"}"
         );
     }
