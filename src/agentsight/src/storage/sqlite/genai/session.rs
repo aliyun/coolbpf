@@ -301,13 +301,18 @@ impl GenAISqliteStore {
                        ORDER BY start_timestamp_ns ASC";
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map(params![sid], |row| {
-                let call_id: String = row.get(0)?;
+                // `call_id` is nullable in the schema; a NULL (only producible
+                // by a foreign writer) must not error the whole map.
+                let call_id: Option<String> = row.get(0)?;
                 let tool_call_ids: Option<String> = row.get(1)?;
                 Ok((call_id, tool_call_ids))
             })?;
 
             for (idx, row) in rows.enumerate() {
                 let (call_id, tool_call_ids_json) = row?;
+                // A malformed row with a NULL call_id has no key to map, so
+                // skip it instead of failing every session's turn lookup.
+                let Some(call_id) = call_id else { continue };
                 let turn = idx + 1; // 1-based
                 let session_id = sid.to_string();
 
