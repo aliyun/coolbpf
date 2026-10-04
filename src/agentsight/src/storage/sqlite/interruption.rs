@@ -810,6 +810,13 @@ fn errors_match(a: &str, b: &str) -> bool {
     if na == nb {
         return true;
     }
+    // An empty normalized key carries no error information: `contains` treats
+    // "" as a substring of anything, which would make it match every other
+    // error.  The raw stored string is guarded at the call site, but the
+    // target side and keys that are non-empty before normalization are not.
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
     // Substring containment: if one fully contains the other
     na.contains(&nb) || nb.contains(&na)
 }
@@ -1650,6 +1657,42 @@ mod tests {
             "conv-efg",
             &InterruptionType::ContextOverflow,
             Some("http 413 prompt is too long")
+        ));
+    }
+
+    #[test]
+    fn exists_for_conversation_empty_target_does_not_match_a_real_error() {
+        // The other half of the empty-key bug: an event whose error text carries
+        // no information ({"error":{"message":""}} or a whitespace-only body,
+        // which call_builder turns into Some("")) must not match a stored row
+        // that carries a real error — "" is a substring of every normalized key.
+        let store = temp_store();
+        let mut e = make_event("conv-eft", InterruptionType::LlmError);
+        e.interruption_id = "int-eft-1".to_string();
+        e.detail = Some(r#"{"error":"rate limit exceeded"}"#.to_string());
+        store.insert(&e).unwrap();
+
+        assert!(
+            !store.exists_for_conversation("conv-eft", &InterruptionType::LlmError, Some("")),
+            "an empty target must not match a different stored error"
+        );
+        // Positive control: the same row still matches its own error text.
+        assert!(store.exists_for_conversation(
+            "conv-eft",
+            &InterruptionType::LlmError,
+            Some("rate limit exceeded")
+        ));
+
+        // A stored key that is non-empty but normalizes to "" is the mirror
+        // case: the raw-string guard at the call site misses it.
+        let mut blank = make_event("conv-efb", InterruptionType::LlmError);
+        blank.interruption_id = "int-efb-1".to_string();
+        blank.detail = Some(r#"{"error":"   "}"#.to_string());
+        store.insert(&blank).unwrap();
+        assert!(!store.exists_for_conversation(
+            "conv-efb",
+            &InterruptionType::LlmError,
+            Some("rate limit exceeded")
         ));
     }
 
