@@ -20,12 +20,18 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// `refusal` (Anthropic) is the stop reason a safety classifier reports for a
 /// declined answer; the API documents it as a normal `200` completion, not an
 /// error, so the stream is complete and nothing was truncated.
+///
+/// `function_call` (OpenAI legacy function calling) is the predecessor of
+/// `tool_calls`: the model finished its turn by emitting a function call and
+/// the client executes it before asking again, so the stream completed
+/// normally and must not be treated as truncation.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     matches!(
         reason,
         Some(
             "stop"
                 | "tool_calls"
+                | "function_call"
                 | "end_turn"
                 | "tool_use"
                 | "stop_sequence"
@@ -593,7 +599,8 @@ impl InterruptionDetector {
 
         // ── 8. SSE truncated ──────────────────────────────────────────────────
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
-        // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence/pause_turn
+        // 正常终止标志：finish_reason 为
+        // stop/tool_calls/function_call/end_turn/tool_use/stop_sequence/pause_turn/refusal
         // token-limit (length/max_tokens) 由 rule 9 单独处理（rule 10 只处理
         // `length` 下的输入溢出启发式）
         if is_sse
@@ -655,7 +662,10 @@ impl InterruptionDetector {
                 if let Some(max_tokens) = call.request.max_tokens {
                     // If input tokens are much larger than the output cap, this
                     // is almost certainly a context-length issue, not output truncation.
-                    if usage.input_tokens > max_tokens * 4 {
+                    // Widen before multiplying: a large (but legal) max_tokens
+                    // overflows u32, and the wrap can make any input look
+                    // oversized (or hide a real overflow).
+                    if u64::from(usage.input_tokens) > u64::from(max_tokens) * 4 {
                         let detail = serde_json::json!({
                             "model": call.model,
                             "input_tokens": usage.input_tokens,
@@ -1068,6 +1078,37 @@ mod tests {
             events
                 .iter()
                 .any(|e| e.interruption_type == InterruptionType::ContextOverflow)
+        );
+    }
+
+    #[test]
+    fn test_finish_reason_overflow_check_does_not_wrap_on_large_max_tokens() {
+        // max_tokens is a u32 parsed straight from the request body. Multiplying
+        // it by 4 in u32 wraps: 1_500_000_000 * 4 == 1_705_032_704, which is
+        // larger than the tiny input below, so the wrap fabricates a
+        // ContextOverflow for a request whose input is nowhere near the cap.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.max_tokens = Some(1_500_000_000);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            total_tokens: 110,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::ContextOverflow),
+            "input 100 is far below the 6e9-token cap; the wrap must not flag overflow"
         );
     }
 
@@ -1551,6 +1592,31 @@ mod tests {
                 .iter()
                 .all(|e| e.interruption_type != InterruptionType::SseTruncated),
             "a refusal is a normal completion and must not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_function_call_sse_not_reported_as_truncated() {
+        // SSE + finish_reason="function_call"（旧版 function-calling 协议：
+        // 模型以发起一次函数调用正常结束回合，客户端执行后发起新请求，
+        // "tool_calls" 的前身）→ 流是完整的，不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("function_call".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "a legacy function_call finish is a normal completion and must not trigger SseTruncated"
         );
     }
 

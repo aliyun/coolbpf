@@ -2106,6 +2106,58 @@ mod tests {
     /// as a filter over originals, and an agent asking for `good` history is
     /// exactly the caller that cannot tell an empty filter from no data.
     #[actix_web::test]
+    async fn trajectory_label_typos_are_rejected() {
+        // `label=god` used to drop the unknown token and return an empty 200
+        // ("no such trajectories"), while `exclude_label=uselesss` failed
+        // open and served everything. Both must be a 400 like the reuse API.
+        let db = unique_handler_db("label-typo");
+        let tstore = Arc::new(TrajectoryStore::new_with_path(&db).unwrap());
+        tstore
+            .upsert_trajectory(&trajectory_record("s-1", "proj-a", "qoder"))
+            .unwrap();
+        let label_dir = temp_root("reuse-label-typo");
+        std::fs::create_dir_all(&label_dir).unwrap();
+        let reuse = crate::reuse::ReuseStore::open_private(&label_dir).unwrap();
+
+        let data = test_app_state_with_trajectory_and_reuse(Some(tstore), Some(Arc::new(reuse)));
+        let app = awtest::init_service(
+            App::new()
+                .app_data(data)
+                .configure(crate::server::configure_routes),
+        )
+        .await;
+
+        for (uri, field) in [
+            ("/api/trajectories?label=god", "label"),
+            ("/api/trajectories?exclude_label=uselesss", "exclude_label"),
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must be rejected"
+            );
+            let body: serde_json::Value = awtest::read_body_json(resp).await;
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(field),
+                "{uri}: the error must name the offending field, got {body}"
+            );
+        }
+
+        // A valid token still filters normally.
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/trajectories?label=good")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
     async fn trajectory_label_filter_keeps_matches_beyond_the_newest_limit_window() {
         let db = unique_handler_db("label-filter-window");
         let tstore = TrajectoryStore::new_with_path(&db).unwrap();
@@ -3034,6 +3086,73 @@ mod tests {
         cleanup_db(&interruption_path);
     }
 
+    #[test]
+    fn live_process_matches_checks_the_live_executable() {
+        let self_pid = std::process::id();
+        let self_exe = std::fs::read_link(format!("/proc/{self_pid}/exe")).unwrap();
+        let self_exe = self_exe.to_string_lossy();
+        let self_exe = self_exe.strip_suffix(" (deleted)").unwrap_or(&self_exe);
+
+        assert!(live_process_matches(self_pid, self_exe));
+        // A recycled PID runs a different binary: refuse to signal it.
+        assert!(!live_process_matches(self_pid, "/nonexistent/other-agent"));
+        // A dead PID and an empty recorded path cannot be verified. Use a
+        // value above pid_max rather than u32::MAX (which kill(2) would
+        // read as -1).
+        assert!(!live_process_matches(i32::MAX as u32, self_exe));
+        assert!(!live_process_matches(self_pid, ""));
+    }
+
+    #[actix_web::test]
+    async fn agent_health_restart_refuses_a_vanished_or_recycled_pid() {
+        // The store keeps offline entries until acknowledged, so a restart
+        // request can name a PID whose process is gone (or recycled by an
+        // unrelated process). The handler must refuse instead of signalling
+        // it and re-execing the stored command anyway.
+        let state = test_app_state(0);
+        // Above /proc/sys/kernel/pid_max (4194304 on Linux), so no such
+        // process can exist. Deliberately NOT u32::MAX: `kill -9 4294967295`
+        // truncates the argument to -1 before the kill(2) syscall, i.e.
+        // "signal every process the caller may signal".
+        let vanished_pid = i32::MAX as u32;
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                vanished_pid,
+                crate::health::AgentHealthStatus {
+                    pid: vanished_pid,
+                    agent_name: "Vanished".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: "/bin/vanished-agent".to_string(),
+                    workspace_path: None,
+                    ports: vec![],
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: Some(vec!["/bin/true".to_string()]),
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+        }
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(restart_agent_health)).await;
+        let req = awtest::TestRequest::post()
+            .uri(&format!("/agent-health/{vanished_pid}/restart"))
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        let status = resp.status();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a restart for a non-live pid must be refused"
+        );
+    }
+
     #[actix_web::test]
     async fn agent_health_process_records_can_still_be_deleted() {
         let state = test_app_state(0);
@@ -3132,6 +3251,24 @@ mod tests {
         let agents = include_body["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 2, "Cosh should still be excluded");
         assert_eq!(include_body["filtered_count"], 1);
+
+        // Only the exact parameter enables the flag: a longer value or a
+        // different key that merely contains the text must not.
+        for uri in [
+            "/agent-process-health?include_clients=trueX",
+            "/agent-process-health?xinclude_clients=true",
+            "/agent-process-health?foo=include_clients=true",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let body = service_response_json(resp).await;
+            assert_eq!(
+                body["agents"].as_array().unwrap().len(),
+                1,
+                "{uri} must not enable include_clients"
+            );
+            assert_eq!(body["filtered_count"], 2, "{uri}");
+        }
 
         let deleted = awtest::call_service(
             &app,
@@ -3881,7 +4018,16 @@ pub async fn get_agent_process_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
-    let include_clients = req.query_string().contains("include_clients=true");
+    // Exact key=value match: `contains` also enabled the flag for
+    // `xinclude_clients=true`, `include_clients=trueX`, or an unrelated
+    // parameter whose value merely contains the text.
+    let include_clients = req.query_string().split('&').any(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        matches!(
+            (parts.next(), parts.next()),
+            (Some("include_clients"), Some(value)) if value.eq_ignore_ascii_case("true")
+        )
+    });
     let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
     let all = store.all_agents();
     let total = all.len();
@@ -3901,6 +4047,33 @@ pub async fn get_agent_process_health(
         last_scan_time: store.last_scan_time,
         filtered_count,
     })
+}
+
+/// Whether the live process at `pid` still looks like the agent the health
+/// store recorded. `kill -9` on a recycled PID would hit an unrelated
+/// process, so an unverifiable identity (dead process, empty recorded path,
+/// different executable) must refuse the restart.
+fn live_process_matches(pid: u32, recorded_exe: &str) -> bool {
+    if recorded_exe.is_empty() {
+        return false;
+    }
+    let Ok(live) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let live = live.to_string_lossy();
+    let live = live.strip_suffix(" (deleted)").unwrap_or(&live);
+    if live == recorded_exe {
+        return true;
+    }
+    // Compare canonical spellings when both sides resolve (symlinked
+    // interpreters, /usr/bin aliases).
+    match (
+        std::fs::canonicalize(recorded_exe),
+        std::fs::canonicalize(live),
+    ) {
+        (Ok(recorded), Ok(live)) => recorded == live,
+        _ => false,
+    }
 }
 
 /// DELETE /api/agent-health/{pid}
@@ -3929,13 +4102,12 @@ pub async fn restart_agent_health(
 ) -> impl Responder {
     let pid = path.into_inner();
 
-    let restart_cmd = {
+    let (restart_cmd, recorded_exe) = {
         let store = data.health_store.read().unwrap();
-        store
-            .all_agents()
-            .into_iter()
-            .find(|a| a.pid == pid)
-            .and_then(|a| a.restart_cmd)
+        match store.all_agents().into_iter().find(|a| a.pid == pid) {
+            Some(agent) => (agent.restart_cmd.clone(), agent.exe_path.clone()),
+            None => (None, String::new()),
+        }
     };
 
     let cmd = match restart_cmd {
@@ -3946,13 +4118,35 @@ pub async fn restart_agent_health(
         }
     };
 
+    // A health entry outlives its process (offline entries stay until
+    // acknowledged) and PID reuse is normal, so the live process must still
+    // match the recorded executable before it is signalled — otherwise a
+    // restart would `kill -9` an unrelated process.
+    if !live_process_matches(pid, &recorded_exe) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "pid {pid} no longer matches the recorded agent ({recorded_exe}); refusing to kill"
+            ),
+        }));
+    }
+
     // Step 1: kill -9
     use std::process::Command;
     let kill_result = Command::new("kill").args(["-9", &pid.to_string()]).output();
 
-    if let Err(e) = kill_result {
-        return HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+    match kill_result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            // A failed kill means the process is already gone (or cannot be
+            // killed); re-execing anyway would start a duplicate agent.
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("kill exited with {}", output.status),
+            }));
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("kill failed: {}", e)}));
+        }
     }
 
     // Step 2: short wait for process to exit
@@ -4541,7 +4735,9 @@ pub async fn list_trajectories(
         fetch_limit,
     ) {
         Ok(mut rows) => {
-            filter_rows_by_reuse_labels(&data, &query, &mut rows);
+            if let Err(response) = filter_rows_by_reuse_labels(&data, &query, &mut rows) {
+                return response;
+            }
             rows.truncate(limit as usize);
             HttpResponse::Ok().json(rows)
         }
@@ -4571,40 +4767,60 @@ fn filter_rows_by_reuse_labels(
     data: &web::Data<AppState>,
     query: &TrajectoryQuery,
     rows: &mut Vec<agentsight_trajectory_collector::TrajectorySummary>,
-) {
+) -> Result<(), HttpResponse> {
     if !reuse_label_filter_requested(query) {
-        return;
+        return Ok(());
     }
+    // Reject unknown tokens up front, like the reuse API: a typo used to be
+    // dropped silently, which read as "no such trajectories" for `label` and
+    // failed open (nothing excluded) for `exclude_label`.
+    let parse =
+        |field: &str, raw: &str| -> Result<Vec<crate::reuse::TrajectoryLabel>, HttpResponse> {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|token| {
+                    crate::reuse::TrajectoryLabel::parse(token).ok_or_else(|| {
+                        bad_request_response(format!(
+                            "{field} '{token}' is not a known trajectory label"
+                        ))
+                    })
+                })
+                .collect()
+        };
+    let requested = query
+        .label
+        .as_deref()
+        .map(|raw| parse("label", raw))
+        .transpose()?;
+    let excluded = query
+        .exclude_label
+        .as_deref()
+        .map(|raw| parse("exclude_label", raw))
+        .transpose()?;
+
     let Some(labels) = data.reuse_store.as_deref() else {
         // No label store: nothing has been assessed, so a positive filter
         // matches nothing. Serve the empty truth rather than unfiltered rows.
         if query.label.is_some() || query.human_backed == Some(true) {
             rows.clear();
         }
-        return;
+        return Ok(());
     };
-    let parse = |raw: &str| -> Vec<crate::reuse::TrajectoryLabel> {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(crate::reuse::TrajectoryLabel::parse)
-            .collect()
-    };
-    let keep: Option<std::collections::HashSet<String>> = query.label.as_deref().map(|raw| {
+    let keep: Option<std::collections::HashSet<String>> = requested.map(|parsed| {
         labels
-            .sessions_with_labels(&parse(raw))
+            .sessions_with_labels(&parsed)
             .unwrap_or_default()
             .into_iter()
             .collect()
     });
-    let drop: Option<std::collections::HashSet<String>> =
-        query.exclude_label.as_deref().map(|raw| {
-            labels
-                .sessions_with_labels(&parse(raw))
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        });
+    let drop: Option<std::collections::HashSet<String>> = excluded.map(|parsed| {
+        labels
+            .sessions_with_labels(&parsed)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
     let backed: Option<std::collections::HashSet<String>> = if query.human_backed == Some(true) {
         Some(
             labels
@@ -4624,6 +4840,7 @@ fn filter_rows_by_reuse_labels(
             && drop.as_ref().is_none_or(|set| !set.contains(id))
             && backed.as_ref().is_none_or(|set| set.contains(id))
     });
+    Ok(())
 }
 
 /// GET /api/trajectories/filters

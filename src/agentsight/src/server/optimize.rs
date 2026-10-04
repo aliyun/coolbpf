@@ -84,6 +84,7 @@ impl OptLlmConfig {
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
+        preserve_unparseable_config(path)?;
         // Never persist the API key as plaintext — 0o600 does not survive
         // backups, snapshots, or root compromise (see super::secret).
         let mut on_disk = self.clone();
@@ -146,6 +147,33 @@ impl OptLlmConfig {
             }
         })
     }
+}
+
+/// Back up a config file this process could not parse before `save` replaces it.
+///
+/// [`OptLlmConfig::load`] treats a file that does not parse as an empty
+/// configuration, so its settings — including the sealed API key — never enter
+/// memory: the next save would overwrite them without a trace. Keep a copy
+/// first, the same way `config.rs::ensure_default_agents_config` refuses to
+/// replace invalid JSON outright (issue #1502).
+fn preserve_unparseable_config(path: &Path) -> std::io::Result<()> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        // Absent or unreadable: there is nothing this process is about to lose.
+        return Ok(());
+    };
+    if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+        return Ok(());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.bak.{ts}"));
+    std::fs::copy(path, &backup)?;
+    log::warn!(
+        "Kept the unparseable optimization config at {backup:?} before overwriting {path:?}"
+    );
+    Ok(())
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -1227,6 +1255,58 @@ mod tests {
         assert!(!needs_reseal);
         assert_eq!(loaded.api_key, None);
         assert_eq!(loaded.model.as_deref(), Some("m"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Return the backups a config path left beside it, sorted.
+    fn config_backups(dir: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("optimization_config.json.bak."))
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// `load` treats a file that does not parse as an empty configuration, so
+    /// its settings never enter memory. Saving over it used to destroy those
+    /// settings — including the sealed API key — without a trace.
+    #[test]
+    fn save_keeps_a_config_it_could_not_parse() {
+        let dir = tmp_dir("unparseable-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        // An interrupted write leaves exactly this: truncated JSON that still
+        // holds the sealed key and the other settings.
+        let truncated = "{\n  \"api_key\": \"enc:v1:AAAA:BBBB\",\n  \"model\": \"qwen\"\n";
+        std::fs::write(&path, truncated).unwrap();
+
+        let config = OptLlmConfig {
+            api_key: Some("sk-fresh".into()),
+            model: Some("gpt-4o".into()),
+            base_url: None,
+            search_timeout_secs: None,
+        };
+        config.save(&path).unwrap();
+
+        let backups = config_backups(&dir);
+        assert_eq!(backups.len(), 1, "the unparseable file must be kept");
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), truncated);
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains("gpt-4o"),
+            "the new config is written: {stored}"
+        );
+
+        // Once the file parses again there is nothing left to preserve.
+        config.save(&path).unwrap();
+        assert_eq!(config_backups(&dir).len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

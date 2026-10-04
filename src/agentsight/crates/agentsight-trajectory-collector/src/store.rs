@@ -236,8 +236,11 @@ impl TrajectoryStore {
             )",
             [],
         )?;
-        // Lightweight bookkeeping for files that failed conversion (corrupted
-        // JSONL, empty events, etc.) so they are not re-read every scan round.
+        // Lightweight per-path scan bookkeeping so unchanged files are not
+        // re-read every scan round: it records files that failed conversion
+        // (corrupted JSONL, empty events, ...) and, via
+        // [`TrajectoryStore::upsert_trajectory`], successfully ingested
+        // paths whose session row no longer points at them.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skipped_files (
                 file_path TEXT PRIMARY KEY,
@@ -274,8 +277,9 @@ impl TrajectoryStore {
 
     /// Returns `(file_size, file_mtime_ns)` recorded for `file_path`, if any.
     /// Drives the incremental scan: unchanged files are skipped.
-    /// Checks both successfully ingested trajectories and skipped (corrupted)
-    /// files.
+    /// Checks the successfully ingested trajectory row first and the per-path
+    /// scan bookkeeping (failed conversions, and ingested paths the session
+    /// row no longer points at) second.
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
@@ -369,9 +373,21 @@ impl TrajectoryStore {
                 record.last_user_message,
             ],
         )?;
+        // Keep per-path scan bookkeeping for the ingested path. The
+        // trajectory row is keyed by session_id and stores a single
+        // file_path, so the same session discovered under two roots (e.g.
+        // a Codex rollout under `.codex/sessions` and
+        // `.codex/archived_sessions`) rewrites file_path on each upsert;
+        // without path-keyed bookkeeping the path not currently stored on
+        // the row would miss the incremental check and be fully re-read and
+        // re-upserted (collected_at_ns churn) on every scan round. Maintenance
+        // purges the bookkeeping row again once the trajectory row itself
+        // carries the same path (it serves the check directly).
         conn.execute(
-            "DELETE FROM skipped_files WHERE file_path = ?1",
-            params![record.file_path],
+            "INSERT INTO skipped_files (file_path, file_size, file_mtime_ns)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_path) DO UPDATE SET file_size = ?2, file_mtime_ns = ?3",
+            params![record.file_path, record.file_size, record.file_mtime_ns],
         )?;
         Ok(())
     }
@@ -509,7 +525,12 @@ impl TrajectoryStore {
     ///
     /// Read-only, built for preference analysis: subagent rows are excluded
     /// because their "user" steps are the parent agent's instructions, not
-    /// genuine user input. The window filter uses `collected_at_ns` (always
+    /// genuine user input. The optimizer's synthetic run roots
+    /// (`opt:<session>`, source [`SYNTHETIC_RUN_SOURCE`]) are excluded for
+    /// the same reason with an added cost: they carry only agent dispatch
+    /// steps, so they flatten to zero preference rows while still displacing
+    /// real sessions from the `limit` window every time an analysis runs.
+    /// The window filter uses `collected_at_ns` (always
     /// present, monotonic i64) rather than the optional ISO `start_time` /
     /// `end_time` strings.
     ///
@@ -528,12 +549,13 @@ impl TrajectoryStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT session_id, atif_json FROM collected_trajectories
-             WHERE collected_at_ns >= ?1 AND is_subagent = 0
-             ORDER BY collected_at_ns DESC LIMIT ?2",
+             WHERE collected_at_ns >= ?1 AND is_subagent = 0 AND source != ?2
+             ORDER BY collected_at_ns DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![since_collected_at_ns, limit], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![since_collected_at_ns, SYNTHETIC_RUN_SOURCE, limit],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1002,6 +1024,12 @@ fn now_ns() -> i64 {
 /// stripping (see [`extract_user_message_previews`]).
 const SCHEMA_USER_VERSION: i32 = 2;
 
+/// Source label the optimizer stamps on its synthetic run rows
+/// (`opt:<session>` roots and their dimension subagents, written by the
+/// server crate). Those rows are bookkeeping about analyses, not observed
+/// agent sessions, so the preference-analysis window must not count them.
+const SYNTHETIC_RUN_SOURCE: &str = "agentsight-opt";
+
 /// Max characters kept per user-message preview column.
 const MESSAGE_PREVIEW_CHARS: usize = 200;
 
@@ -1279,6 +1307,36 @@ mod tests {
     }
 
     #[test]
+    fn test_file_state_survives_session_repath() {
+        // The same session id under two discovery roots alternately wins the
+        // session_id primary key, rewriting the row's file_path. The path no
+        // longer stored on the row must keep its scan state, or that file
+        // misses the incremental check every round and is re-read and
+        // re-upserted forever.
+        let store = TrajectoryStore::new_with_path(&tmp_db("repath")).unwrap();
+        let a = sample_record();
+        store.upsert_trajectory(&a).unwrap();
+
+        let mut b = sample_record();
+        b.file_path = "/root/.codex/archived_sessions/s-1.jsonl".into();
+        b.file_size = 2048;
+        b.file_mtime_ns = 99;
+        store.upsert_trajectory(&b).unwrap();
+
+        assert_eq!(store.count().unwrap(), 1, "one row per session id");
+        assert_eq!(
+            store.get_file_state(&a.file_path).unwrap(),
+            Some((1024, 42)),
+            "the first path keeps its state after the row re-paths"
+        );
+        assert_eq!(
+            store.get_file_state(&b.file_path).unwrap(),
+            Some((2048, 99)),
+            "the winning path keeps its state via the row"
+        );
+    }
+
+    #[test]
     fn test_list_summaries_filters_and_limit() {
         let store = TrajectoryStore::new_with_path(&tmp_db("list")).unwrap();
         let mut a = sample_record();
@@ -1347,6 +1405,31 @@ mod tests {
             .list_recent_atif_jsons(i64::MAX, 100)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_list_recent_atif_jsons_excludes_opt_run_rows() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("recent-opt")).unwrap();
+        // A real user session plus a synthetic optimization run root, both
+        // main-agent rows.
+        let mut real = sample_record();
+        real.session_id = "real-1".into();
+        store.upsert_trajectory(&real).unwrap();
+        let mut opt = sample_record();
+        opt.session_id = "opt:real-1".into();
+        opt.source = "agentsight-opt".into();
+        opt.file_path = String::new();
+        store.upsert_trajectory(&opt).unwrap();
+
+        let rows = store.list_recent_atif_jsons(0, 100).unwrap();
+        assert_eq!(rows.len(), 1, "the run root must not surface: {rows:?}");
+        assert_eq!(rows[0].0, "real-1");
+
+        // A window of one must still surface the real session even though the
+        // synthetic row is the newest main-agent row in the table.
+        let one = store.list_recent_atif_jsons(0, 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0, "real-1");
     }
 
     #[test]
