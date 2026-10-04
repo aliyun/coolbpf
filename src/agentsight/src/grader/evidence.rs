@@ -84,26 +84,28 @@ fn json_has_tool_failure(value: &serde_json::Value) -> bool {
 /// `isError` that real agent traces carry — and some tools report `success`
 /// or an `error` status instead. When a payload declares success, the content
 /// is free-form output that may legitimately mention a traceback or a missing
-/// path, so it must not be read as a failure; only an explicit error can
-/// contradict it. The interruption detector reads the same payloads with the
-/// same rule in `tool_response_failure_text`.
+/// path, so it must not be read as a failure; only an `error` status can
+/// contradict the flag, and it wins. The interruption detector reads the same
+/// payloads with the same precedence in `tool_response_failure_text`.
 fn declared_failure(map: &serde_json::Map<String, serde_json::Value>) -> Option<bool> {
+    let status_is_error = map
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+
     if let Some(is_error) = map
         .get("is_error")
         .or_else(|| map.get("isError"))
         .and_then(|value| value.as_bool())
     {
-        return Some(is_error);
+        return Some(is_error || status_is_error);
     }
 
     if let Some(success) = map.get("success").and_then(|value| value.as_bool()) {
-        return Some(!success);
+        return Some(!success || status_is_error);
     }
 
-    map.get("status")
-        .and_then(|value| value.as_str())
-        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
-        .then_some(true)
+    status_is_error.then_some(true)
 }
 
 fn tool_response_has_error(map: &serde_json::Map<String, serde_json::Value>) -> bool {
@@ -111,7 +113,10 @@ fn tool_response_has_error(map: &serde_json::Map<String, serde_json::Value>) -> 
         return is_error;
     }
 
-    ["response", "content", "error"]
+    // The Responses raw wire form carries its payload in `output`, with no
+    // status or error flag to settle the question, so the scan reads that
+    // key too.
+    ["response", "content", "error", "output"]
         .iter()
         .any(|key| map.get(*key).is_some_and(value_has_error_signal))
 }
@@ -418,6 +423,77 @@ mod tests {
                 "a failed tool result must be detected: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn detects_a_failure_in_a_statusless_responses_output() {
+        // The Responses raw wire form carries its payload in `output`, with
+        // neither a status nor an error flag — the shape the local collector
+        // writes for a Codex rollout and the resource timeline replays. The
+        // fallback scan never read that key, so the failed call scored as a
+        // clean result.
+        let event = event(
+            Some(
+                r#"[{"role":"user","content":"run it"},
+                    {"type":"function_call_output","call_id":"call-1","output":"Error: command failed"}]"#,
+            ),
+            None,
+            None,
+        );
+
+        assert!(looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn a_clean_responses_output_stays_clean() {
+        // The same wire form with a benign payload is not a failure: reading
+        // `output` must not flag successful results.
+        let event = event(
+            Some(
+                r#"[{"role":"user","content":"list"},
+                    {"type":"function_call_output","call_id":"call-1","output":"file-a
+"}]"#,
+            ),
+            None,
+            None,
+        );
+
+        assert!(!looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn an_error_status_wins_over_a_declared_success() {
+        // `tool_response_failure_text` treats an `error` status as overriding
+        // a success flag; the grader diverged by returning the flag before
+        // ever reading `status`, so the contradiction scored as success.
+        for payload in [
+            r#"[{"type":"tool_result","is_error":false,"status":"error","content":"done"}]"#,
+            r#"[{"type":"tool_result","success":true,"status":"error","content":"done"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "an error status wins over the success flag: {payload}"
+            );
+        }
+
+        // Controls: without the contradicting status the same flags keep
+        // their plain meaning, and a plain failure is still a failure.
+        let clean = event(
+            None,
+            Some(
+                r#"[{"type":"tool_result","is_error":false,"content":"find: '/root': Permission denied"}]"#,
+            ),
+            None,
+        );
+        assert!(!looks_like_tool_failure(&clean));
+
+        let failed = event(
+            None,
+            Some(r#"[{"type":"tool_result","is_error":true,"status":"ok","content":"done"}]"#),
+            None,
+        );
+        assert!(looks_like_tool_failure(&failed));
     }
 
     #[test]
