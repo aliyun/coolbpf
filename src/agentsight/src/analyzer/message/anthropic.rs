@@ -307,7 +307,15 @@ impl AnthropicParser {
                         delta,
                         usage: delta_usage,
                     } => {
-                        stop_reason = delta.stop_reason.clone();
+                        // A stream may carry several message_delta events (interim
+                        // usage; some proxies emit a usage-only terminal delta
+                        // after the one that carried the stop_reason). The usage
+                        // counters below merge with max for exactly that reason;
+                        // the stop_reason must not regress to None when a later
+                        // delta omits it.
+                        if delta.stop_reason.is_some() {
+                            stop_reason = delta.stop_reason.clone();
+                        }
                         if let Some(du) = delta_usage {
                             // Counters are cumulative and split across events:
                             // official Anthropic puts input+cache in
@@ -956,6 +964,38 @@ mod tests {
         );
         assert_eq!(resp.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(resp.usage.cache_read_input_tokens, Some(24576));
+    }
+
+    /// Anthropic-compatible gateways may emit several `message_delta` events
+    /// (interim usage, or a second terminal usage-only delta after the one
+    /// that carried `stop_reason`). The usage merge takes the max of each
+    /// counter for exactly that reason, but the `stop_reason` assignment
+    /// overwrote unconditionally, so a later delta without a `stop_reason`
+    /// erased the recorded terminal reason.
+    #[test]
+    fn test_aggregate_sse_keeps_stop_reason_across_later_usage_deltas() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_sr", "type": "message", "role": "assistant",
+                "model": "claude-sonnet-4-5", "content": [],
+                "usage": {"input_tokens": 10, "output_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 5}},
+            {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 5}}
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("the stream must aggregate");
+        assert_eq!(
+            resp.stop_reason.as_deref(),
+            Some("end_turn"),
+            "a later usage-only message_delta must not erase the stop_reason"
+        );
+        assert_eq!(resp.usage.output_tokens, 5);
     }
 
     /// Test: SSE stream with multiple tool calls
