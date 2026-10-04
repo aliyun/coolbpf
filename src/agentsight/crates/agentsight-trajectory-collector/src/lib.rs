@@ -132,8 +132,14 @@ fn process_session(
         }
     }
 
-    let content = std::fs::read_to_string(&session.path)
+    // Read bytes: an agent killed mid-write can leave a partial record whose
+    // last bytes cut a multi-byte character, and `read_to_string` would then
+    // reject the whole file, losing every complete record before the tail.
+    // Lossy decoding turns that tail into a malformed line, which
+    // `load_jsonl_events` skips like any other malformed line.
+    let content = std::fs::read(&session.path)
         .with_context(|| format!("read {}", session.path.display()))?;
+    let content = String::from_utf8_lossy(&content);
     let events = qoder::load_jsonl_events(&content);
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
@@ -291,6 +297,41 @@ mod tests {
         // Second scan with unchanged file must not fail and keeps one row.
         scan_once(&store, &config);
         assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_scan_once_ingests_a_session_with_a_torn_utf8_tail() {
+        let base = tmp_dir("torn-tail");
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let path = write_session(&projects);
+
+        // An agent killed mid-write can leave a partial record whose last
+        // bytes cut a multi-byte character in half, so the file is no longer
+        // valid UTF-8.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(
+            b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\xe4\xb8",
+        );
+        std::fs::write(&path, &bytes).unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![projects]),
+            maintenance: TrajectoryMaintenancePolicy::default(),
+        };
+
+        scan_once(&store, &config);
+
+        // The truncated record is dropped, but the complete records before it
+        // still ingest: one bad tail must not discard the whole session.
+        assert_eq!(store.count().unwrap(), 1);
+        let rec = store.get(UUID_A).unwrap().unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["agent"]["model_name"], "qwen-max");
+        assert_eq!(rec.total_prompt_tokens, Some(10));
+        assert_eq!(rec.end_time.as_deref(), Some("2026-07-25T10:00:02Z"));
     }
 
     #[test]
