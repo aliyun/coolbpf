@@ -160,19 +160,34 @@ pub fn recover_oom_events(
     );
 }
 
+/// `dmesg` with its output locale pinned.
+///
+/// `dmesg -T` renders the timestamp with `strftime("%c")`, which follows the
+/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`). On
+/// a host exporting e.g. `LANG=zh_CN.UTF-8` the weekday and month names come
+/// out localized, [`parse_dmesg_timestamp`] cannot read them, and every OOM
+/// event is stamped with the scan time instead of the kill time — which also
+/// defeats the `(pid, timestamp)` dedup in [`recover_oom_events`]. Pin the
+/// child to the C locale so the output keeps the format the parser documents.
+fn dmesg_command() -> Command {
+    let mut command = Command::new("dmesg");
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// Parse OOM kill events from `dmesg -T` output.
 ///
 /// Looks for lines like:
 ///   [Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) ...
 fn parse_dmesg_oom_events() -> Result<Vec<OomKillEvent>, Box<dyn std::error::Error>> {
-    let output = Command::new("dmesg")
+    let output = dmesg_command()
         .arg("-T")
         .output()
         .map_err(|e| format!("failed to run dmesg: {e}"))?;
 
     if !output.status.success() {
         // Some systems require privileges; fall back to dmesg without -T
-        let output2 = Command::new("dmesg").output()?;
+        let output2 = dmesg_command().output()?;
         return parse_dmesg_lines(&String::from_utf8_lossy(&output2.stdout));
     }
 
@@ -316,11 +331,11 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
 /// Returns `true` if the PID appears in an OOM kill line in dmesg
 /// (either format accepted by [`line_matches_oom_kill`]).
 pub fn was_pid_oom_killed(pid: i32) -> bool {
-    let output = match Command::new("dmesg").arg("-T").output() {
+    let output = match dmesg_command().arg("-T").output() {
         Ok(o) if o.status.success() => o,
         Ok(_) => {
             // Fallback without -T
-            match Command::new("dmesg").output() {
+            match dmesg_command().output() {
                 Ok(o) => o,
                 Err(_) => return false,
             }
@@ -407,6 +422,84 @@ mod tests {
             "669334"
         ));
         assert!(!line_matches_oom_kill("", "669334"));
+    }
+
+    // ─── dmesg output locale (startup recovery timestamps) ────────────────
+
+    /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
+    /// with `strftime("%c")`, so the weekday and month names follow the
+    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`).
+    const FAKE_DMESG: &str = r#"#!/bin/sh
+case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
+    ""|C|POSIX|C.*)
+        printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        ;;
+    *)
+        printf '[五 4月 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        ;;
+esac
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn oom_recovery_reads_dmesg_timestamps_under_a_foreign_locale() {
+        // The parser only understands the C-locale `%b` form. Parse the fake
+        // dmesg output in a re-executed child whose locale is foreign and
+        // whose PATH finds the fake, so the assertion covers the command the
+        // recovery path actually spawns without mutating other tests' env.
+        const CHILD: &str = "AGENTSIGHT_OOM_LOCALE_CHILD";
+        let fake_dir = std::env::temp_dir().join(format!(
+            "agentsight-fake-dmesg-{}",
+            std::process::id()
+        ));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::oom_recovery_reads_dmesg_timestamps_under_a_foreign_locale",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LC_ALL", "zh_CN.UTF-8")
+                .env("LANG", "zh_CN.UTF-8")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let events = parse_dmesg_oom_events().expect("read fake dmesg");
+        let event = events
+            .iter()
+            .find(|event| event.pid == 12345)
+            .expect("killed process event");
+        // "[Fri Apr 17 10:00:00 2026]" -> 2026-04-17T10:00:00Z
+        assert_eq!(
+            event.timestamp_ns, 1_776_420_000_000_000_000,
+            "the C-locale timestamp must survive a foreign LC_TIME"
+        );
     }
 
     // ─── parse_dmesg_lines: startup recovery path (#3130) ─────────────────
