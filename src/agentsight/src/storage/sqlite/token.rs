@@ -657,23 +657,28 @@ impl<'a> TokenQuery<'a> {
 
     /// Query hours with comparison
     pub fn by_hours_with_compare(&self, hours: u64) -> TokenQueryResult {
-        let mut result = self.by_hours(hours);
+        // Read the clock once and cut both windows from the same instant:
+        // separate `SystemTime::now()` readings for the current and previous
+        // windows could let a record written between them count in both.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let hours_ns = hours.saturating_mul(3_600_000_000_000);
+        let start_ns = now.saturating_sub(hours_ns.saturating_mul(2));
+        let mid_ns = now.saturating_sub(hours_ns);
 
-        // Get previous period data
-        let prev_records = self.store.by_last_hours(hours.saturating_mul(2));
-        let prev_records: Vec<_> = prev_records
+        let mut result = self.build_result(
+            self.store.by_time_range(mid_ns, now),
+            format!("最近 {hours} 小时"),
+        );
+
+        // Previous window: the earlier half, [start_ns, mid_ns)
+        let prev_records: Vec<_> = self
+            .store
+            .by_time_range(start_ns, mid_ns)
             .into_iter()
-            .filter(|r| {
-                // Get records from the earlier half
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                let hours_ns = hours.saturating_mul(3_600_000_000_000);
-                let start_ns = now.saturating_sub(hours_ns.saturating_mul(2));
-                let mid_ns = now.saturating_sub(hours_ns);
-                r.timestamp_ns >= start_ns && r.timestamp_ns < mid_ns
-            })
+            .filter(|r| r.timestamp_ns < mid_ns)
             .collect();
 
         let prev_total: u64 = prev_records.iter().map(|r| r.total_tokens()).sum();
