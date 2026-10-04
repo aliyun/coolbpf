@@ -213,7 +213,20 @@ impl AnalyzeChatmlCommand {
         // failed to parse on its own, so a pretty-printed trace answered
         // "no valid events found" even though every event was present.
         let cleaned = strip_trailing_commas(content);
-        if let Ok(events) = serde_json::from_str::<Vec<ChromeTraceEvent>>(&cleaned) {
+        // Parse the array element by element: one event with missing required
+        // fields — Chrome DevTools' metadata events (`ph: "M"`) carry no `ts`
+        // by definition — must not fail the whole file, or a complete
+        // pretty-printed trace answers "no valid events found".
+        if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(&cleaned) {
+            let mut events = Vec::new();
+            for value in values {
+                match serde_json::from_value::<ChromeTraceEvent>(value) {
+                    Ok(event) => events.push(event),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to parse trace event: {e}");
+                    }
+                }
+            }
             return Ok(events);
         }
 
@@ -701,8 +714,9 @@ mod tests {
             ],
             "tools": request["tools"].clone()
         });
-        let other = crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
-            .expect("request is counted");
+        let other =
+            crate::analyzer::count_request_tokens(&with_tool_message, &tokenizer, &tokenizer)
+                .expect("request is counted");
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
@@ -1043,6 +1057,42 @@ mod tests {
             "{\"messages\":[]}"
         );
         assert_eq!(events[1].cat, "http.response");
+    }
+
+    /// Chrome DevTools traces carry metadata events (`ph: "M"`); per the trace
+    /// event format they have no timestamp. One such event used to fail the
+    /// whole-array parse, and the line fallback cannot read pretty-printed
+    /// traces, so a complete trace answered "no valid events found".
+    #[test]
+    fn parse_trace_relaxed_skips_events_with_missing_fields() {
+        let content = concat!(
+            "[\n",
+            "{\n  \"args\": {\"name\": \"Browser\"},\n  \"cat\": \"__metadata\",\n  \"name\": \"process_name\",\n  \"ph\": \"M\",\n  \"pid\": 1,\n  \"tid\": 1\n},\n",
+            "{\n  \"ph\": \"X\",\n  \"name\": \"POST /v1/messages\",\n  \"cat\": \"http.request\",\n  \"ts\": 100,\n  \"dur\": 50,\n  \"pid\": 1,\n  \"tid\": 2,\n  \"args\": {\"body\": \"{\\\"messages\\\":[]}\"}\n},\n",
+            "]\n"
+        );
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content)
+            .expect("a metadata event must not poison the trace");
+        assert_eq!(
+            events.len(),
+            1,
+            "the http event must survive the metadata event: {events:?}"
+        );
+        assert_eq!(events[0].cat, "http.request");
+    }
+
+    /// Guard: an incomplete event in a single-line trace is skipped as before.
+    #[test]
+    fn parse_trace_relaxed_single_line_incomplete_event_still_survives() {
+        let content = concat!(
+            "[\n",
+            "{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\"tid\":1},\n",
+            "{\"ph\":\"i\",\"name\":\"a\",\"cat\":\"c\",\"ts\":1,\"pid\":1,\"tid\":1},\n",
+            "]\n"
+        );
+        let events = AnalyzeChatmlCommand::parse_trace_relaxed(content).expect("parses");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].cat, "c");
     }
 
     /// The single-line-per-event shape with trailing commas (the case the

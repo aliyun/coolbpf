@@ -293,6 +293,15 @@ pub fn extract_private_metadata(
     let mut user_count: u64 = 0;
     let mut assistant_count: u64 = 0;
 
+    // Same era detection as `convert_codex_events`: newer CLIs emit
+    // `event_msg/user_message` for the real user input, and role=user
+    // response_items then only carry injected context. Legacy rollouts
+    // predate the event, so their user messages are the role=user
+    // response_items the converter's fallback turns into steps.
+    let has_user_event_msg = events
+        .iter()
+        .any(|e| envelope_type(e) == "event_msg" && payload_type(e) == "user_message");
+
     for e in events {
         let payload = e.get("payload").unwrap_or(&serde_json::Value::Null);
         match envelope_type(e) {
@@ -317,10 +326,20 @@ pub fn extract_private_metadata(
                 }
             }
             "response_item" if payload_type(e) == "message" => {
-                if let Some("assistant") = payload.get("role").and_then(|v| v.as_str()) {
-                    if !joined_text(payload.get("content")).is_empty() {
-                        assistant_count += 1;
-                    }
+                let role = payload.get("role").and_then(|v| v.as_str());
+                if role == Some("assistant") && !joined_text(payload.get("content")).is_empty() {
+                    assistant_count += 1;
+                }
+                // Legacy fallback (no event_msg/user_message in the whole
+                // rollout): the converter derives the user steps from
+                // role=user response_items, so the count must follow the same
+                // fallback; message-less items produce no step and are not
+                // counted.
+                if !has_user_event_msg
+                    && role == Some("user")
+                    && !joined_text(payload.get("content")).is_empty()
+                {
+                    user_count += 1;
                 }
             }
             _ => {}
@@ -715,5 +734,45 @@ mod tests {
             (user_steps as u64, assistant_messages as u64),
             "the counts must describe the trajectory they ride on"
         );
+    }
+
+    #[test]
+    fn test_extract_private_metadata_counts_fallback_users() {
+        // Legacy rollouts predate event_msg/user_message (see
+        // `test_fallback_user_from_response_item_without_event_msg`): the
+        // converter derives the user steps from role=user response_items, so
+        // the count must follow the same fallback instead of reporting zero.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-4\",\"cwd\":\"/w/app\",\"cli_version\":\"0.1.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"first question\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer one\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"second question\"}]}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer two\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_codex_events(&events, "codex").unwrap();
+        let user_steps = traj
+            .steps
+            .iter()
+            .filter(|s| s.source == StepSource::User)
+            .count();
+        assert_eq!(user_steps, 2);
+
+        let extra = extract_private_metadata(&events, "codex");
+        assert_eq!(
+            extra["user_message_count"].as_u64().unwrap(),
+            user_steps as u64,
+            "legacy sessions without event_msg must still count their users"
+        );
+    }
+
+    #[test]
+    fn test_extract_private_metadata_skips_injected_context_users() {
+        // In modern rollouts role=user response_items carry injected
+        // environment context while event_msg/user_message is the real
+        // input: the fallback must not wake up and double-count them.
+        let events = fixture_events();
+        let extra = extract_private_metadata(&events, "(default)");
+        assert_eq!(extra["user_message_count"], 1);
     }
 }

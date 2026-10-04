@@ -4,6 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
+import { downloadSavingsCsv } from '../utils/savingsCsv';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
@@ -853,6 +854,16 @@ export const TokenSavingsPage: React.FC = () => {
 
       {/* ── Session table ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex justify-end px-4 py-3 border-b border-gray-200">
+          <button
+            type="button"
+            onClick={() => downloadSavingsCsv(sessions)}
+            disabled={loading || !!error || sessions.length === 0}
+            className="px-3 py-1.5 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {t('ts.exportCsv')}
+          </button>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[800px]">
             <thead className="bg-gray-50 border-b border-gray-200">
