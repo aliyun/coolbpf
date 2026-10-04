@@ -190,6 +190,19 @@ pub struct TrajectoryStore {
     db_path: PathBuf,
 }
 
+/// SQL predicate selecting the direct subagent children of `?1`, the literal
+/// `<parent>:subagent:` prefix.
+///
+/// `LIKE ?1 || '%'` cannot be used: `_` / `%` inside the parent id are
+/// wildcards there, ASCII case is folded, and the trailing `%` also swallows
+/// the rows of a nested run (`opt:<parent>:subagent:<child>:subagent:<dim>`),
+/// which `retain_subagents` would then delete. `substr` compares the prefix
+/// literally and case-sensitively, the `instr` guard keeps the match to direct
+/// children, and `is_subagent` keeps a nested run's non-subagent root out.
+const DIRECT_SUBAGENT_CHILDREN: &str = "is_subagent = 1 \
+     AND substr(session_id, 1, length(?1)) = ?1 \
+     AND instr(substr(session_id, length(?1) + 1), ':') = 0";
+
 impl TrajectoryStore {
     /// Opens (creating if needed) the database at `path` and ensures the schema.
     ///
@@ -545,18 +558,18 @@ impl TrajectoryStore {
     }
 
     /// Returns the ATIF JSON strings of all subagent trajectories belonging to
-    /// the given parent session (matching `<parent>:subagent:%`).
+    /// the given parent session (matching `<parent>:subagent:<stem>`).
     ///
     /// # Errors
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
         let conn = self.lock_conn()?;
-        let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt = conn.prepare(
-            "SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1 \
-             ORDER BY session_id",
-        )?;
-        let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+        let prefix = format!("{parent_session_id}:subagent:");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT atif_json FROM collected_trajectories WHERE {DIRECT_SUBAGENT_CHILDREN} \
+             ORDER BY session_id"
+        ))?;
+        let rows = stmt.query_map(params![prefix], |row| row.get(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -575,11 +588,12 @@ impl TrajectoryStore {
     /// Returns an error on SQL failure or poisoned mutex.
     pub fn retain_subagents(&self, parent_session_id: &str, keep: &[String]) -> Result<usize> {
         let conn = self.lock_conn()?;
-        let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt =
-            conn.prepare("SELECT session_id FROM collected_trajectories WHERE session_id LIKE ?1")?;
+        let prefix = format!("{parent_session_id}:subagent:");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT session_id FROM collected_trajectories WHERE {DIRECT_SUBAGENT_CHILDREN}"
+        ))?;
         let existing: Vec<String> = stmt
-            .query_map(params![pattern], |row| row.get(0))?
+            .query_map(params![prefix], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         drop(stmt);
 
@@ -1191,6 +1205,8 @@ mod tests {
         ] {
             let mut rec = sample_record();
             rec.session_id = id.into();
+            // Subagent rows carry the flag; the parent row does not.
+            rec.is_subagent = id.contains(":subagent:");
             store.upsert_trajectory(&rec).unwrap();
         }
 
@@ -1204,6 +1220,49 @@ mod tests {
         // The parent row itself and other parents' children are untouched.
         assert!(store.get("p-1").unwrap().is_some());
         assert!(store.get("p-2:subagent:other").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_retain_subagents_ignores_nested_runs() {
+        // Real shapes: `opt:<session>` is one analysis run's root and
+        // `opt:<session>:subagent:<dim>` are its dimension rows. Analyzing a
+        // subagent trajectory of that session starts a second run:
+        // `opt:<session>:subagent:<child>` (its root) and
+        // `opt:<session>:subagent:<child>:subagent:<dim>` (its dimensions).
+        // A `LIKE '<session root>:subagent:%'` prefix reaches into that second
+        // run, so pruning the first run's stale dimensions deleted it.
+        let store = TrajectoryStore::new_with_path(&tmp_db("retain-nested")).unwrap();
+        let root = "opt:be0aa488-4e56-4604-bdf0-e12cc387392d";
+        let own_dim = format!("{root}:subagent:accuracy");
+        let child_root = format!("{root}:subagent:aExplore-b4b7e9141b9524f6");
+        let child_dim = format!("{child_root}:subagent:cost-waste");
+        for (id, is_subagent) in [
+            (root.to_string(), false),
+            (own_dim.clone(), true),
+            (child_root.clone(), false),
+            (child_dim.clone(), true),
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id;
+            rec.is_subagent = is_subagent;
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let listed = store.get_subagent_atif_jsons(root).unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "only the run's own dimension row is a child of {root}"
+        );
+
+        let removed = store
+            .retain_subagents(root, std::slice::from_ref(&own_dim))
+            .unwrap();
+
+        assert_eq!(removed, 0, "another run's rows must not be pruned");
+        assert!(store.get(&child_root).unwrap().is_some());
+        assert!(store.get(&child_dim).unwrap().is_some());
+        assert!(store.get(&own_dim).unwrap().is_some());
     }
 
     #[test]
