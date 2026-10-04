@@ -94,7 +94,27 @@ impl OpenAIParser {
             return None;
         }
 
-        match serde_json::from_value::<OpenAIRequest>(body.clone()) {
+        // Modern chat clients send the output cap as `max_completion_tokens`
+        // (the o-series accepts only that spelling). Copy it onto the legacy
+        // key the typed request reads — an explicit `max_tokens` always wins —
+        // the same way `normalize_responses_request` maps `max_output_tokens`.
+        // Only a value the typed field can hold is copied: a malformed or
+        // out-of-range value used to be ignored as an unknown key, and it must
+        // not turn the whole request into a parse failure. A serde alias would
+        // instead reject a request carrying both spellings as a duplicate
+        // field, losing the request.
+        let mut body = body.clone();
+        if body.get("max_tokens").is_none() {
+            if let Some(cap) = body
+                .get("max_completion_tokens")
+                .and_then(|cap| cap.as_u64())
+                .and_then(|cap| u32::try_from(cap).ok())
+            {
+                body["max_tokens"] = serde_json::json!(cap);
+            }
+        }
+
+        match serde_json::from_value::<OpenAIRequest>(body) {
             Ok(request) => {
                 log::debug!(
                     "Parsed OpenAI request: model={}, messages={}",
@@ -716,6 +736,68 @@ mod tests {
 
         let request = request.unwrap();
         assert_eq!(request.model, "gpt-4");
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Modern chat clients send the output cap as `max_completion_tokens`
+    /// (the o-series accepts only that spelling); the typed request used to
+    /// drop it, so `LLMRequest.max_tokens` stayed `None` and neither the
+    /// TokenLimit rule nor the `gen_ai.request.max_tokens` telemetry saw it.
+    #[test]
+    fn test_parse_request_reads_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("modern chat request");
+        assert_eq!(request.max_tokens, Some(2048));
+    }
+
+    /// A request carrying both spellings must still parse, with `max_tokens`
+    /// winning — a serde alias would reject it as a duplicate field and lose
+    /// the whole request.
+    #[test]
+    fn test_parse_request_prefers_max_tokens_over_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "max_completion_tokens": 2048
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("both spellings must parse");
+        assert_eq!(request.max_tokens, Some(100));
+    }
+
+    /// A malformed cap used to be ignored as an unknown key; reading it must
+    /// not turn the whole request into a parse failure.
+    #[test]
+    fn test_parse_request_ignores_a_malformed_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": "2048"
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    /// A cap that does not fit the typed u32 field must be ignored like any
+    /// other malformed value, not copied over and rejected by serde.
+    #[test]
+    fn test_parse_request_ignores_an_out_of_range_max_completion_tokens() {
+        let json = serde_json::json!({
+            "model": "o3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 4_294_967_296u64
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("request must still parse");
+        assert_eq!(request.max_tokens, None);
         assert_eq!(request.messages.len(), 1);
     }
 
