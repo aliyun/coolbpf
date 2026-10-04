@@ -555,7 +555,9 @@ pub async fn get_token_savings(
 
         if let Some(stat_rows) = stats_by_session.get(&session.session_id) {
             for row in stat_rows {
-                let saved = row.before_tokens - row.after_tokens;
+                // Clamp at 0 — a record can never legitimately expand, but
+                // guard against it rather than report a negative saving.
+                let saved = (row.before_tokens - row.after_tokens).max(0);
                 let category = map_operation_to_category(&row.operation);
                 let title = map_operation_to_title(&row.operation);
 
@@ -801,7 +803,9 @@ pub async fn get_session_savings(
                 continue;
             }
 
-            let saved = row.before_tokens - row.after_tokens;
+            // Clamp at 0 — a record can never legitimately expand, but
+            // guard against it rather than report a negative saving.
+            let saved = (row.before_tokens - row.after_tokens).max(0);
             let category = map_operation_to_category(&row.operation);
             let title = map_operation_to_title(&row.operation);
             let strategy = row.operation.clone();
@@ -1310,6 +1314,120 @@ mod tests {
         // Rate is a fraction in [0.0, 1.0]: 2200 compounded saved / 2700 total tokens
         let rate = body["savings_rate"].as_f64().unwrap();
         assert!((rate - 2200.0 / 2700.0).abs() < 1e-9, "got {rate}");
+
+        // Restore HOME
+        match orig_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A stats row whose `after_tokens` exceeds `before_tokens` (a record can
+    /// never legitimately expand) must be reported as a zero saving, not a
+    /// negative one that drags per-item, per-session and summary totals down
+    /// — mirroring the `.max(0)` guard `TokenlessWindowSummary::saved_tokens`
+    /// already applies when reading the same table.
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn expanding_stats_row_must_not_report_negative_savings() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_expand_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let stats_dir = tmp.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        {
+            let conn = rusqlite::Connection::open(stats_dir.join("stats.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    tool_use_id TEXT,
+                    before_tokens INTEGER,
+                    after_tokens INTEGER,
+                    before_text TEXT,
+                    after_text TEXT,
+                    operation TEXT
+                );",
+            )
+            .unwrap();
+            // Expanding row: 1000 after > 800 before => unclamped -200 saved.
+            conn.execute(
+                "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+                 VALUES ('sess-1', 'tc-1', 800, 1000, 'short', 'long text', 'compress-response')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Point HOME at tmp so default_stats_path() finds .tokenless/stats.db
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        // List endpoint: item, session and summary savings clamp at 0.
+        let state = make_app_state(db_path.clone());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(
+            body["sessions"][0]["optimization_items"][0]["saved_tokens"]
+                .as_i64()
+                .unwrap(),
+            0,
+            "item saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["sessions"][0]["saved_tokens"].as_i64().unwrap(),
+            0,
+            "session saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["summary"]["total_saved_tokens"].as_i64().unwrap(),
+            0,
+            "summary total_saved_tokens must clamp at 0"
+        );
+
+        // Detail endpoint: same clamp.
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings/session/sess-1")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(
+            body["items"][0]["saved_tokens"].as_i64().unwrap(),
+            0,
+            "detail item saved_tokens must clamp at 0"
+        );
+        assert_eq!(
+            body["total_compounded_saved"].as_i64().unwrap(),
+            0,
+            "detail total_compounded_saved must clamp at 0"
+        );
 
         // Restore HOME
         match orig_home {
