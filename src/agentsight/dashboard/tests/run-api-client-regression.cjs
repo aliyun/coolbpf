@@ -33,11 +33,12 @@ try {
       'src/utils/semanticSearchFilter.ts',
       'src/utils/timeseriesBuckets.ts',
       'src/pages/security/utils.ts',
+      'src/pages/LoginPage.tsx',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -47,6 +48,7 @@ try {
       AGENTSIGHT_SEMANTIC_FILTER_BUILD: join(outputDir, 'utils', 'semanticSearchFilter.js'),
       AGENTSIGHT_TIMESERIES_BUCKETS_BUILD: join(outputDir, 'utils', 'timeseriesBuckets.js'),
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
+      AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
     },
     stdio: 'inherit',
   });

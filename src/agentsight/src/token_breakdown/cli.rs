@@ -9,12 +9,12 @@ use serde_json::Value;
 use structopt::StructOpt;
 
 use crate::chrome_trace::ChromeTraceEvent;
-use crate::tokenizer::get_global_tokenizer;
+use crate::tokenizer::{LlmTokenizer, get_global_tokenizer};
 
 use super::breakdown::compute_breakdown;
 use super::classifier::classify_document;
 use super::lexer::parse_chatml;
-use super::types::ResponseData;
+use super::types::{ChatMLTokenBreakdown, ResponseData};
 
 /// Analyze ChatML token breakdown from Chrome Trace events
 #[derive(Debug, StructOpt)]
@@ -55,16 +55,35 @@ impl AnalyzeChatmlCommand {
         let tokenizer = get_global_tokenizer(&self.model).map_err(|e| {
             anyhow::anyhow!("tokenizer for model '{}' unavailable: {e}", self.model)
         })?;
-        let chat_template = tokenizer.clone();
 
         // Sort events by timestamp to ensure correct order
         let mut sorted_events: Vec<ChromeTraceEvent> = events.to_vec();
         sorted_events.sort_by_key(|e| e.ts);
 
+        let breakdowns = Self::process_events(&sorted_events, &tokenizer)?;
+
+        // Output JSON array of all breakdowns
+        let json = if self.pretty {
+            serde_json::to_string_pretty(&breakdowns)?
+        } else {
+            serde_json::to_string(&breakdowns)?
+        };
+        println!("{}", json);
+
+        Ok(())
+    }
+
+    /// Process each request/response event independently.
+    fn process_events(
+        events: &[ChromeTraceEvent],
+        tokenizer: &LlmTokenizer,
+    ) -> anyhow::Result<Vec<ChatMLTokenBreakdown>> {
+        let chat_template = tokenizer.clone();
+
         // Process each event directly (no intermediate extraction)
         let mut breakdowns = Vec::new();
 
-        for event in &sorted_events {
+        for event in events {
             let classified = match event.cat.as_str() {
                 "http.request" => {
                     // Extract messages and tools from request body and process directly
@@ -86,7 +105,12 @@ impl AnalyzeChatmlCommand {
                                 (msgs, tools)
                             };
 
-                            if let Some(mut msgs) = messages.and_then(|v| v.as_array().cloned()) {
+                            // An empty message list has nothing to render; the
+                            // same skip the analyzer applies.
+                            let msgs = messages
+                                .and_then(|v| v.as_array().cloned())
+                                .filter(|msgs| !msgs.is_empty());
+                            if let Some(mut msgs) = msgs {
                                 // Process tool_calls arguments: parse JSON string to object in place
                                 for msg in msgs.iter_mut() {
                                     if let Some(tool_calls) =
@@ -111,13 +135,22 @@ impl AnalyzeChatmlCommand {
                                 // Requests without a tools array are ordinary
                                 // LLM traffic; the template accepts None and
                                 // renders without tool definitions.
-                                let chatml_text = chat_template.apply_chat_template_with_tools(
-                                    &msgs,
-                                    tools.as_deref(),
-                                    false,
-                                )?;
-                                let doc = parse_chatml(&chatml_text)?;
-                                Some(classify_document(&doc.blocks, None))
+                                //
+                                // A single event that cannot be rendered or
+                                // parsed is reported and skipped, the same
+                                // policy parse_trace_relaxed uses: one
+                                // malformed request must not discard every
+                                // other event of the trace.
+                                match chat_template
+                                    .apply_chat_template_with_tools(&msgs, tools.as_deref(), false)
+                                    .and_then(|chatml_text| parse_chatml(&chatml_text))
+                                {
+                                    Ok(doc) => Some(classify_document(&doc.blocks, None)),
+                                    Err(e) => {
+                                        eprintln!("Warning: skipping http.request event: {e}");
+                                        None
+                                    }
+                                }
                             } else {
                                 None
                             }
@@ -146,7 +179,7 @@ impl AnalyzeChatmlCommand {
             };
 
             if let Some(classified) = classified {
-                let breakdown = compute_breakdown(&classified, &tokenizer)?;
+                let breakdown = compute_breakdown(&classified, tokenizer)?;
                 breakdowns.push(breakdown);
             }
         }
@@ -157,15 +190,7 @@ impl AnalyzeChatmlCommand {
             ));
         }
 
-        // Output JSON array of all breakdowns
-        let json = if self.pretty {
-            serde_json::to_string_pretty(&breakdowns)?
-        } else {
-            serde_json::to_string(&breakdowns)?
-        };
-        println!("{}", json);
-
-        Ok(())
+        Ok(breakdowns)
     }
 
     /// Parse Chrome Trace file and return list of events
@@ -332,7 +357,123 @@ impl AnalyzeChatmlCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizer::LlmTokenizer;
     use serde_json::json;
+
+    /// Minimal HuggingFace tokenizer (WordLevel + Whitespace) so the ChatML
+    /// path can be exercised in tests without the network or the real Qwen
+    /// tokenizer, which is not vendored in the repository.
+    const TOKENIZER_JSON: &str = r#"{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {"id": 0, "content": "<|im_start|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 1, "content": "<|im_end|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+    {"id": 2, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {"type": "Whitespace"},
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "vocab": {
+      "<|im_start|>": 0,
+      "<|im_end|>": 1,
+      "[UNK]": 2,
+      "system": 3,
+      "user": 4,
+      "assistant": 5,
+      "hello": 6,
+      "there": 7
+    },
+    "unk_token": "[UNK]"
+  }
+}"#;
+
+    /// ChatML template in the shape the Qwen models use: `+` concatenation of
+    /// `role` and `content`, which fails on a non-string `content` exactly like
+    /// the real template does.
+    const TOKENIZER_CONFIG_JSON: &str = r#"{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "chat_template": "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "bos_token": "<|im_start|>",
+  "eos_token": "<|im_end|>",
+  "unk_token": "[UNK]",
+  "model_max_length": 32768
+}"#;
+
+    fn fixture_tokenizer() -> LlmTokenizer {
+        let dir =
+            std::env::temp_dir().join(format!("agentsight-chatml-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let tokenizer_path = dir.join("tokenizer.json");
+        let config_path = dir.join("tokenizer_config.json");
+        std::fs::write(&tokenizer_path, TOKENIZER_JSON).expect("write tokenizer.json");
+        std::fs::write(&config_path, TOKENIZER_CONFIG_JSON).expect("write tokenizer_config.json");
+        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+    }
+
+    #[test]
+    fn minimal_fixture_tokenizer_loads() {
+        let tokenizer = fixture_tokenizer();
+        let rendered = tokenizer
+            .apply_chat_template_with_tools(
+                &[json!({"role": "user", "content": "hello"})],
+                None,
+                false,
+            )
+            .expect("fixture template renders");
+        assert_eq!(rendered, "<|im_start|>user\nhello<|im_end|>\n");
+    }
+
+    fn request_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
+        let mut event = ChromeTraceEvent::instant("http.request", "http.request", 1, 1, ts);
+        event.args = Some(json!({ "body": body }));
+        event
+    }
+
+    #[test]
+    fn one_bad_request_does_not_discard_the_other_events() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![
+            request_event(
+                json!({"messages": [{"role": "user", "content": "hello"}]}),
+                3,
+            ),
+            // Content as a parts array: the ChatML template concatenates the
+            // content with `+`, which fails on a sequence (the shape real
+            // traces hit with multimodal requests).
+            request_event(
+                json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]}),
+                2,
+            ),
+            // Nothing to render.
+            request_event(json!({"messages": []}), 1),
+        ];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+            .expect("a malformed event must not abort the other events");
+        assert_eq!(breakdowns.len(), 1);
+    }
+
+    #[test]
+    fn all_failed_events_still_report_no_valid_events() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![request_event(
+            json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]}),
+            1,
+        )];
+
+        let err = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+            .expect_err("every event failed to render");
+        assert!(
+            err.to_string()
+                .contains("No valid http.request or http.response events found"),
+            "unexpected error: {err}"
+        );
+    }
 
     fn sse(payload: &str) -> serde_json::Value {
         json!({ "data": payload })
