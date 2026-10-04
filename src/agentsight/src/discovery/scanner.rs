@@ -224,7 +224,7 @@ impl AgentScanner {
     /// Attempt to match a process against known agents
     pub fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
         // Read process name from <procfs root>/[pid]/comm
-        let comm = fs::read_to_string(proc_pid_entry(pid, "comm")).ok()?;
+        let comm = read_comm_from(&proc_pid_entry(pid, "comm"))?;
         let process_name = comm.trim().to_string();
 
         // Read full command line from <procfs root>/[pid]/cmdline
@@ -529,6 +529,63 @@ mod tests {
         // The current test process should not match any agent rule.
         let result = scanner.try_match_process(std::process::id());
         assert!(result.is_none());
+    }
+
+    /// The kernel allows non-UTF-8 bytes in comm; reading it with
+    /// `read_to_string` failed outright, so an agent process started from a
+    /// raw-byte executable name was invisible to discovery.
+    #[test]
+    fn try_match_process_survives_a_non_utf8_comm() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::process::Stdio;
+
+        let dir = std::env::temp_dir().join(format!("agentsight_match_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        // The executable name carries a raw byte: its main-thread comm
+        // inherits it.
+        let exe = dir.join(std::ffi::OsStr::from_bytes(b"qoderprobe\xff"));
+        fs::copy("/bin/sleep", &exe).expect("copy sleep");
+        let mut child = std::process::Command::new(&exe)
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn probe");
+        let pid = child.id();
+
+        // `Command::spawn` can return before the kernel publishes comm for the
+        // new image; poll the raw bytes with a bounded deadline.
+        let comm_path = format!("/proc/{pid}/comm");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let seen = fs::read(&comm_path).is_ok_and(|bytes| bytes.starts_with(b"qoderprobe"));
+            if seen {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{comm_path} never showed the raw-byte comm: {:?}",
+                fs::read(&comm_path)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let rules = vec![crate::config::CmdlineRule {
+            patterns: vec!["*qoderprobe*".to_string()],
+            agent_name: Some("QoderProbe".to_string()),
+            allow: true,
+        }];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+        let matched = scanner.try_match_process(pid);
+
+        child.kill().ok();
+        child.wait().ok();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            matched.is_some(),
+            "a non-UTF-8 comm must not hide the process from discovery"
+        );
     }
 
     #[test]
