@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 use super::agent::{AgentInfo, DiscoveredAgent};
 use super::matcher::{CmdlineGlobMatcher, ProcessContext, match_domain_glob};
@@ -155,11 +156,7 @@ impl AgentScanner {
             bpf_comm.to_string()
         } else {
             // Fallback: read from <procfs root>/[pid]/comm
-            fs::read_to_string(proc_pid_entry(pid, "comm"))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| bpf_comm.to_string())
+            read_comm_from(&proc_pid_entry(pid, "comm")).unwrap_or_else(|| bpf_comm.to_string())
         };
 
         // Read full command line from <procfs root>/[pid]/cmdline
@@ -278,15 +275,28 @@ impl AgentScanner {
     }
 }
 
+/// Read the process comm from a `<procfs root>/<pid>/comm` path, trimmed.
+///
+/// The kernel allows almost any non-NUL bytes in comm -- `prctl(PR_SET_NAME)`
+/// sets them directly, and an executable whose name is not valid UTF-8 gives
+/// its main thread those bytes -- while `read_to_string` rejects such a file
+/// outright.  A process with a non-UTF-8 name therefore lost its process name
+/// in every event and metric that carries one; the lossy read keeps the ASCII
+/// prefix, the same way [`read_cmdline`] already reads argv.
+///
+/// Returns `None` when the file is unreadable (process gone) or empty.
+fn read_comm_from(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let comm = String::from_utf8_lossy(&bytes).trim().to_string();
+    if comm.is_empty() { None } else { Some(comm) }
+}
+
 /// Read the process comm (`<procfs root>/<pid>/comm`), trimmed.
 ///
 /// Returns `None` when the file is unreadable (process gone) or empty. This is
 /// the *process* name (main-thread comm), not a per-event worker-thread name.
 pub fn read_comm(pid: u32) -> Option<String> {
-    fs::read_to_string(proc_pid_entry(pid, "comm"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    read_comm_from(&proc_pid_entry(pid, "comm"))
 }
 
 /// Read and parse a process's cmdline
@@ -483,6 +493,34 @@ mod tests {
     fn test_read_comm_bogus_pid() {
         // A pid that cannot exist yields None (no panic, no empty string).
         assert!(read_comm(u32::MAX).is_none());
+    }
+
+    /// The kernel allows non-UTF-8 bytes in comm: `prctl(PR_SET_NAME)` sets
+    /// them, and an executable named with raw bytes passes them on. The
+    /// `read_to_string` this replaced rejected the whole file, so the process
+    /// name vanished from events and metrics until the comm changed again.
+    #[test]
+    fn read_comm_from_survives_non_utf8_bytes() {
+        let dir = std::env::temp_dir().join(format!("agentsight_comm_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let comm_path = dir.join("comm");
+
+        // "claude" followed by an invalid UTF-8 byte and the newline the
+        // kernel appends to comm.
+        fs::write(&comm_path, b"claude\xa0\n").expect("write non-UTF-8 comm");
+        let comm = read_comm_from(&comm_path).expect("a non-UTF-8 comm must still be readable");
+        assert!(
+            comm.starts_with("claude"),
+            "the ASCII prefix must survive the lossy read: {comm:?}"
+        );
+
+        // Guard: the ordinary and the empty case keep their meaning.
+        fs::write(&comm_path, b"node\n").expect("write ordinary comm");
+        assert_eq!(read_comm_from(&comm_path).as_deref(), Some("node"));
+        fs::write(&comm_path, b"").expect("write empty comm");
+        assert!(read_comm_from(&comm_path).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
