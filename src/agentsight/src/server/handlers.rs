@@ -3133,6 +3133,24 @@ mod tests {
         assert_eq!(agents.len(), 2, "Cosh should still be excluded");
         assert_eq!(include_body["filtered_count"], 1);
 
+        // Only the exact parameter enables the flag: a longer value or a
+        // different key that merely contains the text must not.
+        for uri in [
+            "/agent-process-health?include_clients=trueX",
+            "/agent-process-health?xinclude_clients=true",
+            "/agent-process-health?foo=include_clients=true",
+        ] {
+            let resp =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            let body = service_response_json(resp).await;
+            assert_eq!(
+                body["agents"].as_array().unwrap().len(),
+                1,
+                "{uri} must not enable include_clients"
+            );
+            assert_eq!(body["filtered_count"], 2, "{uri}");
+        }
+
         let deleted = awtest::call_service(
             &app,
             awtest::TestRequest::delete()
@@ -3881,7 +3899,16 @@ pub async fn get_agent_process_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
-    let include_clients = req.query_string().contains("include_clients=true");
+    // Exact key=value match: `contains` also enabled the flag for
+    // `xinclude_clients=true`, `include_clients=trueX`, or an unrelated
+    // parameter whose value merely contains the text.
+    let include_clients = req.query_string().split('&').any(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        matches!(
+            (parts.next(), parts.next()),
+            (Some("include_clients"), Some(value)) if value.eq_ignore_ascii_case("true")
+        )
+    });
     let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
     let all = store.all_agents();
     let total = all.len();
