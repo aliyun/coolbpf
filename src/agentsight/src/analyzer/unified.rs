@@ -59,6 +59,23 @@ pub struct ResponseTokenCount {
     pub per_block: Vec<OutputTokenCount>,
 }
 
+/// Request body → the message list the chat template consumes.
+///
+/// Both local extractors in this module used to recognize only the shapes they
+/// were written against, so a request the capture pipeline understood was
+/// counted as if it carried no messages at all. Share the genai request parser
+/// so every protocol shape is counted the same way: OpenAI `messages`,
+/// Responses `input` (array or string) with `instructions`, DashScope native
+/// `input.messages`, and an Anthropic top-level `system`, which is prepended as
+/// a system message because the template expects it inside the array.
+fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let (mut messages, instructions) = crate::genai::GenAIBuilder::extract_messages_view(body)?;
+    if let Some(system) = instructions.filter(|text| !text.is_empty()) {
+        messages.insert(0, serde_json::json!({"role": "system", "content": system}));
+    }
+    Some(messages)
+}
+
 /// Count tokens in a request JSON using the provided tokenizer and chat template
 ///
 /// # Arguments
@@ -87,7 +104,7 @@ pub fn count_request_tokens(
     chat_template: &LlmTokenizer,
 ) -> Option<RequestTokenCount> {
     // Extract messages
-    let messages = request_json.get("messages").and_then(|m| m.as_array())?;
+    let messages = request_messages(request_json)?;
 
     if messages.is_empty() {
         return None;
@@ -853,30 +870,11 @@ impl Analyzer {
             "openai"
         };
 
-        // Count input tokens from request messages using chat template.
-        // Supports both OpenAI chat completions format (top-level "messages")
-        // and Responses API format (top-level "input" + "instructions").
-        let messages_owned: Option<Vec<serde_json::Value>> = request_json_ref
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .cloned()
-            .or_else(|| {
-                let input = request_json_ref.get("input").and_then(|m| m.as_array())?;
-                let mut combined = Vec::new();
-                if let Some(instr) = request_json_ref
-                    .get("instructions")
-                    .and_then(|s| s.as_str())
-                {
-                    if !instr.is_empty() {
-                        combined.push(serde_json::json!({
-                            "role": "system",
-                            "content": instr,
-                        }));
-                    }
-                }
-                combined.extend(input.iter().cloned());
-                Some(combined)
-            });
+        // Count input tokens from request messages using chat template. The
+        // same parser as `count_request_tokens`: OpenAI chat completions,
+        // Responses `input` + `instructions`, DashScope native `input.messages`
+        // and the Anthropic top-level `system`.
+        let messages_owned: Option<Vec<serde_json::Value>> = request_messages(request_json_ref);
 
         let input_tokens = if let Some(messages) = messages_owned {
             if messages.is_empty() {
@@ -2173,5 +2171,56 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
             assert_eq!(record.input_tokens, 42);
             assert_eq!(record.output_tokens, 7);
         }
+    }
+
+    /// Anthropic carries the system prompt outside the messages array; the
+    /// template only sees the array, so the request used to be counted without
+    /// its system prompt.
+    #[test]
+    fn request_messages_includes_the_anthropic_system_prompt() {
+        let body = serde_json::json!({
+            "model": "claude-x",
+            "system": "SYSPROMPT",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let messages = request_messages(&body).expect("messages exist");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "SYSPROMPT");
+        assert_eq!(messages[1]["content"], "hi");
+    }
+
+    /// DashScope's native protocol wraps the messages under `input`; the local
+    /// extractors only looked at a top-level `messages`, so such a request
+    /// produced no count at all.
+    #[test]
+    fn request_messages_reads_dashscope_native_input_messages() {
+        let body = serde_json::json!({
+            "model": "qwen-flash",
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "parameters": {"incremental_output": true, "result_format": "message"}
+        });
+        let messages = request_messages(&body).expect("input.messages exists");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "hi");
+    }
+
+    /// Guard: the shapes the extractors already handled keep theirs.
+    #[test]
+    fn request_messages_keeps_the_existing_shapes() {
+        let chat = serde_json::json!({"messages": [{"role": "user", "content": "a"}]});
+        assert_eq!(request_messages(&chat).map(|m| m.len()), Some(1));
+
+        let responses = serde_json::json!({
+            "input": [{"role": "user", "content": "b"}],
+            "instructions": "INSTR"
+        });
+        let messages = request_messages(&responses).expect("input array");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "INSTR");
+        assert_eq!(messages[1]["content"], "b");
+
+        assert!(request_messages(&serde_json::json!({"model": "x"})).is_none());
     }
 }

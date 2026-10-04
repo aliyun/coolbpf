@@ -2,6 +2,7 @@
 
 use agentsight::database::{DatabaseCoverage, DatabaseId, DatabaseManager};
 use agentsight::{AuditEventType, AuditStore, SqliteConfig};
+use anyhow::Context;
 use structopt::StructOpt;
 
 /// Audit query subcommand
@@ -83,37 +84,64 @@ impl AuditCommand {
             }
         };
 
+        if let Err(error) = self.run(&store, event_type) {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+    }
+
+    /// Run the requested query and report whether it succeeded.
+    ///
+    /// A query that fails used to print to stderr and exit 0, so a script (or
+    /// `--json`) could not tell it apart from "no events in the window": the
+    /// output was empty either way. `execute` maps the error to a non-zero
+    /// exit, the same way the open and `--type` failures above do.
+    fn run(&self, store: &AuditStore, event_type: Option<AuditEventType>) -> anyhow::Result<()> {
         if self.summary {
             if !self.exclude.is_empty() {
                 eprintln!(
                     "Note: --exclude is not applied to --summary (summary always reflects the full dataset)."
                 );
             }
-            self.print_summary(&store);
-            return;
+            return self.print_summary(store);
         }
 
         if let Some(pid) = self.pid {
-            self.query_by_pid(&store, pid, event_type);
+            self.query_by_pid(store, pid, event_type)
         } else {
-            self.query_by_time(&store, event_type);
+            self.query_by_time(store, event_type)
         }
     }
 
-    fn query_by_time(&self, store: &AuditStore, event_type: Option<AuditEventType>) {
+    fn query_by_time(
+        &self,
+        store: &AuditStore,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<()> {
         let hours = self.last.unwrap_or(24);
         let since_ns = super::hours_ago_ns(hours);
 
         match store.query_since(since_ns, event_type) {
-            Ok(records) => self.output_records(&records, &format!("Last {hours} hours")),
-            Err(e) => eprintln!("Query failed: {e}"),
+            Ok(records) => {
+                self.output_records(&records, &format!("Last {hours} hours"));
+                Ok(())
+            }
+            Err(e) => Err(e).context("Query failed"),
         }
     }
 
-    fn query_by_pid(&self, store: &AuditStore, pid: u32, event_type: Option<AuditEventType>) {
+    fn query_by_pid(
+        &self,
+        store: &AuditStore,
+        pid: u32,
+        event_type: Option<AuditEventType>,
+    ) -> anyhow::Result<()> {
         match store.query_by_pid(pid, event_type) {
-            Ok(records) => self.output_records(&records, &format!("PID {pid}")),
-            Err(e) => eprintln!("Query failed: {e}"),
+            Ok(records) => {
+                self.output_records(&records, &format!("PID {pid}"));
+                Ok(())
+            }
+            Err(e) => Err(e).context("Query failed"),
         }
     }
 
@@ -195,7 +223,7 @@ impl AuditCommand {
         }
     }
 
-    fn print_summary(&self, store: &AuditStore) {
+    fn print_summary(&self, store: &AuditStore) -> anyhow::Result<()> {
         let hours = self.last.unwrap_or(24);
         let since_ns = super::hours_ago_ns(hours);
 
@@ -225,8 +253,9 @@ impl AuditCommand {
                         }
                     }
                 }
+                Ok(())
             }
-            Err(e) => eprintln!("Summary query failed: {e}"),
+            Err(e) => Err(e).context("Summary query failed"),
         }
     }
 }
@@ -335,5 +364,50 @@ mod tests {
                 "{raw:?}: error must list the valid values: {error}"
             );
         }
+    }
+
+    /// An `audit_events` table that exists but lacks the columns the queries
+    /// select: opening succeeds (the store only asserts the table exists) and
+    /// every query fails, like an old or damaged database does.
+    fn stale_schema_store(name: &str) -> (AuditStore, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_stale_audit_{name}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE audit_events (id INTEGER PRIMARY KEY);")
+                .unwrap();
+        }
+        let store = AuditStore::open_read_only_existing(&path, "audit_events").unwrap();
+        (store, path)
+    }
+
+    #[test]
+    fn query_failures_surface_instead_of_exiting_zero() {
+        // A failed query used to print to stderr and exit 0, so a script (or
+        // `--json`) could not tell it apart from "no events in the window".
+        let c = cmd(vec![], true);
+        let (store, path) = stale_schema_store("query");
+        let result = c.run(&store, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "a failed audit query must be reported as an error"
+        );
+    }
+
+    #[test]
+    fn summary_failures_surface_instead_of_exiting_zero() {
+        let mut c = cmd(vec![], true);
+        c.summary = true;
+        let (store, path) = stale_schema_store("summary");
+        let result = c.run(&store, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "a failed audit summary must be reported as an error"
+        );
     }
 }
