@@ -34,9 +34,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     // Codex rollouts use a different envelope schema
     // (`{"timestamp","type","payload"}` records). The collector crate already
     // ships a converter for them, so delegate instead of emitting an empty
-    // trajectory. `response_item`/`turn_context` only occur in Codex files,
-    // which keeps the extra parse off the Claude/Qoder path.
-    if content.contains("response_item") || content.contains("turn_context") {
+    // trajectory. The substrings mirror `is_codex_rollout`'s envelope types:
+    // `response_item`/`turn_context` only occur in Codex files, while
+    // `session_meta` also catches a rollout truncated before its first turn
+    // (session_meta + user_message, listed by discovery but with no
+    // turn_context/response_item records yet). Qoder transcripts carry a
+    // bare `session_meta` line too, so `is_codex_rollout`'s payload-object
+    // check keeps them on the Claude/Qoder path.
+    if content.contains("response_item")
+        || content.contains("turn_context")
+        || content.contains("session_meta")
+    {
         let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
         if agentsight_trajectory_collector::codex::is_codex_rollout(&events) {
             return agentsight_trajectory_collector::codex::convert_codex_events(&events, "codex");
@@ -632,6 +640,26 @@ mod tests {
         assert_eq!(calls[0].function_name, "exec");
         let obs = agent_step.observation.as_ref().unwrap();
         assert_eq!(obs.results[0].source_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_truncated_codex_rollout_still_delegates() {
+        // A rollout killed before its first turn: `session_meta` plus the
+        // user's message, no `turn_context`/`response_item` records yet. The
+        // listing still shows the session (discovery keys on
+        // event_msg/user_message), so the converter must delegate too, not
+        // fall to the Claude loop and emit an empty trajectory.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
     }
 
     #[test]
