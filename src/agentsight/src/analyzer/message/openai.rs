@@ -274,6 +274,50 @@ impl OpenAIParser {
                             let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             messages.push(serde_json::json!({"role": "user", "content": text}));
                         }
+                        // A replayed conversation sends the assistant's tool
+                        // request and the tool output as role-less typed items.
+                        // They carry the chat shape downstream consumers read:
+                        // an assistant message with `tool_calls`, and a tool
+                        // message paired by `call_id`. Flattening them into a
+                        // user message holding their JSON dropped the whole
+                        // tool interaction from the recorded request.
+                        "function_call" => {
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "id": item.get("call_id"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": item
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default(),
+                                        "arguments": item
+                                            .get("arguments")
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null),
+                                    },
+                                }],
+                            }));
+                        }
+                        "function_call_output" => {
+                            // `content` must be text: the chat content type is
+                            // string-or-parts, so a structured output is carried
+                            // as its JSON text and re-parsed by the consumer.
+                            let output = match item
+                                .get("output")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null)
+                            {
+                                serde_json::Value::String(text) => text,
+                                other => other.to_string(),
+                            };
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": item.get("call_id"),
+                                "content": output,
+                            }));
+                        }
                         _ => {
                             messages.push(
                                 serde_json::json!({"role": "user", "content": item.to_string()}),
@@ -1198,6 +1242,50 @@ mod tests {
         assert_eq!(req.model, "gpt-4.1");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_parse_request_responses_role_less_tool_items() {
+        // A replayed Responses conversation sends the assistant's tool request
+        // and the tool output as role-less typed items. The normalizer used to
+        // flatten both into a user message holding their raw JSON, so the
+        // recorded request carried no tool interaction at all.
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "list /tmp"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "list_dir",
+                    "arguments": "{\"path\":\"/tmp\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "a.txt"
+                }
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("parses");
+        assert_eq!(
+            request.messages.len(),
+            3,
+            "each Responses item must keep its own message"
+        );
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        let tool_calls = request.messages[1]
+            .tool_calls
+            .as_ref()
+            .expect("the function_call item must become a tool call");
+        assert_eq!(tool_calls[0]["id"], serde_json::json!("call_1"));
+        assert_eq!(
+            tool_calls[0]["function"]["name"],
+            serde_json::json!("list_dir")
+        );
+        assert_eq!(request.messages[2].role, MessageRole::Tool);
+        assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_1"));
     }
 
     #[test]
