@@ -38,11 +38,12 @@ try {
       'src/pages/AgentSessionsPage.tsx',
       'src/pages/security/utils.ts',
       'src/pages/LoginPage.tsx',
+      'src/components/OptimizationSettings.tsx',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs', 'tests/llm-config-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -57,6 +58,7 @@ try {
       AGENTSIGHT_SAVINGS_CSV_BUILD: join(outputDir, 'utils', 'savingsCsv.js'),
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
       AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
+      AGENTSIGHT_LLM_CONFIG_BUILD: join(outputDir, 'components', 'OptimizationSettings.js'),
     },
     stdio: 'inherit',
   });
