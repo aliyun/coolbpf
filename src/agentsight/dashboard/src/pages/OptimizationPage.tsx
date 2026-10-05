@@ -24,6 +24,7 @@ import type {
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { fixLocusDiverges, fixLocusLabel } from '../utils/accuracyAttribution';
+import { RichText } from '../utils/richText';
 import TokenFlameChart from '../components/TokenFlameChart';
 
 // ── 通用状态类型 ──────────────────────────────────────────────────────────────
@@ -63,12 +64,10 @@ function userFacingError(
   return e instanceof Error ? e.message : String(e);
 }
 
-const H = (s: string) => (
-  <span
-    className="[&_code]:bg-gray-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-xs [&_code]:text-gray-800"
-    dangerouslySetInnerHTML={{ __html: s }}
-  />
-);
+// Finding texts may carry the two documented tags (<code>, <b>), but they are
+// assembled from tool commands, user queries and model output, so they go
+// through the sanitizer in utils/richText before touching the DOM.
+const H = (s: string) => <RichText>{s}</RichText>;
 
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
