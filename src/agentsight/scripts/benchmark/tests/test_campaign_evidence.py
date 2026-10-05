@@ -612,6 +612,187 @@ def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
     assert absent_result["missing"] == ["case:invalid_json"]
 
 
+def write_metrics_csv(measurement: Path, rows: list[tuple[str, str]]) -> None:
+    lines = ["timestamp,rss_mb"] + [f"{stamp},{value}" for stamp, value in rows]
+    measurement.joinpath("metrics.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_k6_jsonl(measurement: Path, records: list[object]) -> None:
+    measurement.joinpath("k6.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        pytest.param(
+            [("0", "100"), ("1", "inf"), ("2", "50")],
+            [(0.0, 100.0), (2.0, 50.0)],
+            id="inf-value",
+        ),
+        pytest.param(
+            [("0", "100"), ("1", "nan"), ("2", "50")],
+            [(0.0, 100.0), (2.0, 50.0)],
+            id="nan-value",
+        ),
+        pytest.param(
+            [("inf", "100"), ("0", "50")],
+            [(0.0, 50.0)],
+            id="inf-timestamp",
+        ),
+        pytest.param(
+            [("nan", "100"), ("1", "50")],
+            [(1.0, 50.0)],
+            id="nan-timestamp",
+        ),
+        pytest.param(
+            [("0", "1" + "0" * 400), ("1", "50")],
+            [(1.0, 50.0)],
+            id="oversized-value",
+        ),
+    ],
+)
+def test_resource_samples_skip_unusable_csv_rows(
+    tmp_path: Path, rows: list[tuple[str, str]], expected: list[tuple[float, float]]
+) -> None:
+    """Non-finite CSV samples are skipped while valid rows are retained."""
+    measurement = tmp_path / "measurement"
+    measurement.mkdir()
+    write_metrics_csv(measurement, rows)
+    assert campaign_evidence.resource_samples(tmp_path / "run", "rss_mb") == expected
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        pytest.param(
+            [
+                {"metric": "benchmark_requests", "data": None},
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="null-data",
+        ),
+        pytest.param(
+            [
+                {"metric": "benchmark_requests", "data": "scalar"},
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="scalar-data",
+        ),
+        pytest.param(
+            [
+                {"metric": "benchmark_requests", "data": [{"time": 0, "value": 1}]},
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="list-data",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": 0, "value": True},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="boolean-value",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": 0, "value": float("nan")},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="nan-value",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": 0, "value": float("inf")},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="inf-value",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": float("inf"), "value": 1},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="inf-timestamp",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": "nan", "value": 1},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="nan-string-timestamp",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": 10**400, "value": 1},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="oversized-integer-timestamp",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": 0, "value": 10**400},
+                },
+                {"metric": "benchmark_requests", "data": {"time": 1, "value": 2}},
+            ],
+            {"effective_qps": [(1.0, 2.0)], "latency_p99_ms": []},
+            id="oversized-integer-value",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "benchmark_requests",
+                    "data": {"time": "1970-01-01T00:00:02Z", "value": 2},
+                },
+                {
+                    "metric": "benchmark_latency",
+                    "data": {"time": "1970-01-01T00:00:02Z", "value": 20},
+                },
+            ],
+            {"effective_qps": [(2.0, 2.0)], "latency_p99_ms": [(2.0, 20.0)]},
+            id="rfc3339-control",
+        ),
+    ],
+)
+def test_load_samples_skip_unusable_jsonl_records(
+    tmp_path: Path, records: list[object], expected: dict[str, list[tuple[float, float]]]
+) -> None:
+    """Malformed JSONL points are skipped while valid records are retained."""
+    measurement = tmp_path / "measurement"
+    measurement.mkdir()
+    write_k6_jsonl(measurement, records)
+    assert campaign_evidence.load_samples(tmp_path / "run") == expected
+
+
 def test_campaign_audit_rejects_partial_evidence() -> None:
     issues = campaign_evidence.audit_campaign(
         {
