@@ -802,10 +802,13 @@ fn trunc(s: &str, n: usize) -> String {
 }
 
 /// Whether a tool call command looks like a backtrack / dead-end reversal.
+/// Branch creation (`git checkout -b`/`-B`; `-B` folds to `-b` in the
+/// lowercase) discards nothing — it is forward progress, so it stays out
+/// even though it contains "git checkout".
 fn is_backtrack_cmd(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
+    let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
     [
-        "git checkout",
         "git reset",
         "git revert",
         "git stash",
@@ -815,6 +818,7 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     ]
     .iter()
     .any(|k| c.contains(k))
+        || checkout
 }
 
 // ---------------------------------------------------------------------------
@@ -2168,5 +2172,53 @@ mod tests {
         // 2k tok x 0.6 x (6 + 3) = 10800; counting the finished turn too
         // would report 12000.
         assert_eq!(up.potential_save_tokens, 10_800);
+    }
+
+    /// `git checkout -b/-B` creates a branch: nothing is discarded, so it is
+    /// forward progress, not a reversal. Flagging it BACKTRACK feeds a false
+    /// 回退 count into the detour prompt and pads the prevention ceiling
+    /// with that turn's tokens.
+    #[test]
+    fn branch_creation_is_not_a_backtrack() {
+        assert!(!is_backtrack_cmd("git checkout -b feature/opt"));
+        assert!(!is_backtrack_cmd("git checkout -B feature/opt"));
+        assert!(!is_backtrack_cmd("cd /repo && git checkout -b fix/parse"));
+        // Discarding and reset forms stay backtracks.
+        assert!(is_backtrack_cmd("git checkout -- src/lib.rs"));
+        assert!(is_backtrack_cmd("git checkout ."));
+        assert!(is_backtrack_cmd("git reset --hard HEAD~1"));
+
+        // End to end: the ledger and the detour facts must not count a
+        // branch creation as a backtrack.
+        let mut steps = String::from(
+            r#"{"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"start"}"#,
+        );
+        steps.push_str(
+            r#",{"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+                "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"git checkout -b feature/opt"}}],
+                "observation":{"results":[{"source_call_id":"c1","content":"Switched to a new branch"}]}}"#,
+        );
+        for id in 3..=6 {
+            steps.push_str(&format!(
+                r#",{{"step_id":{id},"source":"agent","timestamp":"2026-07-02T06:30:0{id}.000Z","message":"working"}}"#
+            ));
+        }
+        let t = traj(&format!("[{steps}]"));
+        let set = extract_waste_candidates(&t).unwrap();
+        let detour = set
+            .candidates
+            .iter()
+            .find(|c| c.id == "detour")
+            .expect("detour fires on a 5-turn trajectory");
+        assert!(
+            detour.facts.contains("0 处回退"),
+            "branch creation must not count as a backtrack: {}",
+            detour.facts
+        );
+        assert!(
+            set.ledger.iter().all(|r| !r.backtrack),
+            "no ledger row may carry the BACKTRACK flag: {:?}",
+            set.ledger
+        );
     }
 }
