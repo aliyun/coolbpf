@@ -379,6 +379,7 @@ impl OpenAIParser {
 
         let mut content_parts: Vec<String> = Vec::new();
         let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut refusal_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut finish_reason = Some("stop".to_string());
         // A capped response ends with status="incomplete" and the cap reason
@@ -398,15 +399,23 @@ impl OpenAIParser {
                 "message" => {
                     if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
                         for part in content {
-                            if part
-                                .get("type")
-                                .and_then(|t| t.as_str())
-                                .map(|t| t == "output_text")
-                                .unwrap_or(false)
-                            {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    content_parts.push(text.to_string());
+                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match part_type {
+                                "output_text" => {
+                                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                        content_parts.push(text.to_string());
+                                    }
                                 }
+                                // A refusal is the model's answer for this
+                                // turn, delivered as its own content part.
+                                "refusal" => {
+                                    if let Some(refusal) =
+                                        part.get("refusal").and_then(|r| r.as_str())
+                                    {
+                                        refusal_parts.push(refusal.to_string());
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -451,6 +460,10 @@ impl OpenAIParser {
         if !reasoning_content.is_empty() {
             message["reasoning_content"] = serde_json::Value::String(reasoning_content);
         }
+        let refusal_content = refusal_parts.join("");
+        if !refusal_content.is_empty() {
+            message["refusal"] = serde_json::Value::String(refusal_content);
+        }
         if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
             finish_reason = Some("tool_calls".to_string());
@@ -487,6 +500,7 @@ impl OpenAIParser {
     fn aggregate_responses_sse_chunks(chunks: &[serde_json::Value]) -> Option<OpenAIResponse> {
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
+        let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut model = String::new();
         let mut resp_id = String::new();
@@ -512,6 +526,19 @@ impl OpenAIParser {
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         reasoning_buf.push_str(delta);
+                    }
+                }
+                "response.refusal.delta" => {
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        refusal_buf.push_str(delta);
+                    }
+                }
+                "response.refusal.done" => {
+                    // The done event carries the finalized text; the deltas
+                    // may be missing when capture started mid-stream.
+                    if let Some(refusal) = chunk.get("refusal").and_then(|r| r.as_str()) {
+                        refusal_buf.clear();
+                        refusal_buf.push_str(refusal);
                     }
                 }
                 "response.completed" => {
@@ -600,6 +627,9 @@ impl OpenAIParser {
         if !reasoning_buf.is_empty() {
             message["reasoning_content"] = serde_json::Value::String(reasoning_buf);
         }
+        if !refusal_buf.is_empty() {
+            message["refusal"] = serde_json::Value::String(refusal_buf);
+        }
         let finish_reason = if output_capped {
             // The cap ended the stream: report the truncation even when a
             // tool call was in flight (its arguments may be cut mid-JSON,
@@ -630,6 +660,7 @@ impl OpenAIParser {
 
         let mut content_parts: Vec<String> = Vec::new();
         let mut reasoning_parts: Vec<String> = Vec::new();
+        let mut refusal_parts: Vec<String> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut first_chunk: Option<&serde_json::Value> = None;
         // Merge tool_call deltas by index: index -> (id, name, arguments_accumulated)
@@ -652,6 +683,12 @@ impl OpenAIParser {
                     if let Some(reasoning) = &choice.delta.reasoning_content {
                         if !reasoning.is_empty() {
                             reasoning_parts.push(reasoning.clone());
+                        }
+                    }
+                    // Extract refusal delta (arrives instead of content)
+                    if let Some(refusal) = &choice.delta.refusal {
+                        if !refusal.is_empty() {
+                            refusal_parts.push(refusal.clone());
                         }
                     }
                     // Extract and merge tool_call deltas by index
@@ -739,6 +776,11 @@ impl OpenAIParser {
                     } else {
                         Some(reasoning_parts.join(""))
                     };
+                    let combined_refusal = if refusal_parts.is_empty() {
+                        None
+                    } else {
+                        Some(refusal_parts.join(""))
+                    };
                     OpenAIResponse {
                         id: chunk.id,
                         object: "chat.completion".to_string(),
@@ -750,7 +792,7 @@ impl OpenAIParser {
                                 role: MessageRole::Assistant,
                                 content: Some(OpenAIContent::Text(combined_content)),
                                 reasoning_content: combined_reasoning,
-                                refusal: None,
+                                refusal: combined_refusal,
                                 function_call: None,
                                 tool_calls,
                                 tool_call_id: None,
@@ -1283,6 +1325,51 @@ mod tests {
         assert_eq!(usage.completion_tokens, 2);
     }
 
+    /// The Responses protocol streams a refusal as its own events; the
+    /// aggregation listened for text/tool-call events only.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_refusal() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_r2", "model": "gpt-5"}}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            serde_json::json!({"type": "response.refusal.done", "refusal": "I can't help with that."}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r2", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp =
+            OpenAIParser::parse_response(&body).expect("Responses SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    /// A non-streaming Responses body carries the refusal as a content part
+    /// (`{"type":"refusal","refusal":…}`); the normalizer read only
+    /// `output_text` parts.
+    #[test]
+    fn test_normalize_responses_refusal_content_part() {
+        let body = serde_json::json!({
+            "id": "resp_nr1",
+            "object": "response",
+            "created_at": 1_786_504_982u64,
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "refusal", "refusal": "I can't help with that."}]
+            }]
+        });
+        let resp = OpenAIParser::parse_response(&body).expect("a Responses body should normalize");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
     /// Reasoning models stream their thinking as `response.reasoning_text.delta`
     /// / `response.reasoning_summary_text.delta` events (qwen3-coder via
     /// dashscope `/v1/responses`, o-series via OpenAI). The aggregator matched
@@ -1760,6 +1847,39 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"file_path\": \"/tmp/a.md\"}"
+        );
+    }
+
+    /// A refusal arrives as `delta.refusal` with no content delta. The
+    /// aggregation ignored the field and hardcoded `refusal: None` on the
+    /// aggregated message, so the refusal text never reached the response.
+    #[test]
+    fn test_aggregate_sse_chunks_refusal_delta() {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-refusal",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"refusal": "I can't help with that."}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"refusal": " Ask something else."}),
+                Some("stop"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that. Ask something else.")
         );
     }
 
