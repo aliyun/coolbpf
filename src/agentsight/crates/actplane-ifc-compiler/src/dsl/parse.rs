@@ -152,6 +152,18 @@ impl P {
         Ok(Some(arg))
     }
 
+    /// Reads one pattern literal. An empty pattern lowers to a matcher that
+    /// can never fire (an exact literal no runtime path equals; the engine
+    /// rejects an empty contains literal), so a `block`/`kill` clause or a
+    /// taint source carrying one silently installs no enforcement at all.
+    fn pattern(&mut self) -> Result<String, String> {
+        let pattern = self.string()?;
+        if pattern.is_empty() {
+            return Err("pattern literals must not be empty".into());
+        }
+        Ok(pattern)
+    }
+
     fn target(&mut self, op: Op) -> Result<Target, String> {
         let kind = if let Some(Tok::Word(w)) = self.peek() {
             if w == "file" || w == "endpoint" || w == "exec" {
@@ -165,7 +177,7 @@ impl P {
         } else {
             return Err("expected node kind in target".into());
         };
-        let mut pattern = self.string()?;
+        let mut pattern = self.pattern()?;
         // Implicit basename matching: if the pattern contains no '/', treat it
         // as a basename match by prepending "**/".
         if kind == Kind::Exec && !pattern.contains('/') {
@@ -213,18 +225,18 @@ impl P {
                 }
                 Ok(Cond::Target {
                     negate,
-                    pattern: self.string()?,
+                    pattern: self.pattern()?,
                 })
             }
             "lineage-includes" => {
                 self.eat("exec")?;
                 Ok(Cond::LineageIncludes {
-                    exec: self.string()?,
+                    exec: self.pattern()?,
                 })
             }
             "after" => {
                 let gate_op = P::op(&self.word()?)?;
-                let gate_pattern = self.string()?;
+                let gate_pattern = self.pattern()?;
                 let gate_exit = if self.is_word("exits") {
                     self.next();
                     if gate_op != Op::Exec {
@@ -243,7 +255,7 @@ impl P {
                     self.next();
                     loop {
                         let op = P::op(&self.word()?)?;
-                        let pat = self.string()?;
+                        let pat = self.pattern()?;
                         let arg = self.arg(op)?;
                         since.push((op, pat, arg));
                         if self.is_word("or") {
@@ -320,7 +332,7 @@ pub fn parse(src: &str) -> Result<Policy, String> {
                     o => return Err(format!("expected '=' in source, got {:?}", o)),
                 }
                 let kind = P::kind(&p.word()?)?;
-                let pattern = p.string()?;
+                let pattern = p.pattern()?;
                 pol.sources.push(Source {
                     label,
                     kind,
@@ -333,7 +345,7 @@ pub fn parse(src: &str) -> Result<Policy, String> {
                 let label = p.word()?;
                 p.eat("by")?;
                 p.eat("exec")?;
-                let gate = p.string()?;
+                let gate = p.pattern()?;
                 pol.xforms.push(Xform {
                     endorse,
                     label,
