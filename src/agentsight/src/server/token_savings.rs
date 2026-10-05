@@ -457,6 +457,9 @@ pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
 ) -> impl Responder {
+    if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
     let start_ns = match super::handlers::start_or_default(
         query.start_ns,
@@ -1031,6 +1034,36 @@ mod tests {
     }
 
     // ─── Integration tests for handlers ───────────────────────────────────
+
+    #[actix_web::test]
+    async fn test_token_savings_rejects_an_inverted_window() {
+        // Every sibling window endpoint rejects `start_ns > end_ns` with 400.
+        // This one answered an empty 200 instead, which a caller reads as "no
+        // savings in that range". No HOME juggling: the guard runs before the
+        // stats store is touched.
+        let tmp = std::env::temp_dir().join(format!("agentsight_inv_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/token-savings?start_ns=2000&end_ns=1000")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected"
+        );
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
+    }
 
     #[allow(clippy::await_holding_lock)]
     #[actix_web::test]

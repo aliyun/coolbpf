@@ -911,6 +911,12 @@ pub async fn list_optimization_history(
     data: web::Data<AppState>,
     query: web::Query<HistoryQuery>,
 ) -> impl Responder {
+    // Validated before anything else: an inverted window is a malformed
+    // request whatever the optimizer's state, exactly as on the sibling
+    // endpoints.
+    if let Some(response) = super::handlers::reject_inverted_window(query.start_ns, query.end_ns) {
+        return response;
+    }
     let state = match optimize_state(&data) {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -1086,6 +1092,33 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
         })
+    }
+
+    #[actix_web::test]
+    async fn history_rejects_an_inverted_window() {
+        use actix_web::{App, test as awtest};
+
+        // Validated before the optimizer's state is consulted, so an
+        // unconfigured instance answers 400 like every sibling endpoint
+        // instead of its own "not configured" error.
+        let dir = tmp_dir("inverted-window");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(list_optimization_history),
+        )
+        .await;
+        let request = awtest::TestRequest::get()
+            .uri("/optimize/results?start_ns=2000&end_ns=1000")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an inverted window must be rejected"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"], "start_ns must not exceed end_ns");
     }
 
     #[actix_web::test]
