@@ -106,6 +106,15 @@ export function mergeSessions(
       // The log side carries the full trajectory — its previews win.
       existing.first_message = t.first_user_message ?? existing.first_message;
       existing.last_message = t.last_user_message ?? existing.last_message;
+      // A Codex parent's children are tallied under the collected rollout
+      // stem while this row may have been initialized from the bare eBPF
+      // UUID (count 0). Carry the collected parent's count over, taking the
+      // max so an exact-ID parent — already counted at initialization — is
+      // not double-counted.
+      existing.subagent_count = Math.max(
+        existing.subagent_count,
+        subagentCount.get(t.session_id) ?? 0,
+      );
       if (lastMs !== null && (existing.last_active_ms === null || lastMs > existing.last_active_ms)) {
         existing.last_active_ms = lastMs;
       }

@@ -355,9 +355,32 @@ mod tests {
     }
 
     #[test]
-    fn is_init_pid_namespace_returns_true_in_test_runner() {
-        // Test runner runs on the host (init ns), so this should be true.
-        assert!(is_init_pid_namespace());
+    fn is_init_pid_namespace_matches_procfs_ground_truth() {
+        // The answer depends on where the suite runs, and BOTH outcomes are
+        // legitimate. In the CI containers `/proc/self/ns/pid` and
+        // `/proc/1/ns/pid` are readable and equal, so the guard reports true.
+        // On a bare-metal host an unprivileged test user cannot readlink
+        // `/proc/1/ns/pid` (EACCES, PID 1 is root-owned), and the guard must
+        // fail closed to false. Deriving the expectation from procfs lets the
+        // real environment pick the branch instead of asserting a
+        // container-only truth that fails on every bare-metal run.
+        let self_ns = fs::read_link("/proc/self/ns/pid");
+        let init_ns = fs::read_link("/proc/1/ns/pid");
+        match (self_ns, init_ns) {
+            (Ok(self_ns), Ok(init_ns)) => {
+                assert_eq!(
+                    is_init_pid_namespace(),
+                    self_ns == init_ns,
+                    "procfs ground truth: self ns {:?} vs pid 1 ns {:?}",
+                    self_ns,
+                    init_ns
+                );
+            }
+            // Partial information (either namespace link unreadable) must
+            // read as "not in the init PID namespace": `file_delete_guard`
+            // stays disabled rather than acting on an unverified assumption.
+            _ => assert!(!is_init_pid_namespace()),
+        }
     }
 
     #[test]

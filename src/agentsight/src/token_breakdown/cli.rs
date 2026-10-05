@@ -60,7 +60,7 @@ impl AnalyzeChatmlCommand {
         let mut sorted_events: Vec<ChromeTraceEvent> = events.to_vec();
         sorted_events.sort_by_key(|e| e.ts);
 
-        let breakdowns = Self::process_events(&sorted_events, &tokenizer)?;
+        let breakdowns = Self::process_events(&sorted_events, &tokenizer, &self.model)?;
 
         // Output JSON array of all breakdowns
         let json = if self.pretty {
@@ -77,6 +77,7 @@ impl AnalyzeChatmlCommand {
     fn process_events(
         events: &[ChromeTraceEvent],
         tokenizer: &LlmTokenizer,
+        model_name: &str,
     ) -> anyhow::Result<Vec<ChatMLTokenBreakdown>> {
         let chat_template = tokenizer.clone();
 
@@ -162,7 +163,7 @@ impl AnalyzeChatmlCommand {
             };
 
             if let Some(classified) = classified {
-                let breakdown = compute_breakdown(&classified, tokenizer)?;
+                let breakdown = compute_breakdown(&classified, tokenizer, model_name)?;
                 breakdowns.push(breakdown);
             }
         }
@@ -316,11 +317,10 @@ impl AnalyzeChatmlCommand {
         // `input_json_delta` fragments.
         let mut anthropic_calls: std::collections::BTreeMap<u64, (String, String, String)> =
             std::collections::BTreeMap::new();
-        // Responses API: one function call in flight at a time (parallel calls
-        // are flushed when the next one starts, matching the analyzer's
-        // aggregator).
-        let mut responses_call: Option<(String, String, String)> = None;
-        let mut responses_calls: Vec<String> = Vec::new();
+        // Responses API: the shared aggregator routes each argument event to
+        // its own output item by id/index and honors a full `done` payload,
+        // matching the live analyzer instead of assuming one call in flight.
+        let mut responses_tool_calls = crate::analyzer::message::ResponsesToolCalls::default();
 
         for event in sse_events {
             // Parse the data field which contains JSON string
@@ -406,45 +406,10 @@ impl AnalyzeChatmlCommand {
                                 }
                             }
                         }
-                        Some("response.output_item.added") => {
-                            if let Some(item) = data_json.get("item") {
-                                if item.get("type").and_then(|v| v.as_str())
-                                    == Some("function_call")
-                                {
-                                    // Parallel tool use: flush the in-flight call
-                                    // before starting the next.
-                                    if let Some((_, name, args)) = responses_call.take() {
-                                        if !name.is_empty() || !args.is_empty() {
-                                            responses_calls.push(format!("{name}: {args}"));
-                                        }
-                                    }
-                                    responses_call = Some((
-                                        item.get("call_id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string(),
-                                        item.get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string(),
-                                        String::new(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some("response.function_call_arguments.delta") => {
-                            if let Some(delta) = data_json.get("delta").and_then(|v| v.as_str()) {
-                                if let Some((_, _, args)) = responses_call.as_mut() {
-                                    args.push_str(delta);
-                                }
-                            }
-                        }
-                        Some("response.function_call_arguments.done") => {
-                            if let Some((_, name, args)) = responses_call.take() {
-                                if !name.is_empty() || !args.is_empty() {
-                                    responses_calls.push(format!("{name}: {args}"));
-                                }
-                            }
+                        Some("response.output_item.added")
+                        | Some("response.function_call_arguments.delta")
+                        | Some("response.function_call_arguments.done") => {
+                            responses_tool_calls.observe(&data_json);
                         }
                         _ => {}
                     }
@@ -527,13 +492,10 @@ impl AnalyzeChatmlCommand {
             }
         }
 
-        // Responses calls in stream order, then a still-in-flight call
-        // (truncated stream without the done event).
-        tool_calls.extend(responses_calls);
-        if let Some((_, name, args)) = responses_call {
-            if !name.is_empty() || !args.is_empty() {
-                tool_calls.push(format!("{name}: {args}"));
-            }
+        // Responses calls in output-item arrival order. `into_calls` also
+        // emits a call whose stream ended before its done event.
+        for (_, name, arguments) in responses_tool_calls.into_calls() {
+            tool_calls.push(format!("{name}: {arguments}"));
         }
 
         ResponseData {
@@ -720,6 +682,28 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    #[test]
+    fn breakdown_reports_the_model_the_command_was_given() {
+        // `ChatMLTokenBreakdown::model_name` is documented as the model name
+        // used for tokenization. It used to come from the tokenizer's own
+        // name, which is the file it was loaded from: every auto-downloaded
+        // tokenizer is `tokenizer.json`, so the output reported the literal
+        // string "tokenizer" instead of the requested model.
+        let tokenizer = fixture_tokenizer();
+        let blocks = vec![crate::token_breakdown::types::ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "hello".to_string(),
+        }];
+        let doc = classify_document(&blocks, None);
+
+        let breakdown =
+            compute_breakdown(&doc, &tokenizer, "qwen3.5-plus").expect("breakdown computes");
+        assert_eq!(
+            breakdown.model_name, "qwen3.5-plus",
+            "the output must name the model the command was given"
+        );
+    }
+
     fn request_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
         let mut event = ChromeTraceEvent::instant("http.request", "http.request", 1, 1, ts);
         event.args = Some(json!({ "body": body }));
@@ -745,7 +729,7 @@ mod tests {
             request_event(json!({"messages": []}), 1),
         ];
 
-        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
             .expect("a malformed event must not abort the other events");
         assert_eq!(breakdowns.len(), 1);
     }
@@ -758,7 +742,7 @@ mod tests {
             1,
         )];
 
-        let err = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+        let err = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
             .expect_err("every event failed to render");
         assert!(
             err.to_string()
@@ -938,6 +922,54 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
+    }
+
+    /// A stream that only sends `output_item.added` plus
+    /// `function_call_arguments.done` carries the arguments in the done
+    /// payload; ignoring them recorded the call with empty arguments.
+    #[test]
+    fn sse_responses_done_payload_is_used() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"tool_a","arguments":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_a","arguments":"{\"a\":1}"}"#,
+            ),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.tool_calls, vec!["tool_a: {\"a\":1}".to_string()]);
+    }
+
+    /// Parallel Responses calls interleave their argument deltas; keying only
+    /// on "the most recent call" attached every delta to the last-started call
+    /// and finalized the wrong one.
+    #[test]
+    fn sse_responses_interleaved_deltas_keep_their_call() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"tool_a","arguments":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"tool_b","arguments":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_a","delta":"{\"a\":1}"}"#,
+            ),
+            sse(
+                r#"{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_b","delta":"{\"b\":2}"}"#,
+            ),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                "tool_a: {\"a\":1}".to_string(),
+                "tool_b: {\"b\":2}".to_string()
+            ]
         );
     }
 
