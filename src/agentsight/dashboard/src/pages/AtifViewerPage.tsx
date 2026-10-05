@@ -776,8 +776,15 @@ export const AtifViewerPage: React.FC = () => {
   const handleFileImport = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Local imports share the load identity with network loads: taking the
+    // next request id invalidates any in-flight network response (and any
+    // earlier import), and this read is in turn invalidated by a newer load.
+    const requestId = ++loadRequestIdRef.current;
+    setLoading(true);
+    setError(null);
     const reader = new FileReader();
     reader.onload = (ev) => {
+      if (requestId !== loadRequestIdRef.current) return;
       try {
         const parsed = JSON.parse(ev.target?.result as string);
         if (!parsed.schema_version || !String(parsed.schema_version).startsWith('ATIF')) {
@@ -792,7 +799,15 @@ export const AtifViewerPage: React.FC = () => {
         setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument), t), new Set()));
       } catch {
         setError(t('atif.jsonParseFailed'));
+      } finally {
+        // Only the current load may finish its own loading state.
+        if (requestId === loadRequestIdRef.current) setLoading(false);
       }
+    };
+    reader.onerror = () => {
+      if (requestId !== loadRequestIdRef.current) return;
+      setError(t('atif.loadFailed'));
+      setLoading(false);
     };
     reader.readAsText(file);
     e.target.value = '';
