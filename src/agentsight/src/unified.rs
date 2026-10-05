@@ -3014,8 +3014,13 @@ fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer
             }
         }
     }
+    // DashScope/Bailian native requests nest their tool definitions under
+    // "parameters" (the OpenAI-compatible spelling is top level), the same
+    // fallback `GenAIBuilder::parse_request_body` reads them through. Without
+    // this the drained call is estimated without tools the template renders.
     let tools_json: Option<Vec<serde_json::Value>> = body
         .get("tools")
+        .or_else(|| body.get("parameters").and_then(|p| p.get("tools")))
         .and_then(|t| t.as_array())
         .map(|a| a.to_vec());
     let count =
