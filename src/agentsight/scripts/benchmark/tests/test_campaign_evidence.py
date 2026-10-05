@@ -176,7 +176,7 @@ def test_runtime_log_capture_detects_fatal_patterns_and_rotation(
 
     source.write_text("new file after rotation\n", encoding="utf-8")
     clean, errors = campaign.capture_runtime_log(source, start, destination)
-    assert clean is True
+    assert clean is None  # Rotation lost part of the measured interval.
     assert errors == []
     assert campaign.log_position(tmp_path / "missing") is None
     assert campaign.capture_runtime_log(None, None, destination) == (None, [])
