@@ -53,11 +53,20 @@ fn json_has_tool_failure(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Array(items) => items.iter().any(json_has_tool_failure),
         serde_json::Value::Object(map) => {
-            let is_tool_response = map
-                .get("type")
-                .and_then(|value| value.as_str())
-                .is_some_and(|kind| matches!(kind, "tool_call_response" | "tool_result"))
-                || map.contains_key("tool_call_response");
+            // Both the parts shape and the raw wire forms reach this column: a
+            // request stored verbatim by the crash drain carries OpenAI's
+            // `role: "tool"` message and Responses' `function_call_output`
+            // item, and a failure in either used to score as "no deterministic
+            // tool failure".
+            let kind = map.get("type").and_then(|value| value.as_str());
+            let is_tool_response = kind.is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "tool_call_response" | "tool_result" | "function_call_output"
+                )
+            }) || map.contains_key("tool_call_response")
+                || map.get("role").and_then(|value| value.as_str()) == Some("tool")
+                    && map.contains_key("tool_call_id");
 
             if is_tool_response && tool_response_has_error(map) {
                 return true;
@@ -69,8 +78,36 @@ fn json_has_tool_failure(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether a tool-result payload declares its own outcome, and which one.
+///
+/// Both spellings of the error flag are in use — `is_error` and the camelCase
+/// `isError` that real agent traces carry — and some tools report `success`
+/// or an `error` status instead. When a payload declares success, the content
+/// is free-form output that may legitimately mention a traceback or a missing
+/// path, so it must not be read as a failure; only an explicit error can
+/// contradict it. The interruption detector reads the same payloads with the
+/// same rule in `tool_response_failure_text`.
+fn declared_failure(map: &serde_json::Map<String, serde_json::Value>) -> Option<bool> {
+    if let Some(is_error) = map
+        .get("is_error")
+        .or_else(|| map.get("isError"))
+        .and_then(|value| value.as_bool())
+    {
+        return Some(is_error);
+    }
+
+    if let Some(success) = map.get("success").and_then(|value| value.as_bool()) {
+        return Some(!success);
+    }
+
+    map.get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+        .then_some(true)
+}
+
 fn tool_response_has_error(map: &serde_json::Map<String, serde_json::Value>) -> bool {
-    if let Some(is_error) = map.get("is_error").and_then(|value| value.as_bool()) {
+    if let Some(is_error) = declared_failure(map) {
         return is_error;
     }
 
@@ -83,13 +120,10 @@ fn value_has_error_signal(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(text) => text_has_error_signal(text),
         serde_json::Value::Array(items) => items.iter().any(value_has_error_signal),
-        serde_json::Value::Object(map) => {
-            if let Some(is_error) = map.get("is_error").and_then(|value| value.as_bool()) {
-                return is_error;
-            }
-
-            map.values().any(value_has_error_signal)
-        }
+        serde_json::Value::Object(map) => match declared_failure(map) {
+            Some(is_error) => is_error,
+            None => map.values().any(value_has_error_signal),
+        },
         _ => false,
     }
 }
@@ -334,6 +368,56 @@ mod tests {
         );
 
         assert!(looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn respects_every_spelling_of_a_declared_outcome() {
+        // `isError` is the camelCase spelling real agent traces carry (the
+        // interruption detector reads both spellings), and some tools report
+        // `success` instead. A successful result's content is free-form
+        // output: a search that skips unreadable directories prints
+        // "Permission denied" and still exits 0.
+        for payload in [
+            r#"[{"type":"tool_result","isError":false,"content":"find: '/root': Permission denied"}]"#,
+            r#"[{"type":"tool_result","success":true,"content":"find: '/root': Permission denied"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a tool result that declares success is not a failure: {payload}"
+            );
+        }
+
+        // The failure flag still wins over the same content.
+        let event = event(
+            None,
+            Some(
+                r#"[{"type":"tool_result","isError":true,"content":"find: '/root': Permission denied"}]"#,
+            ),
+            None,
+        );
+        assert!(looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn detects_a_failure_in_a_raw_tool_message() {
+        // The structured scan reads the request replay, which for a call the
+        // crash drain captured holds the raw wire forms: OpenAI's
+        // `role: "tool"` message and Responses' `function_call_output` item.
+        // Neither matched the shape gate, so a failed tool call in an
+        // interrupted conversation scored as "no deterministic tool failure".
+        for payload in [
+            r#"[{"role":"user","content":"run it"},
+                {"role":"tool","tool_call_id":"call-1","content":"Error: command failed","is_error":true}]"#,
+            r#"[{"role":"user","content":"run it"},
+                {"type":"function_call_output","call_id":"call-1","output":"Error: command failed","status":"error"}]"#,
+        ] {
+            let event = event(Some(payload), None, None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "a failed tool result must be detected: {payload}"
+            );
+        }
     }
 
     #[test]

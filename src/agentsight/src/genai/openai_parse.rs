@@ -107,10 +107,57 @@ impl GenAIBuilder {
                     }
                 } else if let Some(arr) = content.as_array() {
                     for item in arr {
-                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                            parts.push(MessagePart::Text {
-                                content: text.to_string(),
-                            });
+                        // Anthropic replays its tool interaction as content
+                        // blocks: `tool_use` for the request, `tool_result` for
+                        // the output. Reading only a block's `text` dropped
+                        // both, so a request captured verbatim by the crash
+                        // drain lost the tool results the ATIF observation and
+                        // the tool-failure readers are built from. The mapping
+                        // mirrors `anthropic_content_block_to_part`.
+                        match item.get("type").and_then(|t| t.as_str()) {
+                            Some("tool_use") => {
+                                if let (Some(id), Some(name)) = (
+                                    item.get("id").and_then(|v| v.as_str()),
+                                    item.get("name").and_then(|v| v.as_str()),
+                                ) {
+                                    parts.push(MessagePart::ToolCall {
+                                        id: Some(id.to_string()),
+                                        name: name.to_string(),
+                                        arguments: item.get("input").cloned(),
+                                    });
+                                }
+                            }
+                            Some("tool_result") => {
+                                if let Some(tool_use_id) =
+                                    item.get("tool_use_id").and_then(|v| v.as_str())
+                                {
+                                    let response = match (
+                                        item.get("content").cloned(),
+                                        item.get("is_error").and_then(|v| v.as_bool()),
+                                    ) {
+                                        (Some(value), Some(is_error)) => serde_json::json!({
+                                            "content": value,
+                                            "is_error": is_error,
+                                        }),
+                                        (Some(value), None) => value,
+                                        (None, Some(is_error)) => {
+                                            serde_json::json!({ "is_error": is_error })
+                                        }
+                                        (None, None) => serde_json::Value::Null,
+                                    };
+                                    parts.push(MessagePart::ToolCallResponse {
+                                        id: Some(tool_use_id.to_string()),
+                                        response,
+                                    });
+                                }
+                            }
+                            _ => {
+                                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                    parts.push(MessagePart::Text {
+                                        content: text.to_string(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -1166,6 +1213,53 @@ mod tests {
                 assert_eq!(response.as_str(), Some("a.txt"));
             }
             other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_body_anthropic_content_blocks() {
+        // A request captured verbatim from an interrupted Anthropic call keeps
+        // the wire content blocks: the assistant's tool request arrives as a
+        // `tool_use` block and the tool output as a `tool_result` block. The
+        // converter only read a block's `text`, so both were dropped and the
+        // ATIF observation built from this column lost the tool results.
+        let body = r#"{
+            "model": "claude-opus-4",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "checking"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/tmp/a"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "file contents"}
+                ]}
+            ]
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).unwrap();
+
+        match &req.messages[0].parts[..] {
+            [
+                MessagePart::Text { content },
+                MessagePart::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                },
+            ] => {
+                assert_eq!(content, "checking");
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(name, "Read");
+                assert_eq!(arguments.as_ref().unwrap()["file_path"], "/tmp/a");
+            }
+            other => panic!("expected a text part and a tool call, got {other:?}"),
+        }
+
+        match &req.messages[1].parts[..] {
+            [MessagePart::ToolCallResponse { id, response }] => {
+                assert_eq!(id.as_deref(), Some("toolu_1"));
+                assert_eq!(response.as_str(), Some("file contents"));
+            }
+            other => panic!("expected the tool result, got {other:?}"),
         }
     }
 

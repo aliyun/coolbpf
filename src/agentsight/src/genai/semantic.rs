@@ -188,6 +188,29 @@ pub struct OutputMessage {
     pub finish_reason: Option<String>,
 }
 
+/// The ids of the tool calls these output messages emit, as the JSON array
+/// the `tool_call_ids` column stores. `None` when no call carries an id.
+///
+/// Three paths write that column — the pending completion, the direct insert
+/// and the SSE enrichment of a drained call — and the readers (session turn
+/// indices, token-savings attribution, the session resource timeline) pair
+/// their data by it, so the extraction lives here once.
+pub fn tool_call_ids_json(messages: &[OutputMessage]) -> Option<String> {
+    let ids: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match part {
+            MessagePart::ToolCall { id: Some(id), .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&ids).ok()
+    }
+}
+
 /// Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
