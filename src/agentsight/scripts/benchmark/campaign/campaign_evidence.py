@@ -119,9 +119,12 @@ def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     """Read one process or internal metric from the recovery CSV."""
     path = run_path.parent / "measurement" / "metrics.csv"
     if not path.exists():
+        path = path.with_suffix(path.suffix + ".gz")
+    if not path.exists():
         return []
     samples = []
-    with path.open(encoding="utf-8", newline="") as handle:
+    opener = gzip.open if path.suffix == ".gz" else Path.open
+    with opener(path, mode="rt", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
             value = finite_float(row.get(field))
