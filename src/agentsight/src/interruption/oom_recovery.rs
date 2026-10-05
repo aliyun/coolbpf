@@ -382,6 +382,20 @@ fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     dt.and_utc().timestamp_nanos_opt()
 }
 
+/// Whether a comm names a metrics collector rather than something that runs
+/// the agent.
+///
+/// Prometheus-style exporters are named after the thing they watch —
+/// `node_exporter`, `node-exporter`, `prometheus-node-exporter` — so they look
+/// like a runtime to a prefix match but are collectors, not workloads. ktuner
+/// draws the same line for its own process detection.
+fn is_monitoring_helper_name(name: &str) -> bool {
+    name.starts_with("prometheus")
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "exporter")
+}
+
 /// Match a process comm name to a known agent name.
 /// Returns Some(agent_name) if matched, None otherwise.
 fn match_agent_name(comm: &str) -> Option<&'static str> {
@@ -391,8 +405,15 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
     } else if comm_lower == "co" || comm_lower == "cosh" || comm_lower.starts_with("copilot") {
         Some("Cosh")
     } else if comm_lower.starts_with("node") {
-        // Node processes could be either; record with unknown agent but still track
-        Some("node(unknown-agent)")
+        // Node processes could be either; record with unknown agent but still
+        // track. A collector is neither: an OOM-killed `node_exporter` without
+        // a pending llm_call is noise, like any other non-agent kill, and used
+        // to be recorded as a critical agent_crash.
+        if is_monitoring_helper_name(&comm_lower) {
+            None
+        } else {
+            Some("node(unknown-agent)")
+        }
     } else {
         // Non-agent processes — skip
         None
@@ -885,6 +906,34 @@ esac
         assert!(oom_interruption_for(&oom_event("python3"), None, None, &[]).is_none());
         assert!(oom_interruption_for(&oom_event("chrome"), None, None, &[]).is_none());
         assert!(oom_interruption_for(&oom_event("mysqld"), None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn monitoring_exporter_oom_kill_is_not_an_agent_crash() {
+        // A metrics collector is named after what it watches, not after a Node
+        // agent runtime: `node_exporter` is Prometheus's node collector. With
+        // no pending llm_call correlation the kill is noise, like any other
+        // non-agent kill — but `starts_with("node")` recorded it as a critical
+        // agent_crash.
+        assert!(oom_interruption_for(&oom_event("node_exporter"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("node-exporter"), None, None, &[]).is_none());
+
+        // A bare `node` runtime — what agent processes run as — still matches,
+        // and so do node-ish names that are not collectors.
+        assert!(oom_interruption_for(&oom_event("node"), None, None, &[]).is_some());
+        assert!(oom_interruption_for(&oom_event("node-red"), None, None, &[]).is_some());
+
+        // The correlation safety net is unchanged: an exporter kill that has a
+        // pending llm_call for its pid is still recorded.
+        assert!(
+            oom_interruption_for(
+                &oom_event("node_exporter"),
+                Some("sess-1".to_string()),
+                Some("conv-1".to_string()),
+                &["conv-1".to_string()],
+            )
+            .is_some()
+        );
     }
 
     #[test]
