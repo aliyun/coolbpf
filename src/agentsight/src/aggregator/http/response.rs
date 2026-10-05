@@ -238,11 +238,28 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
         .is_some_and(|choices| {
             choices.iter().any(|choice| {
                 let delta = choice.get("delta");
+                // SysOM/Bailian Copilot streams accumulated `choices[].message`
+                // chunks instead of `choices[].delta`, so its first answer
+                // token never dated the stream and the call had no TTFT.
+                let message = choice.get("message");
                 non_empty_string(choice.get("text"))
+                    || non_empty_string(message.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|item| item.get("name")))
+                                    || non_empty_string(
+                                        function.and_then(|item| item.get("arguments")),
+                                    )
+                            })
+                        })
+                    || message
+                        .and_then(|item| item.get("tool_use"))
                         .and_then(serde_json::Value::as_array)
                         .is_some_and(|calls| {
                             calls.iter().any(|call| {
@@ -444,6 +461,50 @@ mod latency_tests {
         assert!(event_has_meaningful_output(Some(&text_format)));
         assert!(event_has_meaningful_output(Some(&tool_call)));
         assert!(!event_has_meaningful_output(Some(&usage_only)));
+    }
+
+    #[test]
+    fn recognizes_sysom_cumulative_message_output() {
+        // The SysOM/Copilot endpoint streams `choices[].message` chunks whose
+        // content grows as the answer is produced; it never sends `delta`.
+        let chunk = serde_json::json!({
+            "choices": [{"message": {"content": "Hel", "tool_use": null}}]
+        });
+        assert!(event_has_meaningful_output(Some(&chunk)));
+
+        // A chunk that only opens the turn carries no output yet.
+        let opening = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": null}}]
+        });
+        assert!(!event_has_meaningful_output(Some(&opening)));
+
+        // A tool-only turn counts once the call arrives.
+        let tool_call = serde_json::json!({
+            "choices": [{"message": {"content": "", "tool_use": [
+                {"index": 0, "id": "c1", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}}]}}]
+        });
+        assert!(event_has_meaningful_output(Some(&tool_call)));
+    }
+
+    #[test]
+    fn sysom_stream_dates_its_first_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
     }
 
     #[test]
