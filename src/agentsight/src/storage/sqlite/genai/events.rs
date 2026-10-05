@@ -506,30 +506,8 @@ impl GenAISqliteStore {
                 };
 
                 // Extract tool_call_ids from response messages (outgoing tool calls)
-                let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call
-                        .response
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall {
-                                id: Some(tc_id),
-                                ..
-                            } = p
-                            {
-                                Some(tc_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&ids).ok()
-                    }
-                };
+                let tool_call_ids =
+                    crate::genai::semantic::tool_call_ids_json(&call.response.messages);
 
                 // Get instance ID (same logic as SLS uploader)
                 let instance = crate::genai::instance_id::get_instance_id();

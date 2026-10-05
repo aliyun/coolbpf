@@ -276,30 +276,8 @@ impl GenAISqliteStore {
                     }
                 };
 
-                let tool_call_ids: Option<String> = {
-                    let ids: Vec<String> = call
-                        .response
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .filter_map(|p| {
-                            if let crate::genai::semantic::MessagePart::ToolCall {
-                                id: Some(tc_id),
-                                ..
-                            } = p
-                            {
-                                Some(tc_id.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if ids.is_empty() {
-                        None
-                    } else {
-                        serde_json::to_string(&ids).ok()
-                    }
-                };
+                let tool_call_ids =
+                    crate::genai::semantic::tool_call_ids_json(&call.response.messages);
 
                 let updated = conn.execute(
                     "UPDATE genai_events SET
@@ -749,6 +727,17 @@ impl GenAISqliteStore {
         enrichment: &SseEnrichment,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // The drained call never reaches completion, so this is the only
+        // chance to record the tool calls its SSE chunks carried: every reader
+        // of the column (session turn indices, token-savings attribution, the
+        // session resource timeline) pairs its data by these ids.
+        let tool_call_ids = enrichment
+            .output_messages
+            .as_deref()
+            .and_then(|json| {
+                serde_json::from_str::<Vec<crate::genai::semantic::OutputMessage>>(json).ok()
+            })
+            .and_then(|messages| crate::genai::semantic::tool_call_ids_json(&messages));
         conn.execute(
             "UPDATE genai_events SET
                 model            = COALESCE(?2, model),
@@ -759,7 +748,8 @@ impl GenAISqliteStore {
                 input_tokens     = COALESCE(?7, input_tokens),
                 output_tokens    = COALESCE(?8, output_tokens),
                 total_tokens     = COALESCE(?7, input_tokens, 0)
-                                 + COALESCE(?8, output_tokens, 0)
+                                 + COALESCE(?8, output_tokens, 0),
+                tool_call_ids    = COALESCE(?9, tool_call_ids)
              WHERE call_id = ?1",
             params![
                 call_id,
@@ -770,6 +760,7 @@ impl GenAISqliteStore {
                 enrichment.sse_event_count,
                 enrichment.input_tokens,
                 enrichment.output_tokens,
+                tool_call_ids,
             ],
         )?;
         Ok(())

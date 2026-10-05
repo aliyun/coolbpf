@@ -2199,6 +2199,46 @@ fn test_enrich_pending_from_sse() {
     cleanup_db(&path);
 }
 
+#[test]
+fn test_enrich_pending_from_sse_records_tool_call_ids() {
+    // The enrichment writes the output messages the SSE chunks carried, tool
+    // calls included, but the `tool_call_ids` column stayed NULL. A drained
+    // call never reaches complete, so nothing else ever fills it: the tool
+    // call is present in the row's messages yet invisible to every reader of
+    // that column (session turn indices, token-savings attribution, the
+    // session resource timeline).
+    let (store, path) = create_populated_store("enrich_sse_ids");
+    let e = SseEnrichment {
+        model: Some("gpt-4-turbo".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: Some(
+            r#"[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"read_file","arguments":{"path":"a"}}]}]"#
+                .to_string(),
+        ),
+        sse_event_count: Some(3),
+        input_tokens: None,
+        output_tokens: None,
+    };
+    store.enrich_pending_from_sse("call-5", &e).unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let ids: Option<String> = conn
+        .query_row(
+            "SELECT tool_call_ids FROM genai_events WHERE call_id = 'call-5'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ids.as_deref(),
+        Some(r#"["call_1"]"#),
+        "the enriched tool call must be recorded in the ids column"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
 // ─── schema.rs tests ──────────────────────────────────────────────────────────
 
 #[test]
