@@ -60,7 +60,7 @@ impl AnalyzeChatmlCommand {
         let mut sorted_events: Vec<ChromeTraceEvent> = events.to_vec();
         sorted_events.sort_by_key(|e| e.ts);
 
-        let breakdowns = Self::process_events(&sorted_events, &tokenizer)?;
+        let breakdowns = Self::process_events(&sorted_events, &tokenizer, &self.model)?;
 
         // Output JSON array of all breakdowns
         let json = if self.pretty {
@@ -77,6 +77,7 @@ impl AnalyzeChatmlCommand {
     fn process_events(
         events: &[ChromeTraceEvent],
         tokenizer: &LlmTokenizer,
+        model_name: &str,
     ) -> anyhow::Result<Vec<ChatMLTokenBreakdown>> {
         let chat_template = tokenizer.clone();
 
@@ -162,7 +163,7 @@ impl AnalyzeChatmlCommand {
             };
 
             if let Some(classified) = classified {
-                let breakdown = compute_breakdown(&classified, tokenizer)?;
+                let breakdown = compute_breakdown(&classified, tokenizer, model_name)?;
                 breakdowns.push(breakdown);
             }
         }
@@ -720,6 +721,28 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    #[test]
+    fn breakdown_reports_the_model_the_command_was_given() {
+        // `ChatMLTokenBreakdown::model_name` is documented as the model name
+        // used for tokenization. It used to come from the tokenizer's own
+        // name, which is the file it was loaded from: every auto-downloaded
+        // tokenizer is `tokenizer.json`, so the output reported the literal
+        // string "tokenizer" instead of the requested model.
+        let tokenizer = fixture_tokenizer();
+        let blocks = vec![crate::token_breakdown::types::ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "hello".to_string(),
+        }];
+        let doc = classify_document(&blocks, None);
+
+        let breakdown =
+            compute_breakdown(&doc, &tokenizer, "qwen3.5-plus").expect("breakdown computes");
+        assert_eq!(
+            breakdown.model_name, "qwen3.5-plus",
+            "the output must name the model the command was given"
+        );
+    }
+
     fn request_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
         let mut event = ChromeTraceEvent::instant("http.request", "http.request", 1, 1, ts);
         event.args = Some(json!({ "body": body }));
@@ -745,7 +768,7 @@ mod tests {
             request_event(json!({"messages": []}), 1),
         ];
 
-        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
             .expect("a malformed event must not abort the other events");
         assert_eq!(breakdowns.len(), 1);
     }
@@ -758,7 +781,7 @@ mod tests {
             1,
         )];
 
-        let err = AnalyzeChatmlCommand::process_events(&events, &tokenizer)
+        let err = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
             .expect_err("every event failed to render");
         assert!(
             err.to_string()
