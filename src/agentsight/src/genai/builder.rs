@@ -565,14 +565,22 @@ impl GenAIBuilder {
         // `message_start` event carries input_tokens plus the cache counters
         // while the terminal `message_delta` carries only output_tokens, so
         // keeping the last usage-bearing event would record input as 0.
+        // The cache counters ride along into the enrichment: the live path
+        // stores them and totals the billed input, so the drain path must
+        // persist the same numbers for the same call.
         let usage = sse_events
             .iter()
             .filter_map(|e| token_parser.parse_event(e))
             .fold(None, merge_usage);
 
-        let (input_tokens, output_tokens) = match &usage {
-            Some(u) => (Some(u.input_tokens as i64), Some(u.output_tokens as i64)),
-            None => (None, None),
+        let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) = match &usage {
+            Some(u) => (
+                Some(u.input_tokens as i64),
+                Some(u.output_tokens as i64),
+                u.cache_creation_input_tokens.map(|v| v as i64),
+                u.cache_read_input_tokens.map(|v| v as i64),
+            ),
+            None => (None, None, None, None),
         };
 
         // Use model from usage if not found in content chunks
@@ -612,6 +620,8 @@ impl GenAIBuilder {
             sse_event_count: Some(event_count),
             input_tokens,
             output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
         })
     }
 
@@ -727,6 +737,49 @@ mod tests {
             MessagePart::Text { content } => assert_eq!(content, "Hello world"),
             other => panic!("expected Text part, got {other:?}"),
         }
+    }
+
+    /// The drain enrichment must carry the cache counters the stream reported,
+    /// as the provider reported them: Anthropic's `message_start` keeps them
+    /// outside `input_tokens`, while OpenAI-style usage counts the cached part
+    /// inside `prompt_tokens` and only details it separately.
+    #[test]
+    fn test_extract_sse_enrichment_carries_usage_cache_counters() {
+        let anthropic = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"id":"msg_cache","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":1234,"cache_read_input_tokens":24576}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#,
+            ),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&anthropic).expect("enrichment");
+        assert_eq!(
+            (enrichment.input_tokens, enrichment.output_tokens),
+            (Some(10), Some(5))
+        );
+        assert_eq!(
+            (
+                enrichment.cache_creation_tokens,
+                enrichment.cache_read_tokens
+            ),
+            (Some(1234), Some(24576)),
+            "the drained call must keep the cache counters its stream reported"
+        );
+
+        let openai = vec![
+            make_sse_event(
+                r#"{"model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":64}}}"#,
+            ),
+            make_sse_event(r#"{"choices":[{"delta":{"content":"hi"}}]}"#),
+        ];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&openai).expect("enrichment");
+        assert_eq!(
+            enrichment.input_tokens,
+            Some(100),
+            "the reported prompt_tokens already include the cached part"
+        );
+        assert_eq!(enrichment.cache_read_tokens, Some(64));
     }
 
     #[test]
