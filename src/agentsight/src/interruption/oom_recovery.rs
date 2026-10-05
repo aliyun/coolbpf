@@ -159,18 +159,23 @@ pub fn recover_oom_events(
     );
 }
 
-/// `dmesg` with its output locale pinned.
+/// `dmesg` with its output environment pinned.
 ///
 /// `dmesg -T` renders the timestamp with `strftime("%c")`, which follows the
-/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`). On
-/// a host exporting e.g. `LANG=zh_CN.UTF-8` the weekday and month names come
-/// out localized, [`parse_dmesg_timestamp`] cannot read them, and every OOM
-/// event is stamped with the scan time instead of the kill time — which also
-/// defeats the `(pid, timestamp)` dedup in [`recover_oom_events`]. Pin the
-/// child to the C locale so the output keeps the format the parser documents.
+/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`) and
+/// the inherited time zone (`TZ`). On a host exporting e.g.
+/// `LANG=zh_CN.UTF-8` the weekday and month names come out localized,
+/// [`parse_dmesg_timestamp`] cannot read them, and every OOM event is stamped
+/// with the scan time instead of the kill time — which also defeats the
+/// `(pid, timestamp)` dedup in [`recover_oom_events`]. On a host east of UTC
+/// the wall-clock fields are rendered in the local zone while the parser reads
+/// them as UTC, so every kill is stamped hours away from when it happened.
+/// Pin the child to the C locale and to UTC so the output keeps the format and
+/// the instant the parser documents.
 fn dmesg_command() -> Command {
     let mut command = Command::new("dmesg");
     command.env("LC_ALL", "C");
+    command.env("TZ", "UTC");
     command
 }
 
@@ -738,14 +743,27 @@ printf '[%s] Out of memory: Killed process 4000002 (openclaw-gatewa) total-vm:10
 
     /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
     /// with `strftime("%c")`, so the weekday and month names follow the
-    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`).
+    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`)
+    /// and the wall-clock fields follow the inherited time zone (`TZ`).
+    ///
+    /// The stand-in collapses the zone to two cases — UTC keeps the kernel
+    /// time, anything else renders it as UTC+8 — which is enough to tell the
+    /// two apart without shipping a tz database.
     const FAKE_DMESG: &str = r#"#!/bin/sh
-case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
-    ""|C|POSIX|C.*)
-        printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+case "${TZ:-}" in
+    ""|UTC|UTC0|Etc/UTC|Etc/GMT)
+        hour='10:00:00'
         ;;
     *)
-        printf '[五 4月 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        hour='18:00:00'
+        ;;
+esac
+case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
+    ""|C|POSIX|C.*)
+        printf "[Fri Apr 17 $hour 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n"
+        ;;
+    *)
+        printf "[五 4月 17 $hour 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n"
         ;;
 esac
 "#;
@@ -812,6 +830,67 @@ esac
         assert_eq!(
             event.timestamp_ns, 1_776_420_000_000_000_000,
             "the C-locale timestamp must survive a foreign LC_TIME"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oom_recovery_reads_dmesg_timestamps_under_a_foreign_timezone() {
+        // `dmesg -T` renders the kernel time in the *local* zone, but the
+        // recovery path reads the fields as UTC. A host east of UTC therefore
+        // records every OOM kill hours in the future. Re-exec so the fake
+        // dmesg sees a foreign TZ without mutating other tests' env.
+        const CHILD: &str = "AGENTSIGHT_OOM_TIMEZONE_CHILD";
+        let fake_dir =
+            std::env::temp_dir().join(format!("agentsight-fake-dmesg-tz-{}", std::process::id()));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::oom_recovery_reads_dmesg_timestamps_under_a_foreign_timezone",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LC_ALL", "C")
+                .env("TZ", "Asia/Shanghai")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let events = parse_dmesg_oom_events().expect("read fake dmesg");
+        let event = events
+            .iter()
+            .find(|event| event.pid == 12345)
+            .expect("killed process event");
+        // The fake renders 18:00 in UTC+8, which is 10:00Z. Reading the wall
+        // clock as UTC would stamp the kill eight hours into the future.
+        assert_eq!(
+            event.timestamp_ns, 1_776_420_000_000_000_000,
+            "the kill time must be read as the real instant, not as UTC wall clock"
         );
     }
 
