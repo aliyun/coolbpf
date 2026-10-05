@@ -2099,65 +2099,10 @@ impl AgentSight {
                                     // ── input tokens ──
                                     if enrichment.input_tokens.is_none() {
                                         if let Some(body) = request.json_body() {
-                                            if let Some(messages) =
-                                                body.get("messages").and_then(|m| m.as_array())
+                                            if let Some(count) =
+                                                drain_request_input_tokens(&body, &tokenizer)
                                             {
-                                                let mut msgs = messages.clone();
-                                                // Parse tool_calls.arguments from string to object
-                                                for msg in msgs.iter_mut() {
-                                                    if let Some(tcs) = msg
-                                                        .get_mut("tool_calls")
-                                                        .and_then(|tc| tc.as_array_mut())
-                                                    {
-                                                        for tc in tcs.iter_mut() {
-                                                            if let Some(f) = tc.get_mut("function")
-                                                            {
-                                                                if let Some(a) = f
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                {
-                                                                    if let Ok(p) =
-                                                                        serde_json::from_str::<
-                                                                            serde_json::Value,
-                                                                        >(
-                                                                            a
-                                                                        )
-                                                                    {
-                                                                        f["arguments"] = p;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let tools_json: Option<Vec<serde_json::Value>> =
-                                                    body.get("tools")
-                                                        .and_then(|t| t.as_array())
-                                                        .map(|a| a.to_vec());
-                                                let count = match tokenizer
-                                                    .apply_chat_template_with_tools(
-                                                        &msgs,
-                                                        tools_json.as_deref(),
-                                                        true,
-                                                    ) {
-                                                    Ok(formatted) => {
-                                                        tokenizer.count(&formatted).unwrap_or(0)
-                                                    }
-                                                    Err(_) => {
-                                                        // Fallback: raw message count
-                                                        msgs.iter()
-                                                            .filter_map(|m| {
-                                                                serde_json::to_string(m).ok()
-                                                            })
-                                                            .map(|s| {
-                                                                tokenizer.count(&s).unwrap_or(0)
-                                                            })
-                                                            .sum()
-                                                    }
-                                                };
-                                                if count > 0 {
-                                                    enrichment.input_tokens = Some(count as i64);
-                                                }
+                                                enrichment.input_tokens = Some(count);
                                             }
                                         }
                                     }
@@ -2902,6 +2847,57 @@ fn record_agent_crash_interruptions(
             log::warn!("[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}");
         }
     }
+}
+
+/// Count the input tokens of a drained request from its captured body.
+///
+/// The drain fallback runs for streams that ended before the terminal usage
+/// event, and it has to count the same request shapes the analyzer and the
+/// token breakdown count. It reads the parser-layer message view instead of a
+/// private top-level `messages` array, which recognized only OpenAI chat
+/// bodies: a drained Responses (`input` with `instructions`) or DashScope
+/// native (`input.messages`) call kept `input_tokens` NULL while its output
+/// side was still counted from the same events.
+///
+/// Extracted as a free function, like `record_agent_crash_interruptions`, so
+/// the fallback is unit-testable without constructing a full `AgentSight`
+/// instance.
+fn drain_request_input_tokens(body: &serde_json::Value, tokenizer: &LlmTokenizer) -> Option<i64> {
+    let (mut messages, instructions) = crate::parser::llm::extract_messages_view(body)?;
+    if let Some(system) = instructions.filter(|text| !text.is_empty()) {
+        messages.insert(0, serde_json::json!({"role": "system", "content": system}));
+    }
+    // Parse tool_calls.arguments from string to object
+    for msg in messages.iter_mut() {
+        if let Some(tcs) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+            for tc in tcs.iter_mut() {
+                if let Some(f) = tc.get_mut("function") {
+                    if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
+                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(a) {
+                            f["arguments"] = p;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let tools_json: Option<Vec<serde_json::Value>> = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| a.to_vec());
+    let count =
+        match tokenizer.apply_chat_template_with_tools(&messages, tools_json.as_deref(), true) {
+            Ok(formatted) => tokenizer.count(&formatted).unwrap_or(0),
+            Err(_) => {
+                // Fallback: raw message count
+                messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_string(m).ok())
+                    .map(|s| tokenizer.count(&s).unwrap_or(0))
+                    .sum()
+            }
+        };
+    if count > 0 { Some(count as i64) } else { None }
 }
 
 /// Render the buffer watermark report, and whether it needs operator attention.

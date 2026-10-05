@@ -11,10 +11,11 @@
 //! - `user` content: `text` (human input), `tool_result` (tool output)
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Observation, ObservationResult, Step,
-    StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 pub fn convert_jsonl_to_atif(path: &Path) -> anyhow::Result<AtifTrajectory> {
@@ -33,9 +34,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     // Codex rollouts use a different envelope schema
     // (`{"timestamp","type","payload"}` records). The collector crate already
     // ships a converter for them, so delegate instead of emitting an empty
-    // trajectory. `response_item`/`turn_context` only occur in Codex files,
-    // which keeps the extra parse off the Claude/Qoder path.
-    if content.contains("response_item") || content.contains("turn_context") {
+    // trajectory. The substrings mirror `is_codex_rollout`'s envelope types:
+    // `response_item`/`turn_context` only occur in Codex files, while
+    // `session_meta` also catches a rollout truncated before its first turn
+    // (session_meta + user_message, listed by discovery but with no
+    // turn_context/response_item records yet). Qoder transcripts carry a
+    // bare `session_meta` line too, so `is_codex_rollout`'s payload-object
+    // check keeps them on the Claude/Qoder path.
+    if content.contains("response_item")
+        || content.contains("turn_context")
+        || content.contains("session_meta")
+    {
         let events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
         if agentsight_trajectory_collector::codex::is_codex_rollout(&events) {
             return agentsight_trajectory_collector::codex::convert_codex_events(&events, "codex");
@@ -300,6 +309,32 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     })
 }
 
+/// Flatten a `tool_result.content` payload into result text.
+///
+/// Claude Code/Qoder emit `content` as an array of `{"type":"text","text":…}`
+/// blocks; mirror `agentsight-trajectory-collector`'s ATIF converter so the
+/// local viewer keeps the same tool output the canonical collector records.
+fn flatten_tool_result_content(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            let text_parts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    let obj = block.as_object()?;
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        obj.get("text").and_then(|v| v.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            text_parts.join("\n")
+        }
+        other => other.to_string(),
+    }
+}
+
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
     let last_agent_step = steps
         .iter_mut()
@@ -323,15 +358,29 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let content = block
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let content = Some(Value::String(
+            block
+                .get("content")
+                .map(flatten_tool_result_content)
+                .unwrap_or_default(),
+        ));
+        let extra = if block
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Some(HashMap::from([(
+                EXTRA_IS_ERROR.to_string(),
+                Value::Bool(true),
+            )]))
+        } else {
+            None
+        };
         observation.results.push(ObservationResult {
             source_call_id,
-            content: content.map(serde_json::Value::String),
+            content,
             subagent_trajectory_ref: None,
-            extra: None,
+            extra,
         });
     }
 }
@@ -408,6 +457,32 @@ mod tests {
         let obs = traj.steps[0].observation.as_ref().unwrap();
         assert_eq!(obs.results.len(), 1);
         assert_eq!(obs.results[0].source_call_id.as_deref(), Some("tc1"));
+    }
+
+    #[test]
+    fn test_tool_result_array_content_and_error_flag() {
+        // Claude Code/Qoder write `tool_result.content` as an array of text
+        // blocks and mark failures with `is_error`. Both used to be dropped,
+        // so tool output disappeared from collected trajectories and
+        // downstream failure detection saw no error.
+        let content = r#"{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"tc1","name":"bash","input":{"cmd":"false"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc1","is_error":true,"content":[{"type":"text","text":"command failed"},{"type":"text","text":"exit 1"}]}]}}"#;
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        let obs = traj.steps[0].observation.as_ref().unwrap();
+        assert_eq!(obs.results.len(), 1);
+        assert_eq!(
+            obs.results[0].content,
+            Some(Value::String("command failed\nexit 1".to_string())),
+            "text blocks must be flattened into the result content"
+        );
+        assert_eq!(
+            obs.results[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get(agentsight_atif::EXTRA_IS_ERROR)),
+            Some(&Value::Bool(true)),
+            "is_error must be carried in the result extra"
+        );
     }
 
     #[test]
@@ -565,6 +640,26 @@ mod tests {
         assert_eq!(calls[0].function_name, "exec");
         let obs = agent_step.observation.as_ref().unwrap();
         assert_eq!(obs.results[0].source_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_truncated_codex_rollout_still_delegates() {
+        // A rollout killed before its first turn: `session_meta` plus the
+        // user's message, no `turn_context`/`response_item` records yet. The
+        // listing still shows the session (discovery keys on
+        // event_msg/user_message), so the converter must delegate too, not
+        // fall to the Claude loop and emit an empty trajectory.
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:56:48.054Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019fc70d\",\"cwd\":\"/Users/u/app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:56:52.374Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"list the files\"}}\n",
+        );
+        let traj = convert_jsonl_content_to_atif(content).unwrap();
+        assert_eq!(traj.agent.name, "codex");
+        assert_eq!(traj.agent.version, "0.146.0");
+        assert_eq!(traj.session_id.as_deref(), Some("019fc70d"));
+        assert_eq!(traj.steps.len(), 1);
+        assert_eq!(traj.steps[0].source, StepSource::User);
+        assert_eq!(traj.steps[0].message, "list the files");
     }
 
     #[test]
