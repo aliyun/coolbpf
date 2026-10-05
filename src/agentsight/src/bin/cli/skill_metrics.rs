@@ -243,12 +243,12 @@ impl SkillMetricsCommand {
         // Query events
         let events = store.get_events_in_time_range(start_ns, end_ns, agent)?;
 
-        if events.is_empty() {
-            if json {
-                println!("{{\"message\": \"No events found in the specified time range\"}}");
-            } else {
-                eprintln!("No events found in the last {last} hours.");
-            }
+        // `--json` answers with the report on every range, including one with
+        // no events: a machine caller reads `event_count`, and it cannot be
+        // asked to tell a bare notice object apart from a report. The human
+        // mode keeps the notice.
+        if events.is_empty() && !json {
+            eprintln!("No events found in the last {last} hours.");
             return Ok(());
         }
 

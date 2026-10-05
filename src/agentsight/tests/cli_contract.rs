@@ -199,6 +199,52 @@ fn discover_scan_text_runs_cleanly() {
 // ── token ────────────────────────────────────────────────────────────────────
 
 #[test]
+fn skill_metrics_json_on_empty_db_is_the_report_shape() {
+    // `--json` must answer with the report whatever the range holds: a caller
+    // reads `event_count` and cannot be asked to tell a bare notice object
+    // apart from a report. The notice stays in the human mode.
+    let db = tmp("skill_metrics_empty.db");
+    // The query path opens the store read-only, so the schema has to exist
+    // before the command runs: create an empty store through the library API.
+    agentsight::storage::sqlite::genai::GenAISqliteStore::new_with_path(
+        &db,
+        agentsight::config::PeriodicStoragePolicy::default(),
+    )
+    .expect("create an empty genai store");
+    let out = agentsight()
+        .args([
+            "skill-metrics",
+            "all",
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("run agentsight");
+    let _ = std::fs::remove_file(&db);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must emit valid JSON");
+    assert_eq!(
+        v["event_count"],
+        serde_json::json!(0),
+        "an empty range must still report the count: {v}"
+    );
+    assert!(
+        v.get("computed_at").is_some() && v.get("time_range_ns").is_some(),
+        "the report fields must be present: {v}"
+    );
+    assert!(
+        v.get("message").is_none(),
+        "the notice object must not be the --json contract: {v}"
+    );
+}
+
+#[test]
 fn token_missing_data_file_exits_nonzero_with_message() {
     let missing = tmp("missing.db");
     let _ = std::fs::remove_file(&missing);
