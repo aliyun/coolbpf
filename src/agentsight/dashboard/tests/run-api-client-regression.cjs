@@ -34,13 +34,15 @@ try {
       'src/utils/timeseriesBuckets.ts',
       'src/utils/formatDuration.ts',
       'src/utils/savingsCsv.ts',
+      'src/utils/sessionModel.ts',
+      'src/pages/AgentSessionsPage.tsx',
       'src/pages/security/utils.ts',
       'src/pages/LoginPage.tsx',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs'], {
+  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs', 'tests/login-regression.test.cjs', 'tests/savings-csv-regression.test.cjs', 'tests/session-model-regression.test.cjs'], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
@@ -50,6 +52,8 @@ try {
       AGENTSIGHT_SEMANTIC_FILTER_BUILD: join(outputDir, 'utils', 'semanticSearchFilter.js'),
       AGENTSIGHT_TIMESERIES_BUCKETS_BUILD: join(outputDir, 'utils', 'timeseriesBuckets.js'),
       AGENTSIGHT_FORMAT_DURATION_BUILD: join(outputDir, 'utils', 'formatDuration.js'),
+      AGENTSIGHT_SESSION_MODEL_BUILD: join(outputDir, 'utils', 'sessionModel.js'),
+      AGENTSIGHT_SESSION_PAGE_BUILD: join(outputDir, 'pages', 'AgentSessionsPage.js'),
       AGENTSIGHT_SAVINGS_CSV_BUILD: join(outputDir, 'utils', 'savingsCsv.js'),
       AGENTSIGHT_SECURITY_UTILS_BUILD: join(outputDir, 'pages', 'security', 'utils.js'),
       AGENTSIGHT_LOGIN_PAGE_BUILD: join(outputDir, 'pages', 'LoginPage.js'),
