@@ -277,12 +277,33 @@ def fault_outcome(
             "failed": [],
         }
     value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        return {
+            "verdict": "INCONCLUSIVE",
+            "missing": ["fault-results.json"],
+            "failed": [],
+        }
     outcomes = value.get("outcomes", {})
-    missing = [f"case:{name}" for name in sorted(FAULT_CASES - set(outcomes))]
+    if not isinstance(outcomes, dict):
+        outcomes = {}
+    usable: dict[str, int] = {}
+    malformed: set[str] = set()
+    for name in FAULT_CASES:
+        entry = outcomes.get(name)
+        if isinstance(entry, dict) and all(
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 0
+            for count in entry.values()
+        ):
+            usable[name] = sum(entry.values())
+        else:
+            malformed.add(name)
+    missing = [f"case:{name}" for name in sorted(malformed)]
     failed = [
         f"count:{name}"
-        for name in sorted(FAULT_CASES & set(outcomes))
-        if sum(outcomes[name].values()) != settings["repetitions_per_case"]
+        for name in sorted(usable)
+        if usable[name] != settings["repetitions_per_case"]
     ]
     for name in ("server_healthy_after", "process_alive_before", "process_alive_after"):
         if value.get(name) is not True:

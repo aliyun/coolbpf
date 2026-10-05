@@ -508,6 +508,110 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     assert fault["failed"] == ["token_accuracy"]
 
 
+def test_fault_evidence_classifies_malformed_artifacts(tmp_path: Path) -> None:
+    """Unusable fault artifact shapes and counters report missing evidence."""
+
+    def evaluate(artifact: object, repetitions: int = 3) -> dict[str, object]:
+        run_path = tmp_path / "fault" / "run-result.json"
+        measurement = run_path.parent / "measurement"
+        measurement.mkdir(parents=True, exist_ok=True)
+        measurement.joinpath("fault-results.json").write_text(
+            json.dumps(artifact), encoding="utf-8"
+        )
+        return campaign_evidence.fault_outcome(
+            run_path,
+            {"summary": summary()},
+            {"repetitions_per_case": repetitions},
+            thresholds(),
+        )
+
+    def complete(outcomes: object, **extra: object) -> dict[str, object]:
+        return {
+            "outcomes": outcomes,
+            "server_healthy_after": True,
+            "process_alive_before": True,
+            "process_alive_after": True,
+            **extra,
+        }
+
+    def each_case(entry: object) -> dict[str, object]:
+        return {name: entry for name in campaign_evidence.FAULT_CASES}
+
+    def full(entry: object) -> dict[str, object]:
+        return complete(each_case(entry))
+
+    # Non-object artifacts are unusable evidence, not crashes.
+    assert evaluate(["not", "an", "object"]) == {
+        "verdict": "INCONCLUSIVE",
+        "missing": ["fault-results.json"],
+        "failed": [],
+    }
+    assert evaluate(None) == {
+        "verdict": "INCONCLUSIVE",
+        "missing": ["fault-results.json"],
+        "failed": [],
+    }
+    assert evaluate("artifact") == {
+        "verdict": "INCONCLUSIVE",
+        "missing": ["fault-results.json"],
+        "failed": [],
+    }
+    # Unusable outcome containers leave every case missing.
+    all_missing = {
+        "verdict": "INCONCLUSIVE",
+        "missing": [f"case:{name}" for name in sorted(campaign_evidence.FAULT_CASES)],
+        "failed": [],
+    }
+    assert evaluate(complete(None)) == all_missing
+    assert evaluate(complete(["invalid_json"])) == all_missing
+    # Malformed per-case objects are missing evidence for that case only.
+    scalar_case = full({"handled": 3})
+    scalar_case["outcomes"]["invalid_json"] = 3
+    assert evaluate(scalar_case)["missing"] == ["case:invalid_json"]
+    list_case = full({"handled": 3})
+    list_case["outcomes"]["invalid_json"] = ["handled", 3]
+    assert evaluate(list_case)["missing"] == ["case:invalid_json"]
+    string_case = full({"handled": 3})
+    string_case["outcomes"]["invalid_json"] = "3"
+    assert evaluate(string_case)["missing"] == ["case:invalid_json"]
+    # Non-integer, boolean, and negative counters are missing, never satisfied.
+    boolean_counter = full({"handled": 3})
+    boolean_counter["outcomes"]["invalid_json"] = {"sent": True, "extra": 2}
+    assert evaluate(boolean_counter)["missing"] == ["case:invalid_json"]
+    boolean_only = full({"handled": 1})
+    boolean_only["outcomes"]["invalid_json"] = {"sent": True}
+    assert evaluate(boolean_only, repetitions=1)["missing"] == ["case:invalid_json"]
+    float_counter = full({"handled": 3})
+    float_counter["outcomes"]["invalid_json"] = {"sent": 1.5, "extra": 1.5}
+    assert evaluate(float_counter)["missing"] == ["case:invalid_json"]
+    string_counter = full({"handled": 3})
+    string_counter["outcomes"]["invalid_json"] = {"sent": "3"}
+    assert evaluate(string_counter)["missing"] == ["case:invalid_json"]
+    negative_counter = full({"handled": 3})
+    negative_counter["outcomes"]["invalid_json"] = {"sent": -3}
+    assert evaluate(negative_counter)["missing"] == ["case:invalid_json"]
+    cancelling = full({"handled": 3})
+    cancelling["outcomes"]["invalid_json"] = {"sent": 5, "weird": -2}
+    assert evaluate(cancelling)["missing"] == ["case:invalid_json"]
+    # Controls: complete positive evidence passes, integer mismatches fail,
+    # and absent cases stay missing.
+    assert evaluate(full({"handled": 3})) == {
+        "verdict": "PASS",
+        "missing": [],
+        "failed": [],
+    }
+    mismatch = full({"handled": 3})
+    mismatch["outcomes"]["invalid_json"] = {"handled": 2}
+    mismatch_result = evaluate(mismatch)
+    assert mismatch_result["verdict"] == "FAIL"
+    assert mismatch_result["failed"] == ["count:invalid_json"]
+    absent = full({"handled": 3})
+    del absent["outcomes"]["invalid_json"]
+    absent_result = evaluate(absent)
+    assert absent_result["verdict"] == "INCONCLUSIVE"
+    assert absent_result["missing"] == ["case:invalid_json"]
+
+
 def test_campaign_audit_rejects_partial_evidence() -> None:
     issues = campaign_evidence.audit_campaign(
         {
