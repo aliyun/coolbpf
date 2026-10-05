@@ -425,6 +425,70 @@ def test_validate_results_handles_invalid_json_and_empty_expected(
     assert report["completeness_ratio"] == 0
 
 
+def test_load_expected_skips_malformed_optional_status(tmp_path: Path) -> None:
+    """A malformed optional data.status contributes no success evidence.
+
+    The legacy k6 fallback must keep reading later records, keep every request
+    ID, and keep successes already confirmed by the independent
+    benchmark_http_success metric instead of aborting on int(status).
+    """
+    rows = [
+        {"request_id": "bad-list", "data": {"status": ["200"]}},
+        {"request_id": "bad-object", "data": {"status": {"code": 200}}},
+        {"request_id": "bad-string", "data": {"status": "ok"}},
+        {"request_id": "bad-nan", "data": {"status": float("nan")}},
+        {"request_id": "bad-inf", "data": {"status": float("inf")}},
+        {
+            "request_id": "metric-then-malformed",
+            "metric": "benchmark_http_success",
+            "data": {"value": 1, "status": {"bad": True}},
+        },
+        {"request_id": "null-status", "data": {"status": None}},
+        {"request_id": "valid-later", "data": {"status": 204}},
+    ]
+    path = tmp_path / "malformed.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    expected, successful = validate_results.load_expected(path)
+    assert expected == {
+        "bad-list",
+        "bad-object",
+        "bad-string",
+        "bad-nan",
+        "bad-inf",
+        "metric-then-malformed",
+        "null-status",
+        "valid-later",
+    }
+    assert successful == {"metric-then-malformed", "valid-later"}
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_success"),
+    [
+        (200, True),
+        (299, True),
+        (300, False),
+        (199, False),
+        ("201", True),
+        ("300", False),
+        (200.9, True),
+        (True, False),
+        (None, False),
+    ],
+)
+def test_load_expected_status_coercion_is_unchanged(
+    tmp_path: Path, status: object, expected_success: bool
+) -> None:
+    row = {"request_id": "coerce", "data": {"tags": {}, "status": status}}
+    path = tmp_path / "coerce.jsonl"
+    path.write_text(json.dumps(row), encoding="utf-8")
+
+    expected, successful = validate_results.load_expected(path)
+    assert expected == {"coerce"}
+    assert ("coerce" in successful) is expected_success
+
+
 def test_validate_results_extracts_ids_from_nested_raw_body() -> None:
     event = {
         "LLMCall": {
