@@ -1797,6 +1797,148 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     cleanup_db(&path);
 }
 
+/// Two idle snapshots can share one match key: `insert_pending` adopts a
+/// snapshot only when the candidate set is a single row ("Ambiguous idle
+/// snapshots … preserving snapshots"), so the completion then lands in
+/// `complete_pending`'s match-key branch instead of the call-id one. That
+/// branch wrote the evidence columns unconditionally, so a completion whose
+/// parsed request carried no messages erased the request view the drain had
+/// captured — the same loss the call-id branch already guards against.
+#[test]
+fn test_complete_pending_keeps_captured_evidence_on_the_match_key_branch() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_pending_evidence_match_key_{}.db",
+        std::process::id()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+
+    let info = PendingCallInfo {
+        call_id: "idle-dup-a".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-dup".to_string()),
+        session_id: Some("s-dup".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in the parser?"}]"#.to_string(),
+        ),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in the parser?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-dup".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+    let second = PendingCallInfo {
+        call_id: "idle-dup-b".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-dup".to_string()),
+        session_id: Some("s-dup".to_string()),
+        start_timestamp_ns: (BASE_NS + 1) as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: Some(
+            r#"[{"role":"user","content":"what changed in the parser?"}]"#.to_string(),
+        ),
+        system_instructions: Some(r#"[{"role":"system","content":"be terse"}]"#.to_string()),
+        user_query: Some("what changed in the parser?".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-dup".to_string()),
+    };
+    store.insert_pending(&second).unwrap();
+
+    // The completing event carries no parsed request messages and does not
+    // reuse either snapshot's call id.
+    let mut call = LLMCall::new(
+        "real-dup".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: true,
+            tools: None,
+            raw_body: None,
+        },
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "it changed".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "real-dup".to_string());
+    call.metadata
+        .insert("pending_match_key".to_string(), "match-dup".to_string());
+    call.metadata
+        .insert("status_code".to_string(), "200".to_string());
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (input, system): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT input_messages, system_instructions FROM genai_events
+             WHERE call_id = 'real-dup'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        input
+            .as_deref()
+            .is_some_and(|v| v.contains("what changed in the parser?")),
+        "the match-key branch must keep the captured request view, got {input:?}"
+    );
+    assert!(
+        system.as_deref().is_some_and(|v| v.contains("be terse")),
+        "the captured system instructions must survive too, got {system:?}"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
 /// A completion whose parsed request carries no messages must not erase the
 /// evidence the pending row captured: the request view is the only record of
 /// what the caller sent when the semantic parse failed.
