@@ -227,7 +227,15 @@ pub fn extract_claims(text: &str) -> Vec<Claim> {
         // fails it on its prefix and would then break at the thousands
         // separator, inventing a "244" no evidence supports. A comma doing real
         // structural work, as between two JSON fields, is left to separate.
-        if !word_stands_alone && !word.starts_with("http") && word.contains(STRUCTURAL_SEPARATORS) {
+        // The sparing guard matches `classify_word`'s URL check exactly:
+        // a bare `http`-prefixed word that is not a URL (`http_code=242391`,
+        // curl -w style) is a key=value fact token, and sparing it hid its
+        // value from the grounding check entirely.
+        if !word_stands_alone
+            && !word.starts_with("http://")
+            && !word.starts_with("https://")
+            && word.contains(STRUCTURAL_SEPARATORS)
+        {
             let degrouped = splice_digit_groups(word);
             for segment in degrouped.split(STRUCTURAL_SEPARATORS) {
                 if let Some(claim) = classify_word(segment) {

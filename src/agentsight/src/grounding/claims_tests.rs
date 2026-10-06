@@ -191,6 +191,27 @@ fn url_query_strings_are_not_split_on_equals() {
 }
 
 #[test]
+fn a_non_url_http_prefixed_token_yields_its_number() {
+    // `http_code=242391` is a key=value fact token (curl -w style), not a
+    // URL: the structural split must expose the value, or a fabricated
+    // figure in such a token escapes the grounding check entirely. The URL
+    // protection stays: a scheme-prefixed URL is still not split.
+    let numbers = texts_of(&extract_claims("http_code=242391"), ClaimClass::Number);
+    assert!(
+        numbers.contains(&"242391".to_string()),
+        "a non-URL http-prefixed fact token must give up its value; got {numbers:?}"
+    );
+
+    let claims = extract_claims("see https://a.test/search?q=242391&page=2");
+    assert_eq!(
+        texts_of(&claims, ClaimClass::Url),
+        vec!["https://a.test/search?q=242391&page=2"],
+        "the URL guard must keep sparing real URLs"
+    );
+    assert!(texts_of(&claims, ClaimClass::Number).is_empty());
+}
+
+#[test]
 fn non_ascii_prose_does_not_panic() {
     let claims = extract_claims("这是一段中文说明，包含数字 242391 和路径 /tmp/输出.log");
     assert!(!claims.is_empty());
