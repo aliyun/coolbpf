@@ -39,6 +39,7 @@ const BACKTRACK_KEYWORDS: &[&str] = &[
     "git checkout --",
     "git revert",
     "git restore",
+    "git clean",
     "回退",
     "撤销",
 ];

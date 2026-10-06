@@ -815,9 +815,16 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     let checkout = c.contains("git checkout") && !c.contains("git checkout -b");
     let stash =
         c.contains("git stash") && !c.contains("git stash list") && !c.contains("git stash show");
-    ["git reset", "git revert", "git restore", "回退", "撤销"]
-        .iter()
-        .any(|k| c.contains(k))
+    [
+        "git reset",
+        "git revert",
+        "git restore",
+        "git clean",
+        "回退",
+        "撤销",
+    ]
+    .iter()
+    .any(|k| c.contains(k))
         || checkout
         || stash
 }
@@ -2188,6 +2195,9 @@ mod tests {
         assert!(is_backtrack_cmd("git checkout -- src/lib.rs"));
         assert!(is_backtrack_cmd("git checkout ."));
         assert!(is_backtrack_cmd("git reset --hard HEAD~1"));
+        // `git clean` discards untracked files — a working-tree rewind.
+        assert!(is_backtrack_cmd("git clean -fd"));
+        assert!(is_backtrack_cmd("git clean -n"));
 
         // End to end: the ledger and the detour facts must not count a
         // branch creation as a backtrack.
