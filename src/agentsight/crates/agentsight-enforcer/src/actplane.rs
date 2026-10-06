@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -977,7 +978,7 @@ fn convert_security_events_at(
         || policy
             .trusted_endpoints
             .iter()
-            .any(|trusted| trusted == &raw.target)
+            .any(|trusted| trusted_endpoint_covers(trusted, &raw.target))
     {
         return Ok(Vec::new());
     }
@@ -1139,6 +1140,46 @@ fn redact_home_path(path: &str) -> String {
 
 fn classify_destination(destination: &str) -> DestinationClass {
     classify_public_ipv4_destination(destination)
+}
+
+/// Splits a destination into its address and optional port.
+///
+/// Accepts both the bare address the kernel reports for a connect and the
+/// `address:port` spelling product policies are written in.
+fn destination_address(destination: &str) -> Option<(IpAddr, Option<u16>)> {
+    if let Ok(address) = destination.parse::<IpAddr>() {
+        return Some((address, None));
+    }
+    destination
+        .parse::<SocketAddr>()
+        .ok()
+        .map(|socket| (socket.ip(), Some(socket.port())))
+}
+
+/// Whether a policy trusted endpoint exempts a reported destination.
+///
+/// The kernel reports a connect destination as a port-less dotted IPv4 address
+/// (`ebpf-ifc-engine`'s `decode`), while operators author trusted endpoints as
+/// `host:port` (the dashboard suggests `10.0.0.8:443`). Comparing the two as
+/// strings therefore never exempts the target the operator named. Compare
+/// addresses instead: an endpoint without a port covers every port, and one
+/// with a port covers a destination reporting the same address. The kernel
+/// reports no port at all, so a trusted endpoint that names one still exempts
+/// its address. Hostnames are not resolved here and stay untrusted.
+fn trusted_endpoint_covers(trusted: &str, destination: &str) -> bool {
+    if trusted == destination {
+        return true;
+    }
+    let Some((trusted_address, trusted_port)) = destination_address(trusted) else {
+        return false;
+    };
+    let Some((destination_address, destination_port)) = destination_address(destination) else {
+        return false;
+    };
+    if trusted_address != destination_address {
+        return false;
+    }
+    destination_port.is_none_or(|port| trusted_port.is_none_or(|trusted| trusted == port))
 }
 
 fn convert_violation(raw: Violation, active: &ActiveBinding, event_id: Uuid) -> ViolationEvent {
@@ -1883,6 +1924,99 @@ mod tests {
             violation.event_id, sink.event_id,
             "the raw violation and its normalized sink evidence describe one kernel event; \
              /api/enforcement/violations resolves case_id through the evidence id"
+        );
+    }
+
+    #[test]
+    fn trusted_endpoints_are_compared_as_addresses_with_optional_ports() {
+        assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8"));
+        assert!(trusted_endpoint_covers("8.8.8.8", "8.8.8.8:443"));
+        assert!(trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8"));
+        assert!(trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8:443"));
+        assert!(!trusted_endpoint_covers("8.8.8.8:443", "8.8.8.8:8443"));
+        assert!(!trusted_endpoint_covers("8.8.8.9", "8.8.8.8"));
+        assert!(!trusted_endpoint_covers("git.example.com:443", "8.8.8.8"));
+        assert!(!trusted_endpoint_covers("8.8.8.8", "git.example.com:443"));
+    }
+
+    #[test]
+    fn a_trusted_endpoint_written_as_host_port_exempts_its_destination() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.effect = 0;
+        raw.blocked = false;
+        raw.target = "8.8.8.8".into();
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.aws/credentials".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let policy = active
+            .credential_policy
+            .as_mut()
+            .expect("fixture credential policy should exist");
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["8.8.8.8:443".into()];
+        let policy = policy.clone();
+
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            &policy,
+            "CREDENTIAL",
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+            Uuid::new_v4(),
+        )
+        .expect("trusted destination should normalize safely");
+
+        assert!(
+            events.is_empty(),
+            "the destination an operator named as trusted must not become credential-exfiltration evidence"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_public_destination_still_produces_evidence() {
+        let mut raw = raw_violation(270_000_000_000);
+        raw.effect = 0;
+        raw.blocked = false;
+        raw.target = "8.8.8.8".into();
+        raw.provenance = Some(Provenance {
+            label: 1,
+            timestamp_ns: 269_000_000_000,
+            pid: 43,
+            op: 1,
+            target: "/root/.aws/credentials".into(),
+        });
+        let mut active = active_binding();
+        active.binding.request.policy_revision = "3".into();
+        let policy = active
+            .credential_policy
+            .as_mut()
+            .expect("fixture credential policy should exist");
+        policy.mode = PolicyMode::Audit;
+        policy.trusted_endpoints = vec!["8.8.8.9:443".into()];
+        let policy = policy.clone();
+
+        let events = convert_security_events_at(
+            raw,
+            &active,
+            &policy,
+            "CREDENTIAL",
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+            Uuid::new_v4(),
+        )
+        .expect("audit violation should convert");
+
+        assert_eq!(
+            events.len(),
+            4,
+            "a public destination outside the trusted list must stay evidence"
         );
     }
 
