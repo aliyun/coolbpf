@@ -690,9 +690,12 @@ pub async fn run_optimization(
         Err(resp) => return resp,
     };
     let Some(dimension) = parse_dimension(&dimension_raw) else {
+        // Derived from ALL_DIMENSIONS so the message cannot fall behind
+        // `parse_dimension` again: it is the only place this API names the
+        // accepted values, and it had dropped `summary`.
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "unknown dimension",
-            "message": "expected one of: perf, perf-issues, cost, cost-waste, accuracy",
+            "message": format!("expected one of: {}", ALL_DIMENSIONS.join(", ")),
         }));
     };
 
@@ -1115,6 +1118,43 @@ mod tests {
             reuse_llm_judge_enabled: false,
             causal_store: None,
         })
+    }
+
+    /// The rejection message is the only place this API names the accepted
+    /// dimensions (`/api/docs` lists the route without its values), and it
+    /// named five of the six `parse_dimension` accepts: a client reading the
+    /// error cannot discover `summary`, a dimension the endpoint serves.
+    #[actix_web::test]
+    async fn unknown_dimension_lists_every_accepted_dimension() {
+        use actix_web::{App, test as awtest};
+
+        let dir = tmp_dir("unknown-dimension");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(config_test_state(&dir))
+                .service(run_optimization),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/optimize/sessions/s1/not-a-dimension")
+            .to_request();
+        let response = awtest::call_service(&app, request).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "an unknown dimension must be rejected before the session is read"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        let message = body["message"]
+            .as_str()
+            .expect("the rejection names the accepted dimensions");
+        for dimension in ALL_DIMENSIONS {
+            assert!(
+                message.contains(dimension),
+                "the rejection must name every accepted dimension, {dimension} is missing: {message}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[actix_web::test]
