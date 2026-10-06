@@ -97,10 +97,15 @@ impl ExtractedData {
         let mut all_sessions: HashSet<String> = HashSet::new();
 
         for event in events {
+            // conversation_id groups every LLM call of one user query — the
+            // task/session these metrics are documented over (call_builder
+            // and the genai events writer agree). trace_id is the per-call
+            // response id and only remains as a fallback for rows written
+            // before the conversation column existed.
             let session_id = event
-                .trace_id
+                .conversation_id
                 .clone()
-                .or_else(|| event.conversation_id.clone())
+                .or_else(|| event.trace_id.clone())
                 .unwrap_or_default();
             // Rows with neither id cannot be attributed to any session;
             // counting them as one phantom "" session skews every
@@ -478,8 +483,8 @@ mod tests {
             pid: Some(100),
             user_query: None,
             event_json: None,
-            trace_id: Some(session.into()),
-            conversation_id: Some("conv-1".into()),
+            trace_id: Some(format!("resp-{session}")),
+            conversation_id: Some(session.into()),
             cache_read_tokens: None,
             status: Some("complete".into()),
             interruption_type: None,
@@ -523,12 +528,47 @@ mod tests {
             pid: Some(100),
             user_query: None,
             event_json: None,
-            trace_id: Some(session.into()),
-            conversation_id: Some("conv-1".into()),
+            trace_id: Some(format!("resp-{session}")),
+            conversation_id: Some(session.into()),
             cache_read_tokens: None,
             status: Some("complete".into()),
             interruption_type: None,
         }
+    }
+
+    /// One task (one conversation) makes several LLM calls with distinct
+    /// response ids (trace_id). Only the call that reads SKILL.md uses a
+    /// skill, so the task-level usage ratio is 1.0 — not 1/calls.
+    #[test]
+    fn one_task_with_several_calls_counts_as_one_session() {
+        use crate::genai::semantic::{MessagePart, OutputMessage};
+
+        let mut with_skill = load_event(1, 1_000_000_000, "conv-task-1", "pdf");
+        with_skill.trace_id = Some("chatcmpl-call-1".into());
+        with_skill.conversation_id = Some("conv-task-1".into());
+
+        let mut without_skill = load_event(2, 1_000_000_100, "conv-task-1", "pdf");
+        without_skill.trace_id = Some("chatcmpl-call-2".into());
+        without_skill.conversation_id = Some("conv-task-1".into());
+        // The later call's output carries no SKILL.md read.
+        without_skill.output_messages = Some(
+            serde_json::to_string(&vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "done".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }])
+            .unwrap(),
+        );
+
+        let report = compute_skill_metrics(&[with_skill, without_skill], &MetricOptions::all());
+        let usage = report.usage_ratio.unwrap();
+        assert_eq!(usage.total_sessions, 1);
+        assert_eq!(usage.with_skill_count, 1);
+        assert_eq!(usage.without_skill_count, 0);
+        assert_eq!(usage.ratio, 1.0);
     }
 
     #[test]
