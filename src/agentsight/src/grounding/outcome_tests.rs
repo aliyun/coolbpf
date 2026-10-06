@@ -314,6 +314,30 @@ fn alternate_exit_code_wordings_are_structured_evidence() {
     assert_eq!(v.status, CallStatus::Ok);
 }
 
+/// A successful call whose *output* quotes the exit-code wording is not that
+/// call's failure. A `Read` of a file that merely mentions `Exit code 1` — this
+/// repository's own `outcome_tests.rs`, `grader/evidence.rs` and
+/// `reuse/summarize.rs` all do — was classified `Failed` from the quoted text,
+/// which dropped the whole observation from the evidence pool and turned the
+/// paths the file names into apparently fabricated ones.
+#[test]
+fn a_quoted_exit_code_is_not_this_calls_failure() {
+    let v = classify(
+        &plain_call(),
+        "// Exit code 1 is returned when the check fails.\nfn main() {}",
+    );
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "default");
+
+    // A reader that prefixes every line (Claude Code's `Read` numbers them)
+    // embeds the quoted marker mid-line, where it is not this call's report.
+    let v = classify(
+        &plain_call(),
+        "    58→            \"Exit code 255\\nssh: connect failed: Bad file descriptor\",",
+    );
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+}
+
 #[test]
 fn non_ascii_payload_does_not_panic() {
     let v = classify(
