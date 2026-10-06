@@ -278,6 +278,7 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                 let message = choice.get("message");
                 non_empty_string(choice.get("text"))
                     || non_empty_string(message.and_then(|item| item.get("content")))
+                    || non_empty_string(message.and_then(|item| item.get("reasoning_content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
                     || non_empty_string(delta.and_then(|item| item.get("refusal")))
@@ -546,6 +547,35 @@ mod latency_tests {
             ),
             sse_event(
                 r#"{"choices":[{"message":{"content":"Hello there!","tool_use":null}}]}"#,
+                300,
+            ),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(200));
+    }
+
+    /// A stream that thinks before it answers puts reasoning on the same
+    /// accumulated `choices[].message` shape it uses for content (the shape the
+    /// comment above the `choices` walk names for SysOM/Bailian Copilot), so a
+    /// reasoning-only frame is that stream's first output. The `delta` arm
+    /// dates `delta.reasoning_content` and the DashScope-native arm dates
+    /// `output.choices[].message.reasoning_content`, but the accumulated
+    /// message arm checked only `content`/`tool_use`: a thinking-first answer
+    /// kept the TTFT empty until its first content chunk, dating the stream
+    /// later than the model's first token.
+    #[test]
+    fn sysom_stream_dates_a_reasoning_only_message_chunk() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"","tool_use":null}}]}"#,
+                100,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"","reasoning_content":"Let me check","tool_use":null}}]}"#,
+                200,
+            ),
+            sse_event(
+                r#"{"choices":[{"message":{"content":"Hello there!","reasoning_content":"Let me check","tool_use":null}}]}"#,
                 300,
             ),
         ]);
