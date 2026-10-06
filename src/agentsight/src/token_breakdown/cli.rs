@@ -285,7 +285,7 @@ impl AnalyzeChatmlCommand {
         };
         let body = parsed.as_ref()?;
 
-        let tools = body.get("tools").and_then(|t| t.as_array().cloned());
+        let tools = crate::parser::llm::extract_tools_view(body);
 
         let (mut msgs, system_text) = crate::parser::llm::extract_messages_view(body)?;
         if let Some(system) = system_text {
@@ -1022,6 +1022,44 @@ mod tests {
             AnalyzeChatmlCommand::request_body_messages(&string).expect("string body parses");
         assert_eq!(msgs2, msgs);
         assert_eq!(tools2, tools);
+    }
+
+    /// DashScope/Bailian native generation requests carry the message list
+    /// under `input.messages` and every sampling parameter, tools included,
+    /// under a top-level `parameters` object. Only the top-level `tools` was
+    /// read, so a native request reported an empty tool list and its tool
+    /// definitions were missing from the breakdown, while the live request
+    /// parser has read both spellings since 30828845b.
+    #[test]
+    fn request_messages_reads_native_parameters_tools() {
+        let body = json!({
+            "model": "qwen3-max",
+            "input": {"messages": [{"role": "user", "content": "list the files"}]},
+            "parameters": {
+                "tools": [{"type": "function", "function": {"name": "noop"}}],
+            },
+        });
+        let (msgs, tools) =
+            AnalyzeChatmlCommand::request_body_messages(&body).expect("native body parses");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(
+            tools.as_ref().expect("native tools survive").len(),
+            1,
+            "parameters.tools must reach the breakdown"
+        );
+
+        // A top-level `tools` array still wins when both spellings are
+        // present, matching `parse_request_body`.
+        let both = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "top"}}],
+            "parameters": {"tools": [{"type": "function", "function": {"name": "nested"}}]},
+        });
+        let (_, tools) = AnalyzeChatmlCommand::request_body_messages(&both).expect("body parses");
+        let tools = tools.expect("tools survive");
+        assert_eq!(tools.len(), 1, "the top-level array is the one that counts");
+        assert_eq!(tools[0]["function"]["name"], "top");
     }
 
     /// An OpenAI Responses request (codex 0.137+ via /v1/responses) carries
