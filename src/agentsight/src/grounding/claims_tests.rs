@@ -339,6 +339,48 @@ fn a_markdown_link_is_not_one_glued_url() {
 }
 
 #[test]
+fn a_slash_inside_prose_is_not_a_path_claim() {
+    // `CI/CD`, `3/4` and `MB/s` are prose, not file paths, but a bare
+    // `contains('/')` classified them as Path — a hard class that anchors a
+    // finding, so an answer that merely mentions one could be reported as
+    // fabricated.
+    for text in [
+        "构建 CI/CD 流水线",
+        "耗时 3/4 秒",
+        "带宽 12 MB/s",
+        "输入/输出",
+        "and/or",
+    ] {
+        let claims = extract_claims(text);
+        assert!(
+            !claims.iter().any(|c| c.class == ClaimClass::Path),
+            "{text} must not produce a path claim: {claims:?}"
+        );
+    }
+}
+
+#[test]
+fn real_paths_are_still_path_claims() {
+    for (text, expected) in [
+        (
+            "patched /etc/agentsight/config.json",
+            "/etc/agentsight/config.json",
+        ),
+        // Edge trimming drops the leading `.` of `./x`, so the claim text is
+        // the trimmed token; a single slash plus a file name stays a path.
+        ("cat scripts/run.sh", "scripts/run.sh"),
+        ("see src/grounding/claims.rs", "src/grounding/claims.rs"),
+        ("edit config/agentsight.toml", "config/agentsight.toml"),
+    ] {
+        let claims = extract_claims(text);
+        assert!(
+            texts_of(&claims, ClaimClass::Path).contains(&expected.to_string()),
+            "{text} must still report {expected}: {claims:?}"
+        );
+    }
+}
+
+#[test]
 fn a_number_in_chinese_prose_is_still_a_claim() {
     // Verbatim from a live capture of a fabricated answer. Chinese prose puts no
     // spaces around punctuation, so `8081。其配置文件名为` is one whitespace-

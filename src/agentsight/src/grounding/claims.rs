@@ -310,17 +310,44 @@ fn as_version(word: &str) -> Option<Claim> {
 }
 
 fn as_path(word: &str) -> Option<Claim> {
-    let looks_like_path = (word.starts_with('/') || word.starts_with("./") || word.contains('/'))
-        && word.len() > 2
-        && !word.contains("://");
-    if looks_like_path {
-        return Some(Claim {
-            text: word.to_string(),
-            class: ClaimClass::Path,
-            value: None,
-        });
+    if !looks_like_path(word) {
+        return None;
     }
-    None
+    Some(Claim {
+        text: word.to_string(),
+        class: ClaimClass::Path,
+        value: None,
+    })
+}
+
+/// Whether a token names a file rather than merely containing a slash.
+///
+/// A bare `contains('/')` made prose like `CI/CD`, `3/4` or `MB/s` a `Path`,
+/// which is a hard class: it can anchor a finding, so an answer that merely
+/// mentions one could be reported as fabricated. A single separator only
+/// counts when the tail looks like a file name, and two separators mean a
+/// nested relative path on their own.
+fn looks_like_path(word: &str) -> bool {
+    if word.len() <= 2 || word.contains("://") {
+        return false;
+    }
+    if word.starts_with('/') || word.starts_with("./") || word.starts_with("~/") {
+        return true;
+    }
+    let separators = word.matches('/').count();
+    let tail = word.rsplit('/').next().unwrap_or(word);
+    separators >= 2 || (separators == 1 && has_extension(tail))
+}
+
+/// Whether a path segment ends in a short alphanumeric extension.
+fn has_extension(segment: &str) -> bool {
+    let Some((stem, extension)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 6
+        && extension.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn as_number(word: &str) -> Option<Claim> {
