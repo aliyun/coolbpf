@@ -428,11 +428,20 @@ impl InterruptionDetector {
             return events;
         }
 
+        // OpenAI and Azure OpenAI report a hard quota exhaustion as HTTP 429
+        // with `insufficient_quota`. That is a billing limit rather than a
+        // per-minute one, so rule 5.5 owns the wording and rule 2 must not
+        // answer first.
+        let is_hard_quota_exhaustion = combined_error.contains("insufficient_quota")
+            || combined_error.contains("insufficient quota")
+            || combined_error.contains("exceeded your current quota");
+
         // ── 2. RateLimit (429 / rate_limit) ────────────────────────────────────
-        if status_code == 429
-            || combined_error.contains("rate_limit")
-            || combined_error.contains("rate limit")
-            || combined_error.contains("too many requests")
+        if !is_hard_quota_exhaustion
+            && (status_code == 429
+                || combined_error.contains("rate_limit")
+                || combined_error.contains("rate limit")
+                || combined_error.contains("too many requests"))
         {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -2148,6 +2157,44 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::ResourceExhaustion
         );
+    }
+
+    #[test]
+    fn test_detect_insufficient_quota_at_429() {
+        // OpenAI and Azure OpenAI report a hard quota exhaustion as HTTP 429
+        // with `insufficient_quota`; that is a billing limit, not a per-minute
+        // rate limit, and rule 2 used to classify it as one.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
+        call.response.raw_body = Some(
+            r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#
+                .to_string(),
+        );
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn test_detect_plain_429_stays_a_rate_limit() {
+        // A retryable per-minute limit that merely mentions quota must keep
+        // its own type: only the hard exhaustion wording is reclassified.
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("status_code".to_string(), "429".to_string());
+        call.response.raw_body = Some(
+            r#"{"error":{"message":"Rate limit reached for gpt-4 in organization org-x on requests per min. Quota exceeded for quota metric 'requests'.","type":"rate_limit_exceeded"}}"#
+                .to_string(),
+        );
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::RateLimit);
     }
 
     // ── Rule 6.5: StateMachineError ─────────────────────────────────────────
