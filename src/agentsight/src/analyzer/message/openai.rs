@@ -776,7 +776,13 @@ impl OpenAIParser {
     /// # Returns
     /// * `true` if the path matches OpenAI endpoints
     pub fn matches_path(path: &str) -> bool {
-        path.contains("/v1/chat/completions")
+        // The bare spellings (a gateway whose base URL carries no `/v1`)
+        // must stay in lockstep with `parser::llm::is_llm_api_path`, which
+        // admits them: a bare-path call gets a llm_call row, so it must also
+        // be deep-parsed, or its output messages are lost.
+        path.contains("/chat/completions")
+            || path.contains("/completions")
+            || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
             // The Responses API's per-id sub-endpoints (GET retrieve, POST
             // cancel, DELETE) share the /v1/responses prefix but are not
@@ -996,6 +1002,28 @@ mod tests {
         ));
         assert!(!OpenAIParser::matches_path("/v1/messages"));
         assert!(!OpenAIParser::matches_path("/v1/embeddings"));
+    }
+
+    #[test]
+    fn bare_chat_completions_paths_reach_the_deep_parse_gate() {
+        use crate::MessageParser;
+
+        // The row gate (`parser::llm::is_llm_api_path`) admits the bare
+        // spellings a gateway whose base URL carries no `/v1` produces, so
+        // such a call gets a llm_call row. This deep-parse gate must stay in
+        // lockstep with it: without the bare spellings the row is recorded,
+        // never parsed, and a non-streaming response is left with empty
+        // output messages (a false `empty_response` interruption; ATIF and
+        // skill_metrics lose the response content).
+        assert!(OpenAIParser::matches_path("/chat/completions"));
+        assert!(OpenAIParser::matches_path("/completions"));
+        assert!(OpenAIParser::matches_path(
+            "https://gw.internal/chat/completions"
+        ));
+        assert!(MessageParser::is_llm_api_path("/chat/completions"));
+        // Neighbouring non-inference paths stay out.
+        assert!(!OpenAIParser::matches_path("/v1/embeddings"));
+        assert!(!MessageParser::is_llm_api_path("/v1/messages/count_tokens"));
     }
 
     #[test]
