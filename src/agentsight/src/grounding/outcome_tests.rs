@@ -126,6 +126,18 @@ fn t7_placeholder_payload_is_unknown_not_ok() {
     assert_eq!(v.matched_rule, "B8");
 }
 
+#[test]
+fn a_read_that_quotes_the_placeholder_marker_is_not_unknown() {
+    // A successful Read of this very source quotes the marker inside a larger
+    // payload. The call produced output, so B8 must not swallow it into
+    // Unknown and drop the observation from the evidence pool.
+    let payload = "src/agentsight/src/grounding/outcome.rs\n\
+                   const PLACEHOLDER_MARKERS: &[&str] = &[\"pending-post-tool-use\"];\n\
+                   fn is_placeholder_or_empty(text: &str) -> bool {";
+    let v = classify(&plain_call(), payload);
+    assert_eq!(v.status, CallStatus::Ok, "rule={}", v.matched_rule);
+}
+
 // ---------------------------------------------------------------------------
 // R0 / R4 / R5 and their guards
 // ---------------------------------------------------------------------------

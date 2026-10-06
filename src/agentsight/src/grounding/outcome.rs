@@ -416,7 +416,17 @@ fn command_of(call: &ToolCall) -> Option<&str> {
 }
 
 fn is_placeholder_or_empty(text: &str) -> bool {
-    text.trim().is_empty() || PLACEHOLDER_MARKERS.iter().any(|m| text.contains(m))
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // The placeholder IS the whole payload (spec B8), so the marker only
+    // counts in a payload made of that one line. The same anchoring
+    // `last_exit_code` applies to exit codes: a payload that merely quotes
+    // the marker — a file the agent read, a grep over this source — is
+    // describing something else, and reading it as "no output" turned a
+    // successful call into Unknown whose observation left the evidence pool.
+    trimmed.lines().count() == 1 && PLACEHOLDER_MARKERS.iter().any(|m| trimmed.contains(m))
 }
 
 /// Byte offset of a line inside the opening window that begins with an error
