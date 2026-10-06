@@ -249,6 +249,13 @@ impl HttpConnectionAggregator {
                 self.eviction_count = self.eviction_count.saturating_add(1);
                 self.sse_continuation_buffers.pop(&evicted_key);
                 self.last_appended_src_ptr.pop(&evicted_key);
+                // `idle_snapshotted` is a one-shot marker ("this connection's
+                // in-flight call already has a pending row") and a kernel-reused
+                // `(pid, ssl_ptr)` key would inherit it, so the next call on that
+                // key is skipped by `snapshot_idle_connections` and never gets
+                // its pending row. `last_activity` is stale for the same reason.
+                self.idle_snapshotted.pop(&evicted_key);
+                self.last_activity.pop(&evicted_key);
                 // The side caches are keyed by connection as well. Their own LRU
                 // would eventually drop these entries, but until then they hold
                 // up to 1 MiB of continuation buffer per evicted connection.
@@ -3385,6 +3392,31 @@ mod tests {
             "the evicted connection's continuation buffer must be released with it"
         );
         assert!(agg.last_appended_src_ptr.peek(&conn_a).is_none());
+    }
+
+    /// The capacity eviction above covered the continuation caches but left
+    /// `idle_snapshotted` behind. That map is a one-shot marker meaning "this
+    /// connection's in-flight call already has a pending row", and it outlives
+    /// the connection: when the kernel reuses the `(pid, ssl_ptr)` key for a
+    /// new call, `snapshot_idle_connections` skips it, so an abandoned stream
+    /// never gets the pending row the interruption and crash paths read.
+    #[test]
+    fn test_capacity_eviction_clears_the_idle_marker() {
+        let mut agg = HttpConnectionAggregator::with_capacity(1);
+        let conn_a = ConnectionId { pid: 1, ssl_ptr: 1 };
+        let conn_b = ConnectionId { pid: 1, ssl_ptr: 2 };
+
+        agg.insert(conn_a, ConnectionState::Idle);
+        agg.idle_snapshotted.push(conn_a, ());
+
+        // A second connection evicts the first by capacity.
+        agg.insert(conn_b, ConnectionState::Idle);
+
+        assert!(agg.connections.peek(&conn_a).is_none());
+        assert!(
+            agg.idle_snapshotted.peek(&conn_a).is_none(),
+            "the evicted connection's one-shot idle marker must not outlive it"
+        );
     }
 
     #[test]
