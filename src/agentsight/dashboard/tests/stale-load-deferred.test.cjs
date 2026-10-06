@@ -133,6 +133,28 @@ function deferredFetchStubs(names) {
 
 const componentStub = (name) => ({ [name]: () => null });
 
+// Depth-first walk over the classic-runtime element tree produced by the
+// react stub in loadPageModule.
+function findElement(node, predicate) {
+  if (node == null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (predicate(node)) return node;
+  return findElement(node.children, predicate);
+}
+
+function elementText(node) {
+  if (node == null || typeof node === 'boolean') return [];
+  if (typeof node === 'string' || typeof node === 'number') return [String(node)];
+  if (Array.isArray(node)) return node.flatMap(elementText);
+  return elementText(node.children);
+}
+
 // ─── SecurityObservabilityPage ────────────────────────────────────────────────
 //
 // Hook-slot map (useState and useRef share one cursor, exactly like React;
@@ -141,7 +163,7 @@ const componentStub = (name) => ({ [name]: () => null });
 //   2 activeTab ('overview') · 3 status · 20 eventDetail · 23 securitySessions
 //   26 selectedSessionId · 38/39/40/41 overview/events/sessions/eventDetail refs
 // useCallback order: loadStatus, loadOverview, loadEvents, loadSessions,
-//   loadEventDetail, handleRefresh.
+//   loadEventDetail, queryEvents, clearEventFilters, handleRefresh.
 
 function renderSecurityPage() {
   const { calls, stubs } = deferredFetchStubs([
@@ -478,6 +500,48 @@ test('security event detail: clicking A then B with A resolving last must still 
     'the detail loading flag must be cleared by the newest request only');
 });
 
+test('security events query: the Query button re-issues the request with unchanged filters', async () => {
+  const { calls, driver, page } = renderSecurityPage();
+
+  // Enter the events tab: the dep-driven effect issues the first page request.
+  driver.slots[2].setter('events');
+  const rendered = driver.render(page);
+  rendered.effects[2]();
+  assert.equal(calls.fetchSecurityEvents.length, 1, 'entering the tab must load the first page');
+  calls.fetchSecurityEvents[0].resolve({
+    state: 'ok',
+    data: { items: [], total: 0, offset: 0, limit: 25, next_offset: null },
+  });
+  await settle();
+
+  // Render the REAL EventsTab with the props the page passed, then invoke the
+  // Query button's actual onClick. The draft filters are still the same object
+  // as the applied ones, which is exactly the case that used to make React
+  // bail out of the state write and skip the reload.
+  const tabElement = findElement(rendered.element, (node) => (
+    node.props && typeof node.props.loadEvents === 'function' && node.props.eventFilters
+  ));
+  assert.ok(tabElement, 'the events tab must be rendered');
+  const eventsTabDriver = createHooksDriver();
+  const eventsTabModule = loadPageModule('src/pages/security/EventsTab.tsx', {
+    '../../i18n': { useI18n: () => ({ t: (key) => key }) },
+    './EventTable': componentStub('EventTable'),
+    './types': { EMPTY_EVENT_FILTERS: {} },
+  }, eventsTabDriver);
+  const tabRendered = eventsTabDriver.render(eventsTabModule.EventsTab, tabElement.props);
+  const queryButton = findElement(tabRendered.element, (node) => (
+    node.type === 'button' && elementText(node).includes('common.query')
+  ));
+  assert.ok(queryButton, 'the Query button must exist');
+  await queryButton.props.onClick();
+
+  assert.equal(
+    calls.fetchSecurityEvents.length,
+    2,
+    'Query must re-issue the request even when the draft filters are unchanged',
+  );
+});
+
 // ─── SkillMetricsPage ─────────────────────────────────────────────────────────
 //
 // Hook-slot map: 0 startMs · 1 endMs · 2 agentName · 3 agents · 4 granularity
@@ -529,6 +593,48 @@ test('skill metrics: an older range agent list must not overwrite the newer rang
     'the older range response must not overwrite the newer range agent list');
 });
 
+test('skill metrics: a failed reload must not keep the previous report', async () => {
+  const { calls, stubs } = deferredFetchStubs(['fetchSkillMetrics', 'fetchAgentNames']);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../i18n': { useI18n: () => ({ t: (key) => key }) },
+    recharts: {
+      ...componentStub('BarChart'), ...componentStub('Bar'), ...componentStub('XAxis'),
+      ...componentStub('YAxis'), ...componentStub('Tooltip'), ...componentStub('ResponsiveContainer'),
+    },
+    '../utils/apiClient': { ...stubs },
+    '../components/DateTimePicker': componentStub('DateTimePicker'),
+  };
+  const pageModule = loadPageModule('src/pages/SkillMetricsPage.tsx', moduleStubs, driver);
+  const page = pageModule.SkillMetricsPage;
+
+  // The first load answers with a report for the default window.
+  let rendered = driver.render(page);
+  const firstLoad = rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 1);
+  calls.fetchSkillMetrics[0].resolve({ event_count: 7, loads: { total_loads: 1, loads: {} } });
+  await firstLoad;
+  await settle();
+  assert.ok(driver.slots[5].value, 'sanity: the first report must be stored');
+
+  // The agent filter changes (slot 2 is agentName); React re-runs the loader
+  // effect and the new request fails.
+  driver.slots[2].setter('alpha');
+  rendered = driver.render(page);
+  const secondLoad = rendered.effects[0]();
+  assert.equal(calls.fetchSkillMetrics.length, 2, 'the filter change must re-issue the load');
+  calls.fetchSkillMetrics[1].reject(new Error('boom'));
+  await secondLoad;
+  await settle();
+
+  assert.equal(
+    driver.slots[5].value,
+    null,
+    "a failed reload must not keep the previous agent's/range's report under the new controls",
+  );
+  assert.equal(driver.slots[7].value, 'boom', 'the error banner must explain the newest failure');
+});
+
 test('security overview: a failed card must not keep the previous range payload', async () => {
   const { calls, driver, rendered } = renderSecurityPage();
   const loadOverview = rendered.callbacks[1];
@@ -562,4 +668,132 @@ test('security overview: a failed card must not keep the previous range payload'
     null,
     "a failed card must not show the previous range's events under the new range",
   );
+});
+
+// ─── CausalAttributionPanel ──────────────────────────────────────────────────
+//
+// Hook-slot map: 0 complaint · 1 loading · 2 error · 3 caseData · 4 cached
+// 5 history · 6 selectedAltIdx · 7 stageIdx · 8 elapsed · 9 requestVersion ref
+// Effect per render: [history load + request-version bump].
+
+function findNode(node, predicate) {
+  if (node == null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findNode(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (predicate(node)) return node;
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      const found = findNode(child, predicate);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function renderCausalPanel() {
+  const { calls, stubs } = deferredFetchStubs(['runCausalAttribution']);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../utils/apiClient': { ...stubs },
+  };
+  const module = loadPageModule('src/components/CausalAttributionPanel.tsx', moduleStubs, driver);
+  const panel = module.CausalAttributionPanel;
+  assert.equal(typeof panel, 'function', 'CausalAttributionPanel must be a component');
+  const rendered = driver.render(panel, {
+    sessionId: 'sess-1',
+    roundIndex: 0,
+    roundLabel: '第 1 轮',
+  });
+  assert.equal(driver.slots[0].value, '', 'slot 0 must be the complaint field');
+  assert.equal(driver.slots[3].value, null, 'slot 3 must be caseData');
+  rendered.effects[0](); // mount: load this (session, round)'s history
+  return { calls, driver, panel, rendered };
+}
+
+test('causal attribution: a run superseded by a round switch must discard its result', async () => {
+  // The attribution call takes seconds. If the user switches rounds while it
+  // is in flight, the late response used to write its case, cache flag,
+  // selected alternative, and history entry unconditionally — rendering the
+  // old round's verdict and graph under the new round's label. The run must
+  // be bound to the request version of the (session, round) it was started
+  // for and drop its result once that version is superseded.
+  const previousWindow = global.window;
+  global.window = { setInterval: global.setInterval, clearInterval: global.clearInterval };
+  let calls;
+  try {
+    const setup = renderCausalPanel();
+    const { driver, panel } = setup;
+    calls = setup.calls;
+
+    // Type a complaint and re-render so the run button enables.
+    driver.slots[0].setter('这轮引用靠谱吗？');
+    let rendered = driver.render(panel, {
+      sessionId: 'sess-1',
+      roundIndex: 0,
+      roundLabel: '第 1 轮',
+    });
+    const runButton = findNode(
+      rendered.element,
+      (node) =>
+        node.type === 'button'
+        && Array.isArray(node.children)
+        && node.children.filter((c) => typeof c === 'string').join('').includes('发起归因'),
+    );
+    assert.ok(runButton, 'the run button must exist');
+    assert.equal(typeof runButton.props.onClick, 'function');
+
+    // Round 1's run starts and stays in flight.
+    const runPromise = runButton.props.onClick();
+    assert.equal(calls.runCausalAttribution.length, 1, 'the run must issue one request');
+    assert.equal(calls.runCausalAttribution[0].args[0].round_index, 0);
+
+    // The user switches to round 2 while round 1's attribution is pending.
+    rendered = driver.render(panel, {
+      sessionId: 'sess-1',
+      roundIndex: 1,
+      roundLabel: '第 2 轮',
+    });
+    rendered.effects[0](); // the prop change bumps the request version
+
+    // Round 1's slow response lands last with a distinctive case.
+    calls.runCausalAttribution[0].resolve({
+      case: {
+        id: 'case-round-1',
+        title: 'round 1',
+        verdict: 'round 1 verdict',
+        outcome: 'fail',
+        nodes: [],
+        edges: [],
+      },
+      cached: false,
+    });
+    await runPromise;
+    await settle();
+    await settle();
+
+    assert.equal(
+      driver.slots[3].value,
+      null,
+      "the superseded round's verdict must not render under round 2's label",
+    );
+    assert.deepEqual(
+      driver.slots[5].value,
+      [],
+      "the superseded run's history entry must not be filed under round 1's replacement",
+    );
+    assert.equal(driver.slots[1].value, false, 'round 2 must not be left loading by round 1');
+  } finally {
+    // An assertion before the deferred lands must not leave the run's
+    // interval keeping the test process alive.
+    (calls ? calls.runCausalAttribution : []).forEach((call) =>
+      call.resolve({ case: null, cached: false }),
+    );
+    if (previousWindow === undefined) delete global.window;
+    else global.window = previousWindow;
+  }
 });
