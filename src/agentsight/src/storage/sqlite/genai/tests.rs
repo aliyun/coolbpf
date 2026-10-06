@@ -386,6 +386,91 @@ fn test_get_token_timeseries_returns_buckets() {
     cleanup_db(&path);
 }
 
+/// A row whose output_tokens is NULL (interrupted / never-recorded output)
+/// still contributes its input tokens, so a bucket's total_tokens must equal
+/// input_tokens + output_tokens. The unguarded SUM(input + output) dropped the
+/// whole row from the total while input_tokens kept it, breaking the
+/// invariant total >= input.
+#[test]
+fn test_token_totals_survive_null_output_tokens() {
+    let path = std::env::temp_dir().join(format!(
+        "test_genai_null_output_totals_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        let sql = "INSERT INTO genai_events (\
+                   call_id, event_type, start_timestamp_ns, end_timestamp_ns,\
+                   provider, model, input_tokens, output_tokens,\
+                   agent_name, pid, status, event_json\
+                   ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,'complete','{}')";
+        conn.execute(
+            sql,
+            params![
+                "null-out",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                "openai",
+                "gpt-4",
+                100_i64,
+                None::<i64>,
+                "agent-n",
+                1_i32
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "full-row",
+                BASE_NS + STEP_NS,
+                BASE_NS + 2 * STEP_NS,
+                "openai",
+                "gpt-4",
+                50_i64,
+                25_i64,
+                "agent-n",
+                1_i32
+            ],
+        )
+        .unwrap();
+    }
+
+    let bucket = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 2 * STEP_NS, None, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(bucket.input_tokens, 150, "NULL output must not hide input");
+    assert_eq!(bucket.output_tokens, 25);
+    assert_eq!(
+        bucket.total_tokens, 175,
+        "total must equal input + output, not drop NULL-output rows"
+    );
+
+    let model_bucket = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 2 * STEP_NS, None, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(model_bucket.total_tokens, 175);
+
+    let summary = store.get_agent_token_summary().unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].input_tokens, 150);
+    assert_eq!(summary[0].output_tokens, 25);
+    assert_eq!(summary[0].total_tokens, 175);
+
+    drop(store);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_token_timeseries_respects_requested_bucket_count() {
     // A span of 5 steps over 3 buckets floors bucket_ns to 5*STEP/3, and the
