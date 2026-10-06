@@ -102,6 +102,15 @@ impl GenAIBuilder {
                     .and_then(|t| t.model.as_ref().filter(|m| !m.is_empty()).cloned())
             })
             .or_else(|| Self::extract_model_from_body(&http.request_body, &http.response_body))
+            // Gemini names the model in the URL path
+            // (`/v1beta/models/{model}:generateContent`) while its body carries
+            // only `contents`/`generationConfig`, so neither the body walk nor
+            // the token record — absent for a call whose usage was not parsed —
+            // can supply it. The audit reads the same path for the same reason.
+            .or_else(|| {
+                crate::analyzer::message::MessageParser::gemini_model_from_path(&http.path)
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "unknown".to_string());
 
         // 在 request move 之前提取用户查询 / first&last user message 原文
@@ -1370,6 +1379,25 @@ mod tests {
         let http = make_http("/v1/chat/completions", Some(body), None);
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert!(call.error.is_none());
+    }
+
+    /// A Gemini generation call whose usage was not parsed carries no token
+    /// record to fall back on, and its body holds no `model` field: both the
+    /// provider and the model live in the path. Without reading it the row was
+    /// exported as provider/model `unknown` — while the audit labelled the same
+    /// call `gemini` and read the model from that very path.
+    #[test]
+    fn gemini_generation_call_without_a_token_record_keeps_its_path_identity() {
+        let builder = GenAIBuilder::new();
+        let path = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse";
+        let body = r#"[{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-2.5-pro"}]"#;
+        let mut http = make_http(path, None, Some(body.to_string()));
+        http.is_sse = true;
+
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).expect("call");
+
+        assert_eq!(call.provider, "gemini");
+        assert_eq!(call.model, "gemini-2.5-pro");
     }
 
     #[test]
