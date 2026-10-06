@@ -388,6 +388,15 @@ impl InterruptionDetector {
         };
         let combined_error = format!("{error_text} {response_error_body}").to_ascii_lowercase();
 
+        // Bound here rather than at the safety-filter rule below: the
+        // context-overflow rule needs it too, and it has to run before the
+        // stream rules that read the same value.
+        let finish_reason = call
+            .response
+            .messages
+            .first()
+            .and_then(|m| m.finish_reason.as_deref());
+
         let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")
             || combined_error.contains("context window")
@@ -398,6 +407,11 @@ impl InterruptionDetector {
             || combined_error.contains("tokens_limit_reached")
             || combined_error.contains("context limit")
             || combined_error.contains("exceeds the model")
+            // Anthropic reports a generation that filled the context window as
+            // a terminal stop reason of its own ("treat the response as
+            // truncated"): the answer was cut at the window boundary, not by
+            // the stream, so it is a context overflow and not `sse_truncated`.
+            || finish_reason == Some("model_context_window_exceeded")
             // HTTP 413 from some gateways
             || status_code == 413;
 
@@ -574,11 +588,6 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        let finish_reason = call
-            .response
-            .messages
-            .first()
-            .and_then(|m| m.finish_reason.as_deref());
         if finish_reason == Some("content_filter") {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -1031,6 +1040,53 @@ mod tests {
         }];
         let events = detector.detect(&call);
         assert!(events.is_empty());
+    }
+
+    /// Anthropic reports a generation that filled the context window as a
+    /// terminal `stop_reason` of its own. The stream completed — the answer was
+    /// cut at the window boundary — so it is a context overflow, not a
+    /// truncated stream, and before this it was the only stop reason in neither
+    /// list: rule 8 reported SseTruncated (High) and the real type was lost.
+    #[test]
+    fn test_model_context_window_exceeded_is_context_overflow() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 5_000_000_000; // > 1 second min
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("model_context_window_exceeded".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
+    }
+
+    /// The same stop reason on a call that did not stream reaches the same
+    /// classification, and in particular never reads as a truncated stream.
+    #[test]
+    fn test_context_window_exceeded_is_not_stream_truncation() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.duration_ns = 5_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("model_context_window_exceeded".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ContextOverflow
+        );
     }
 
     #[test]
