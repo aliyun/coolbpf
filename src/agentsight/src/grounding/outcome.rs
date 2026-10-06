@@ -98,7 +98,10 @@ const FAILURE_SIGNATURES: &[&str] = &[
 
 /// Commands whose whole purpose is to ask whether something exists. A non-zero
 /// exit from these is the answer, not a fault (spec B3).
-const PROBE_COMMANDS: &[&str] = &["ls", "test", "which", "stat", "pgrep", "ping"];
+///
+/// `[` and `[[` are the POSIX and bash spellings of `test`, so they answer the
+/// same question and belong to the same list.
+const PROBE_COMMANDS: &[&str] = &["ls", "test", "[", "[[", "which", "stat", "pgrep", "ping"];
 
 /// Payload markers meaning the call never actually produced output (spec B8).
 const PLACEHOLDER_MARKERS: &[&str] = &["pending-post-tool-use"];

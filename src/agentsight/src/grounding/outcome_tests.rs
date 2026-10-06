@@ -227,6 +227,19 @@ fn probe_chain_of_only_probes_is_expected() {
 }
 
 #[test]
+fn bracket_probe_is_expected() {
+    // `[` and `[[` are the POSIX and bash spellings of `test`: a single
+    // bracket probe that exits non-zero is the answer, not a fault (spec B3).
+    let v = classify(&bash_call("[ -f /var/log/app.log ]"), "Exit code 1");
+    assert_eq!(v.status, CallStatus::OkProbe, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "B3");
+
+    let v = classify(&bash_call("[[ -f /var/log/app.log ]]"), "Exit code 1");
+    assert_eq!(v.status, CallStatus::OkProbe, "rule={}", v.matched_rule);
+    assert_eq!(v.matched_rule, "B3");
+}
+
+#[test]
 fn multiline_command_with_a_real_segment_is_not_a_probe() {
     // Newlines chain commands exactly like `;` and `&&` do. Splitting only on
     // the ASCII separators judged the whole script by its first line's head,
