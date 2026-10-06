@@ -343,6 +343,73 @@ def test_campaign_validation_rejects_unsafe_formal_inputs(tmp_path: Path) -> Non
     )
 
 
+def test_campaign_validation_classifies_malformed_shapes(
+    tmp_path: Path,
+) -> None:
+    """Malformed sections, QPS members, and thresholds get actionable errors."""
+    from test_benchmark import campaign_data
+
+    base = campaign_data(tmp_path)
+
+    def invalid(mutator: Callable[[dict[str, object]], None], message: str) -> None:
+        value = deepcopy(base)
+        mutator(value)
+        with pytest.raises((TypeError, ValueError), match=message):
+            campaign.validate_campaign(value)
+
+    invalid(lambda value: value.update(capacity=None), "capacity must be an object")
+    invalid(
+        lambda value: value.update(capacity=[{"qps_start": 100}]),
+        "capacity must be an object",
+    )
+    invalid(lambda value: value.update(matrix="matrix"), "matrix must be an object")
+    invalid(lambda value: value.update(matrix=None), "matrix must be an object")
+    invalid(
+        lambda value: value["matrix"].update(qps=[1, [2], 3, 4, 5]),
+        "positive integers",
+    )
+    invalid(
+        lambda value: value["matrix"].update(qps=[1, {"qps": 2}, 3, 4, 5]),
+        "positive integers",
+    )
+    invalid(lambda value: value["matrix"].update(qps=5), "matrix.qps must be a list")
+    invalid(
+        lambda value: value["matrix"].update(qps="auto"), "matrix.qps must be a list"
+    )
+    invalid(
+        lambda value: value["thresholds"].update(max_p99_ms=10**400),
+        "finite non-negative",
+    )
+    invalid(
+        lambda value: value["thresholds"].update(max_p99_ms=-(10**400)),
+        "finite non-negative",
+    )
+    invalid(
+        lambda value: value["capacity"].update(search_start_ratio=10**400),
+        "search_start_ratio",
+    )
+    invalid(
+        lambda value: value["recovery"].update(tolerance_ratio=False),
+        "tolerance_ratio",
+    )
+    invalid(
+        lambda value: value["recovery"].update(tolerance_ratio=True),
+        "tolerance_ratio",
+    )
+
+    campaign.validate_campaign(base)
+    empty_qps = deepcopy(base)
+    empty_qps["matrix"]["qps"] = []
+    campaign.validate_campaign(empty_qps)
+    finite = deepcopy(base)
+    finite["thresholds"]["max_p99_ms"] = 1e9
+    campaign.validate_campaign(finite)
+    ratio = deepcopy(base)
+    ratio["thresholds"]["min_token_accuracy"] = 1.01
+    with pytest.raises(ValueError, match="ratio between 0 and 1"):
+        campaign.validate_campaign(ratio)
+
+
 def test_capacity_requires_a_confirmed_failure_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -79,6 +79,7 @@ struct ApplyingGenerationEnforcer {
     lease_pause: Mutex<Option<LeasePause>>,
     apply_calls: AtomicUsize,
     detach_calls: AtomicUsize,
+    reverse_failures: AtomicUsize,
 }
 
 struct TestReadinessLease;
@@ -102,11 +103,16 @@ impl ApplyingGenerationEnforcer {
             lease_pause: Mutex::new(None),
             apply_calls: AtomicUsize::new(0),
             detach_calls: AtomicUsize::new(0),
+            reverse_failures: AtomicUsize::new(0),
         }
     }
 
     fn pause_next_lease(&self) -> LeasePauseHandle {
         pause_next(&self.lease_pause)
+    }
+
+    fn fail_next_reverse(&self) {
+        self.reverse_failures.fetch_add(1, Ordering::AcqRel);
     }
 
     fn stamp(&self) {
@@ -196,6 +202,11 @@ impl ContainmentEnforcer for ApplyingGenerationEnforcer {
         &self,
         action_id: Uuid,
     ) -> Result<StampedBinding, ContainmentEnforcerError> {
+        if self.reverse_failures.swap(0, Ordering::AcqRel) > 0 {
+            return Err(ContainmentEnforcerError::Unavailable(
+                "test enforcer is transiently unavailable".into(),
+            ));
+        }
         let forward_key = TransitionKey {
             action_id,
             direction: TransitionDirection::Forward,
@@ -337,6 +348,64 @@ fn apply_ack_from_generation_a_cannot_activate_under_generation_b() {
     assert_active(&security_store, case_id, &action);
     assert_eq!(enforcer.apply_calls.load(Ordering::Acquire), 1);
     assert_eq!(enforcer.detach_calls.load(Ordering::Acquire), 0);
+    target.kill().expect("live test target should stop");
+    target.wait().expect("live test target should be reaped");
+}
+
+#[test]
+fn restore_budget_is_not_consumed_by_attach_retries() {
+    // `attempt_count` serves two regimes: uncapped pending-attach retries
+    // (one per transient enforcer blip) and the capped audit-restore budget
+    // (terminal Failed at RESTORE_MAX_RETRIES). A containment that survived
+    // four attach blips before activating must still receive the full
+    // restore budget when its first detach hits one transient failure,
+    // instead of going terminal on the first restore attempt.
+    let source_binding_id = Uuid::new_v4();
+    let action_binding_id = Uuid::new_v4();
+    let mut target = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("live test target should start");
+    let pid = i32::try_from(target.id()).expect("test PID should fit in i32");
+    let process_start_time =
+        read_process_start_time(pid).expect("live test process should have a start time");
+    let enforcer = Arc::new(ApplyingGenerationEnforcer::new(binding(
+        source_binding_id,
+        pid,
+        process_start_time,
+        audit_policy("/root/secret.txt"),
+    )));
+    let (security_store, case_id, mut action) = security_fixture(
+        source_binding_id,
+        action_binding_id,
+        pid,
+        process_start_time,
+    );
+    action.lifecycle_state = ContainmentLifecycle::Active;
+    action.attempt_count = 4;
+    action.next_retry_at_ns = None;
+    security_store
+        .update_containment_action(&action)
+        .expect("action should become active");
+    enforcer.fail_next_reverse();
+    let enforcer_trait: Arc<dyn ContainmentEnforcer> = enforcer.clone();
+    let containment = ContainmentCoordinator::new(Arc::clone(&security_store), enforcer_trait);
+
+    assert!(matches!(
+        containment.reconcile_once(3 * SECOND_NS),
+        Err(ContainmentError::Enforcer(_))
+    ));
+
+    let restored = latest_action(&security_store, case_id);
+    assert_eq!(
+        restored.lifecycle_state,
+        ContainmentLifecycle::Expiring,
+        "one transient detach failure must schedule a restore retry"
+    );
+    assert!(
+        restored.next_retry_at_ns.is_some(),
+        "the restore budget must not be pre-consumed by attach retries"
+    );
     target.kill().expect("live test target should stop");
     target.wait().expect("live test target should be reaped");
 }

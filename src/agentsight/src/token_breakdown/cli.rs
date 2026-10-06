@@ -573,6 +573,8 @@ mod tests {
     use super::*;
     use crate::tokenizer::LlmTokenizer;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Minimal HuggingFace tokenizer (WordLevel + Whitespace) so the ChatML
     /// path can be exercised in tests without the network or the real Qwen
@@ -618,15 +620,38 @@ mod tests {
   "model_max_length": 32768
 }"#;
 
+    /// Each call writes the fixture to a UNIQUE temp directory: the tests in
+    /// this module run in parallel inside one test binary (one PID), so a
+    /// PID-keyed path is shared by every test and a concurrent writer
+    /// truncates the JSON under a reader's feet ("EOF while parsing a
+    /// value"). Mirrors the `TemporaryRegularFile` idiom in
+    /// `enforcement::target`: PID + nanosecond timestamp + atomic counter.
     fn fixture_tokenizer() -> LlmTokenizer {
-        let dir =
-            std::env::temp_dir().join(format!("agentsight-chatml-fixture-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let pid = std::process::id();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after UNIX_EPOCH")
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight-chatml-fixture-{pid}-{timestamp}-{counter}"
+        ));
+        // `create_dir`, not `create_dir_all`: a path collision must fail
+        // loudly, never silently share the directory again.
+        std::fs::create_dir(&dir).expect("create unique fixture dir");
         let tokenizer_path = dir.join("tokenizer.json");
         let config_path = dir.join("tokenizer_config.json");
         std::fs::write(&tokenizer_path, TOKENIZER_JSON).expect("write tokenizer.json");
         std::fs::write(&config_path, TOKENIZER_CONFIG_JSON).expect("write tokenizer_config.json");
-        LlmTokenizer::from_file(&tokenizer_path, &config_path).expect("fixture tokenizer loads")
+        let tokenizer = LlmTokenizer::from_file(&tokenizer_path, &config_path)
+            .expect("fixture tokenizer loads");
+        // The tokenizer is loaded fully into memory, so the fixture files can
+        // go away immediately; unique paths must not pile up in the temp dir
+        // across test runs.
+        let _ = std::fs::remove_dir_all(&dir);
+        tokenizer
     }
 
     #[test]

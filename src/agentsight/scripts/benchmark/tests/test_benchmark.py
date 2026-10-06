@@ -23,6 +23,7 @@ sys.path.insert(0, str(CAMPAIGN_DIR))
 sys.path.insert(0, str(SINGLE_RUN_DIR))
 
 import aggregate_report
+import benchmark_stats
 import campaign
 import campaign_evaluation
 import campaign_evidence
@@ -2746,3 +2747,80 @@ def test_regression_main_builds_targeted_and_full_commands(
     assert workspace_test[workspace_test.index("--jobs") + 1] == "1"
     report = json.loads((tmp_path / "single-job/regression.json").read_text())
     assert report["cargo_jobs"] == 1
+
+
+@pytest.mark.parametrize(
+    ("samples", "window_seconds", "expected"),
+    [
+        pytest.param([], 300, None, id="empty"),
+        pytest.param([(0.0, 5.0)], 300, None, id="single"),
+        pytest.param(
+            [(0.0, 10.0), (1.0, 9.0), (2.0, 8.0)], 300, 0.0, id="decreasing"
+        ),
+        pytest.param([(0.0, 10.0), (100.0, 5.0)], 50, 0.0, id="evicted-decrease"),
+        pytest.param(
+            [(5.0, 3.0), (5.0, 1.0), (6.0, 2.0)], 1, 1.0, id="duplicate-times"
+        ),
+        pytest.param(
+            [(0.0, 10.0), (300.0, 1.0), (600.0, 5.0)],
+            300,
+            4.0,
+            id="inclusive-boundary",
+        ),
+        pytest.param([(0.0, 1.0), (1.0, 5.0)], 300, 4.0, id="basic"),
+        pytest.param(
+            [(0.0, 100.0), (10.0, 50.0), (20.0, 300.0)],
+            100,
+            250.0,
+            id="full-window",
+        ),
+        pytest.param(
+            [(0.0, 5.0), (0.0, 3.0), (1.0, 4.0)], 0, 0.0, id="zero-window"
+        ),
+        pytest.param(
+            [(0.0, 8.0), (1.0, 2.0), (2.0, 6.0), (400.0, 1.0), (401.0, 9.0)],
+            300,
+            8.0,
+            id="trough-later",
+        ),
+    ],
+)
+def test_rolling_max_increase_preserves_window_outcomes(
+    samples: list[tuple[float, float]], window_seconds: float, expected: float | None
+) -> None:
+    """Window outcomes match the values produced by the rescan baseline."""
+    assert benchmark_stats.rolling_max_increase(samples, window_seconds) == expected
+
+
+class _ComparisonCountingValue:
+    """Sample value that counts value comparisons during trend scans."""
+
+    __slots__ = ("value",)
+    comparisons = 0
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __lt__(self, other: "_ComparisonCountingValue") -> bool:
+        type(self).comparisons += 1
+        return self.value < other.value
+
+    def __sub__(self, other: "_ComparisonCountingValue") -> float:
+        return self.value - other.value
+
+    def __rsub__(self, other: "_ComparisonCountingValue") -> float:
+        return other.value - self.value
+
+
+def test_rolling_max_increase_bounds_comparison_work() -> None:
+    """A monotonic-minimum deque keeps rolling scans linear in samples."""
+    size = 2000
+    samples = [
+        (float(second), _ComparisonCountingValue(second)) for second in range(size)
+    ]
+    _ComparisonCountingValue.comparisons = 0
+    result = benchmark_stats.rolling_max_increase(samples, 1000)
+    assert result == 1000
+    # The rescan baseline performs 1,499,500 value comparisons here; a
+    # monotonic minimum deque performs amortized constant work per sample.
+    assert _ComparisonCountingValue.comparisons <= 3 * size

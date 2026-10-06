@@ -267,12 +267,18 @@ impl GenAISqliteStore {
                        ORDER BY start_timestamp_ns ASC";
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map(params![sid], |row| {
-                let call_id: String = row.get(0)?;
+                // `call_id` is nullable in the schema; a NULL (only producible
+                // by a foreign writer) must not error the whole map.
+                let call_id: Option<String> = row.get(0)?;
                 Ok(call_id)
             })?;
 
             for (idx, row) in rows.enumerate() {
-                let call_id: String = row?;
+                let call_id = row?;
+                // A malformed row with a NULL call_id has no key to map, so
+                // skip it instead of failing the turn lookup — same guard as
+                // `get_tool_call_turn_indices` below.
+                let Some(call_id) = call_id else { continue };
                 // 1-based turn index
                 result.insert(call_id, idx + 1);
             }

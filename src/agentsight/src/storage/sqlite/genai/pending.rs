@@ -721,6 +721,12 @@ impl GenAISqliteStore {
 
     /// Enrich a pending record with data extracted from captured SSE events.
     /// Updates model, trace_id, provider, output_messages, sse_event_count, and token counts.
+    ///
+    /// Only rows still in 'pending' are touched: a call that already completed
+    /// holds the authoritative full-response values, and `insert_pending`
+    /// returns early (leaving an existing completed row in place) when the
+    /// same call_id is captured twice, so an enrichment issued after such a
+    /// replay must not partially overwrite the completed row.
     pub fn enrich_pending_from_sse(
         &self,
         call_id: &str,
@@ -750,7 +756,7 @@ impl GenAISqliteStore {
                 total_tokens     = COALESCE(?7, input_tokens, 0)
                                  + COALESCE(?8, output_tokens, 0),
                 tool_call_ids    = COALESCE(?9, tool_call_ids)
-             WHERE call_id = ?1",
+             WHERE call_id = ?1 AND status = 'pending'",
             params![
                 call_id,
                 enrichment.model,
