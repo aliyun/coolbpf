@@ -269,7 +269,17 @@ impl GenAIBuilder {
         None
     }
 
-    /// Extract provider from path
+    /// Extract provider from path.
+    ///
+    /// The path is the most specific source the genai call has: a Gemini
+    /// generation call carries neither a `model` field in its body nor (on the
+    /// audit side) a token record, and the shared LLM gate already admits the
+    /// path as a call (`parser::llm::is_llm_api_path` gained the same
+    /// `:generateContent` actions in 8d77de789). Without this branch the row
+    /// fell through to the token record and, when there was none, was recorded
+    /// as provider `unknown` — while the audit labels the same path `gemini`
+    /// through `MessageParser::detect_provider`, so one call had two
+    /// identities.
     pub(super) fn extract_provider_from_path(&self, path: &str) -> Option<String> {
         if path.contains("anthropic") || path.contains("/v1/messages") {
             Some("anthropic".to_string())
@@ -282,6 +292,12 @@ impl GenAIBuilder {
             Some("sysom".to_string())
         } else if crate::parser::llm::is_dashscope_native_path(path) {
             Some("dashscope".to_string())
+        } else if crate::analyzer::message::MessageParser::gemini_model_from_path(path).is_some() {
+            // The model rides in the path for Gemini's inference actions, so a
+            // path that names one is a Gemini generation call (`:countTokens`
+            // returns `None` there and stays out, like every other
+            // token-counting sub-endpoint).
+            Some("gemini".to_string())
         } else {
             None
         }
@@ -799,6 +815,35 @@ mod tests {
             builder.extract_provider_from_path("/compatible-mode/v1/chat/completions"),
             Some("openai".to_string())
         );
+    }
+
+    /// Gemini's generation actions carry the model in the path while the body
+    /// holds only `contents`/`generationConfig`, so a call whose usage was not
+    /// parsed had no source left: it fell through the token record to
+    /// `unknown`, while the audit labels the same path `gemini` through
+    /// `MessageParser::detect_provider`.
+    #[test]
+    fn test_extract_provider_from_path_gemini_generation() {
+        let builder = GenAIBuilder::new();
+        for path in [
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+            "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:generateContent",
+        ] {
+            assert_eq!(
+                builder.extract_provider_from_path(path),
+                Some("gemini".to_string()),
+                "{path}"
+            );
+        }
+        // Token counting shares the prefix but is not an inference call, and a
+        // bare models path names no action at all.
+        assert_eq!(
+            builder.extract_provider_from_path("/v1beta/models/gemini-2.5-pro:countTokens"),
+            None
+        );
+        assert_eq!(builder.extract_provider_from_path("/v1beta/models"), None);
     }
 
     #[test]
