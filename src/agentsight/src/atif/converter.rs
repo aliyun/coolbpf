@@ -896,6 +896,73 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn json_array_facts_ground_through_typed_replay() {
+        use crate::grounding::evidence::{Grounding, build_index};
+        for response in [
+            serde_json::json!({"counts": [119,120]}),
+            serde_json::json!("{\"counts\":[119,120]}"),
+            serde_json::json!("{\"counts\":[119, 120]}"),
+        ] {
+            for (statement, unresolved) in [
+                ("The counts are 119 and 120.", 0),
+                ("The count is 119120.", 1),
+            ] {
+                let events = vec![
+                    call_event(
+                        1,
+                        1_000_000_000,
+                        Some(vec![OutputMessage {
+                            role: "assistant".into(),
+                            name: None,
+                            finish_reason: Some("tool_call".into()),
+                            parts: vec![MessagePart::ToolCall {
+                                id: Some("facts".into()),
+                                name: "Read".into(),
+                                arguments: Some(serde_json::json!({"file_path":"/tmp/facts.json"})),
+                            }],
+                        }]),
+                        None,
+                        None,
+                    ),
+                    call_event(
+                        2,
+                        3_000_000_000,
+                        Some(vec![OutputMessage {
+                            role: "assistant".into(),
+                            name: None,
+                            finish_reason: Some("stop".into()),
+                            parts: vec![MessagePart::Text {
+                                content: statement.into(),
+                            }],
+                        }]),
+                        Some(vec![InputMessage {
+                            role: "tool".into(),
+                            name: None,
+                            parts: vec![MessagePart::ToolCallResponse {
+                                id: Some("facts".into()),
+                                response: response.clone(),
+                            }],
+                        }]),
+                        None,
+                    ),
+                ];
+                let doc = convert_trace_to_atif("array-facts", events).unwrap();
+                let index = build_index(&doc, 0..doc.steps.len());
+                assert_eq!(
+                    index.unresolved_count(),
+                    unresolved,
+                    "{response}: {statement}"
+                );
+                assert_eq!(index.has_deterministic_finding(), unresolved != 0);
+                if unresolved == 0 {
+                    assert!(index.claims.iter().all(|c| matches!(&c.grounding,
+                        Grounding::Grounded { source_call_id: Some(id), .. } if id == "facts")));
+                }
+            }
+        }
+    }
+
     /// Two-call chain: system + user + two agent steps, the first correlating a
     /// tool call with the response replayed in the second call's input.
     pub(crate) fn two_call_chain() -> Vec<TraceEventDetail> {
