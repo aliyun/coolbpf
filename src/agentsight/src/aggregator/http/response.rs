@@ -169,7 +169,8 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
             "response.output_text.delta"
             | "response.reasoning_text.delta"
             | "response.reasoning_summary_text.delta"
-            | "response.function_call_arguments.delta" => {
+            | "response.function_call_arguments.delta"
+            | "response.refusal.delta" => {
                 return non_empty_string(value.get("delta"));
             }
             "content_block_delta" => {
@@ -273,6 +274,7 @@ pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> 
                     || non_empty_string(message.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("content")))
                     || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
+                    || non_empty_string(delta.and_then(|item| item.get("refusal")))
                     || delta
                         .and_then(|item| item.get("tool_calls"))
                         .and_then(serde_json::Value::as_array)
@@ -442,9 +444,14 @@ mod latency_tests {
             "type": "response.output_text.delta",
             "delta": "hello"
         });
+        let refusal = serde_json::json!({
+            "type": "response.refusal.delta",
+            "delta": "I can't help with that."
+        });
         assert!(!event_has_meaningful_output(Some(&created)));
         assert!(!event_has_meaningful_output(Some(&empty)));
         assert!(event_has_meaningful_output(Some(&output)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     #[test]
@@ -456,8 +463,14 @@ mod latency_tests {
         let chat = serde_json::json!({
             "choices": [{"delta": {"content": "hello"}}]
         });
+        // A refusal-only stream still carries the model's answer, so its first
+        // delta is a first-output timestamp like any other.
+        let refusal = serde_json::json!({
+            "choices": [{"delta": {"refusal": "I can't help with that."}}]
+        });
         assert!(event_has_meaningful_output(Some(&anthropic)));
         assert!(event_has_meaningful_output(Some(&chat)));
+        assert!(event_has_meaningful_output(Some(&refusal)));
     }
 
     /// The DashScope/Bailian native envelope nests its payload under `output`
