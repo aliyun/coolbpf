@@ -1473,6 +1473,56 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn audit_event_endpoints_reject_case_filters_they_cannot_apply() {
+        // `status` and `blocked` filter correlated cases, which only
+        // `/audit/cases` reads. The event endpoints share `AuditQuery` but
+        // their store filter has no parameter for either, so the pair was
+        // accepted and dropped: a filtered request answered the unfiltered
+        // events with a 200.
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        for uri in [
+            "/api/audit/events?status=open",
+            "/api/audit/events?blocked=true",
+            "/api/audit/sessions?status=open",
+            "/api/audit/summary?blocked=true",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body: serde_json::Value = awtest::read_body_json(response).await;
+            let message = body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                message.contains("/api/audit/cases"),
+                "{uri} must point at the endpoint that applies the filter, got: {message}"
+            );
+        }
+
+        // Controls: the event filters the three endpoints do apply still
+        // answer 200, and the endpoint named by the rejection keeps its own
+        // case filters.
+        for uri in [
+            "/api/audit/events?event_type=file_action",
+            "/api/audit/events?result=blocked",
+            "/api/audit/sessions?agent_id=agent-1",
+            "/api/audit/summary?event_type=file_action&limit=5",
+            "/api/audit/cases?status=open&blocked=true",
+        ] {
+            let response =
+                awtest::call_service(&app, awtest::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
     async fn api_docs_lists_routes_and_not_found_points_to_it() {
         let app = awtest::init_service(
             App::new()

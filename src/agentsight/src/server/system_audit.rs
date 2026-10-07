@@ -42,6 +42,9 @@ pub(super) async fn summary(
     if let Some(response) = reject_unknown_filter_tokens(&query) {
         return response;
     }
+    if let Some(response) = reject_case_filters_on_events(&query, "GET /api/audit/summary") {
+        return response;
+    }
     let filter = event_filter(&query);
     let summary = match data.audit_service.summary(&filter) {
         Ok(summary) => summary,
@@ -99,6 +102,9 @@ pub(super) async fn events(
     if let Some(response) = reject_unknown_filter_tokens(&query) {
         return response;
     }
+    if let Some(response) = reject_case_filters_on_events(&query, "GET /api/audit/events") {
+        return response;
+    }
     match data.audit_service.events(&event_filter(&query)) {
         Ok(page) => {
             let state = if page.items.is_empty() { "empty" } else { "ok" };
@@ -129,6 +135,9 @@ pub(super) async fn sessions(
         return response;
     }
     if let Some(response) = reject_unknown_filter_tokens(&query) {
+        return response;
+    }
+    if let Some(response) = reject_case_filters_on_events(&query, "GET /api/audit/sessions") {
         return response;
     }
     let page = match data.audit_service.sessions(&event_filter(&query)) {
@@ -330,6 +339,33 @@ fn reject_unknown_filter_tokens(query: &AuditQuery) -> Option<HttpResponse> {
         .or_else(|| unknown(query.event_type.as_ref(), &EVENT_TYPE_TOKENS, "event_type"))
         .or_else(|| unknown(query.result.as_ref(), &EVENT_RESULT_TOKENS, "result"))?;
     Some(bad_request(&message))
+}
+
+/// Reject case-level filters the event endpoints cannot apply.
+///
+/// `status` and `blocked` describe correlated risk cases, which only
+/// `/audit/cases` reads: `AuditEventFilter` and the store's summary query have
+/// no parameter for either. The three event endpoints share `AuditQuery` with
+/// it, so accepting the pair here answered a filtered request with the
+/// unfiltered event set and a 200 — a plausible-looking wrong result, the same
+/// shape the interruption aggregates refuse with the same 400.
+fn reject_case_filters_on_events(query: &AuditQuery, endpoint: &str) -> Option<HttpResponse> {
+    let unsupported = [
+        ("status", query.status.is_some()),
+        ("blocked", query.blocked.is_some()),
+    ];
+    let unsupported: Vec<&str> = unsupported
+        .iter()
+        .filter_map(|(name, present)| present.then_some(*name))
+        .collect();
+    if unsupported.is_empty() {
+        return None;
+    }
+    Some(bad_request(&format!(
+        "{endpoint} accepts only event filters; {} must be applied on \
+         GET /api/audit/cases, which filters correlated cases",
+        unsupported.join(", ")
+    )))
 }
 
 /// Rejects a window the store cannot represent, and one that runs backwards.
