@@ -14,7 +14,7 @@ use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::sslsniff::SslEvent;
 use crate::utils::decompress::ZstdStreamDecoder;
 use lru::LruCache;
-use pending_response::PendingResponse;
+use pending_response::{PendingResponse, is_informational};
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -331,13 +331,19 @@ impl HttpConnectionAggregator {
             );
         }
 
-        // Also evict oversized body buffers.
+        // Also evict oversized body buffers. `buffered_bytes` covers a pending
+        // request body and an active SSE stream alike (parsed events plus any
+        // still-encoded compressed buffer), so an endless SSE response cannot
+        // retain events for the process lifetime. Merely idle in-flight states
+        // are deliberately kept: `snapshot_idle_connections` persists them as
+        // interruption evidence and a stream that resumes must still complete.
         let oversized: Vec<ConnectionId> = self
             .connections
             .iter()
             .filter_map(|(k, state)| {
                 let body_len = match state {
-                    ConnectionState::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
+                    ConnectionState::RequestBodyPending { .. }
+                    | ConnectionState::SseActive { .. } => state.buffered_bytes(),
                     _ => 0,
                 };
                 if body_len > max_bytes { Some(*k) } else { None }
@@ -757,7 +763,7 @@ impl HttpConnectionAggregator {
     pub fn process_response(&mut self, mut response: ParsedResponse) -> Option<AggregatedResult> {
         let connection_id = ConnectionId::from_ssl_event(&response.source_event);
 
-        while (100..200).contains(&response.status_code) && response.status_code != 101 {
+        while is_informational(response.status_code) {
             if response.body().is_empty() {
                 return None;
             }
@@ -1801,6 +1807,68 @@ mod tests {
         } else {
             panic!("Expected HttpComplete result");
         }
+    }
+
+    #[test]
+    fn test_expect_continue_interim_response_keeps_pending_body() {
+        let mut aggregator = HttpConnectionAggregator::new();
+        let pid = 4321;
+        let ssl_ptr = 0xC000;
+        let body = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+
+        // `Expect: 100-continue` client: headers first, body withheld until the
+        // interim response. body_len=0 keeps the connection in RequestBodyPending.
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let header_end = headers.len();
+        let request_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, headers.into_bytes(), 1);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            version: 11,
+            headers: HashMap::from([
+                ("content-length".to_string(), body.len().to_string()),
+                ("expect".to_string(), "100-continue".to_string()),
+            ]),
+            body_offset: header_end,
+            body_len: 0,
+            source_event: request_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+        assert!(matches!(
+            aggregator.connections.peek(&ConnectionId { pid, ssl_ptr }),
+            Some(ConnectionState::RequestBodyPending { .. })
+        ));
+
+        // Interim response routed by content state (not the stateless parser),
+        // as happens when it is split or coalesced with following bytes.
+        let interim = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"HTTP/1.1 100 Continue\r\n\r\n".to_vec(),
+            0,
+        );
+        assert!(aggregator.process_raw_body_data(&interim).is_none());
+
+        // The body withheld by the client follows the interim response.
+        let body_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, body.to_vec(), 1);
+        assert!(aggregator.process_raw_body_data(&body_event).is_none());
+
+        // The final response must complete the pair with the captured prompt.
+        let response_event = create_mock_ssl_event_with_buf(
+            pid,
+            ssl_ptr,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            0,
+        );
+        let result = aggregator.process_raw_body_data(&response_event);
+        let Some(AggregatedResult::HttpComplete(pair)) = result else {
+            panic!("expected HttpComplete, got {result:?}");
+        };
+        assert_eq!(pair.request.body(), body);
     }
 
     #[test]
@@ -3526,6 +3594,68 @@ mod tests {
             agg.last_appended_src_ptr.peek(&conn_id).is_none(),
             "the crash drain must not leave the append cursor behind"
         );
+    }
+
+    #[test]
+    fn test_oversized_sse_active_is_evicted() {
+        // Regression: the oversized scan only looked at RequestBodyPending, so
+        // an SSE stream that never terminates (client stops reading, no done
+        // marker) retained every parsed event for the process lifetime.
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 4242,
+            ssl_ptr: 0xC000,
+        };
+        let source =
+            create_mock_ssl_event_with_buf(conn_id.pid, conn_id.ssl_ptr, vec![b'e'; 2048], 0);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: source.clone(),
+            reassembled_body: None,
+        };
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response_headers = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: source.clone(),
+        };
+        let sse_events: Vec<ParsedSseEvent> = (0..4)
+            .map(|_| ParsedSseEvent::new(None, None, None, 0, 1024, source.clone()))
+            .collect();
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::SseActive {
+                request: Some(request),
+                response_headers,
+                sse_events,
+                compressed_buffer: None,
+                content_encoding: None,
+                zstd_decoder: None,
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+
+        agg.evict_idle_and_oversized();
+
+        assert!(
+            agg.connections.peek(&conn_id).is_none(),
+            "an SSE stream retaining more than max_body_bytes must be evicted"
+        );
+        let metrics = agg.metrics();
+        assert_eq!(metrics.pending_connection_count, 0);
+        assert_eq!(metrics.pending_connection_bytes, 0);
+        assert_eq!(metrics.eviction_count, 1);
     }
 
     #[test]
