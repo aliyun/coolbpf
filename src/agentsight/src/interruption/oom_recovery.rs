@@ -159,18 +159,23 @@ pub fn recover_oom_events(
     );
 }
 
-/// `dmesg` with its output locale pinned.
+/// `dmesg` with its output environment pinned.
 ///
 /// `dmesg -T` renders the timestamp with `strftime("%c")`, which follows the
-/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`). On
-/// a host exporting e.g. `LANG=zh_CN.UTF-8` the weekday and month names come
-/// out localized, [`parse_dmesg_timestamp`] cannot read them, and every OOM
-/// event is stamped with the scan time instead of the kill time — which also
-/// defeats the `(pid, timestamp)` dedup in [`recover_oom_events`]. Pin the
-/// child to the C locale so the output keeps the format the parser documents.
+/// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`) and
+/// the inherited time zone (`TZ`). On a host exporting e.g.
+/// `LANG=zh_CN.UTF-8` the weekday and month names come out localized,
+/// [`parse_dmesg_timestamp`] cannot read them, and every OOM event is stamped
+/// with the scan time instead of the kill time — which also defeats the
+/// `(pid, timestamp)` dedup in [`recover_oom_events`]. On a host east of UTC
+/// the wall-clock fields are rendered in the local zone while the parser reads
+/// them as UTC, so every kill is stamped hours away from when it happened.
+/// Pin the child to the C locale and to UTC so the output keeps the format and
+/// the instant the parser documents.
 fn dmesg_command() -> Command {
     let mut command = Command::new("dmesg");
     command.env("LC_ALL", "C");
+    command.env("TZ", "UTC");
     command
 }
 
@@ -382,6 +387,20 @@ fn parse_dmesg_timestamp(line: &str) -> Option<i64> {
     dt.and_utc().timestamp_nanos_opt()
 }
 
+/// Whether a comm names a metrics collector rather than something that runs
+/// the agent.
+///
+/// Prometheus-style exporters are named after the thing they watch —
+/// `node_exporter`, `node-exporter`, `prometheus-node-exporter` — so they look
+/// like a runtime to a prefix match but are collectors, not workloads. ktuner
+/// draws the same line for its own process detection.
+fn is_monitoring_helper_name(name: &str) -> bool {
+    name.starts_with("prometheus")
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "exporter")
+}
+
 /// Match a process comm name to a known agent name.
 /// Returns Some(agent_name) if matched, None otherwise.
 fn match_agent_name(comm: &str) -> Option<&'static str> {
@@ -391,8 +410,15 @@ fn match_agent_name(comm: &str) -> Option<&'static str> {
     } else if comm_lower == "co" || comm_lower == "cosh" || comm_lower.starts_with("copilot") {
         Some("Cosh")
     } else if comm_lower.starts_with("node") {
-        // Node processes could be either; record with unknown agent but still track
-        Some("node(unknown-agent)")
+        // Node processes could be either; record with unknown agent but still
+        // track. A collector is neither: an OOM-killed `node_exporter` without
+        // a pending llm_call is noise, like any other non-agent kill, and used
+        // to be recorded as a critical agent_crash.
+        if is_monitoring_helper_name(&comm_lower) {
+            None
+        } else {
+            Some("node(unknown-agent)")
+        }
     } else {
         // Non-agent processes — skip
         None
@@ -717,14 +743,27 @@ printf '[%s] Out of memory: Killed process 4000002 (openclaw-gatewa) total-vm:10
 
     /// A `dmesg` stand-in that mimics util-linux: `-T` renders the timestamp
     /// with `strftime("%c")`, so the weekday and month names follow the
-    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`).
+    /// inherited locale (`LC_ALL` outranks `LC_TIME`, which outranks `LANG`)
+    /// and the wall-clock fields follow the inherited time zone (`TZ`).
+    ///
+    /// The stand-in collapses the zone to two cases — UTC keeps the kernel
+    /// time, anything else renders it as UTC+8 — which is enough to tell the
+    /// two apart without shipping a tz database.
     const FAKE_DMESG: &str = r#"#!/bin/sh
-case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
-    ""|C|POSIX|C.*)
-        printf '[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+case "${TZ:-}" in
+    ""|UTC|UTC0|Etc/UTC|Etc/GMT)
+        hour='10:00:00'
         ;;
     *)
-        printf '[五 4月 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n'
+        hour='18:00:00'
+        ;;
+esac
+case "${LC_ALL:-${LC_TIME:-${LANG:-}}}" in
+    ""|C|POSIX|C.*)
+        printf "[Fri Apr 17 $hour 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n"
+        ;;
+    *)
+        printf "[五 4月 17 $hour 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB\n"
         ;;
 esac
 "#;
@@ -791,6 +830,67 @@ esac
         assert_eq!(
             event.timestamp_ns, 1_776_420_000_000_000_000,
             "the C-locale timestamp must survive a foreign LC_TIME"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oom_recovery_reads_dmesg_timestamps_under_a_foreign_timezone() {
+        // `dmesg -T` renders the kernel time in the *local* zone, but the
+        // recovery path reads the fields as UTC. A host east of UTC therefore
+        // records every OOM kill hours in the future. Re-exec so the fake
+        // dmesg sees a foreign TZ without mutating other tests' env.
+        const CHILD: &str = "AGENTSIGHT_OOM_TIMEZONE_CHILD";
+        let fake_dir =
+            std::env::temp_dir().join(format!("agentsight-fake-dmesg-tz-{}", std::process::id()));
+
+        if std::env::var_os(CHILD).is_none() {
+            std::fs::create_dir_all(&fake_dir).expect("create fake dmesg directory");
+            let script = fake_dir.join("dmesg");
+            std::fs::write(&script, FAKE_DMESG).expect("write fake dmesg");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("make fake dmesg executable");
+            }
+            let path_var = format!(
+                "{}:{}",
+                fake_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let output = Command::new(std::env::current_exe().expect("test binary path"))
+                .args([
+                    "--exact",
+                    "interruption::oom_recovery::tests::oom_recovery_reads_dmesg_timestamps_under_a_foreign_timezone",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LC_ALL", "C")
+                .env("TZ", "Asia/Shanghai")
+                .env("PATH", path_var)
+                .output()
+                .expect("re-exec the test binary");
+            let _ = std::fs::remove_dir_all(&fake_dir);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child test did not pass: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let events = parse_dmesg_oom_events().expect("read fake dmesg");
+        let event = events
+            .iter()
+            .find(|event| event.pid == 12345)
+            .expect("killed process event");
+        // The fake renders 18:00 in UTC+8, which is 10:00Z. Reading the wall
+        // clock as UTC would stamp the kill eight hours into the future.
+        assert_eq!(
+            event.timestamp_ns, 1_776_420_000_000_000_000,
+            "the kill time must be read as the real instant, not as UTC wall clock"
         );
     }
 
@@ -885,6 +985,34 @@ esac
         assert!(oom_interruption_for(&oom_event("python3"), None, None, &[]).is_none());
         assert!(oom_interruption_for(&oom_event("chrome"), None, None, &[]).is_none());
         assert!(oom_interruption_for(&oom_event("mysqld"), None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn monitoring_exporter_oom_kill_is_not_an_agent_crash() {
+        // A metrics collector is named after what it watches, not after a Node
+        // agent runtime: `node_exporter` is Prometheus's node collector. With
+        // no pending llm_call correlation the kill is noise, like any other
+        // non-agent kill — but `starts_with("node")` recorded it as a critical
+        // agent_crash.
+        assert!(oom_interruption_for(&oom_event("node_exporter"), None, None, &[]).is_none());
+        assert!(oom_interruption_for(&oom_event("node-exporter"), None, None, &[]).is_none());
+
+        // A bare `node` runtime — what agent processes run as — still matches,
+        // and so do node-ish names that are not collectors.
+        assert!(oom_interruption_for(&oom_event("node"), None, None, &[]).is_some());
+        assert!(oom_interruption_for(&oom_event("node-red"), None, None, &[]).is_some());
+
+        // The correlation safety net is unchanged: an exporter kill that has a
+        // pending llm_call for its pid is still recorded.
+        assert!(
+            oom_interruption_for(
+                &oom_event("node_exporter"),
+                Some("sess-1".to_string()),
+                Some("conv-1".to_string()),
+                &["conv-1".to_string()],
+            )
+            .is_some()
+        );
     }
 
     #[test]
