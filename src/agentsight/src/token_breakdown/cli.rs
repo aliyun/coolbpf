@@ -836,6 +836,45 @@ mod tests {
         assert_eq!(other.tools_tokens, count.tools_tokens);
     }
 
+    /// The Responses API repeats the whole answer in `*.done` events; folding
+    /// every captured event through `extract_response_content` used to count
+    /// it once per event. `merge_response_output_text` must count the deltas
+    /// once and use the closing events only when no delta carried text.
+    #[test]
+    fn responses_done_events_do_not_double_count_the_answer() {
+        // The fixture tokenizer is WordLevel with a whitespace pre-tokenizer,
+        // so duplicated words are observable in the count.
+        let tokenizer = fixture_tokenizer();
+        let chunks = vec![
+            json!({"type": "response.output_text.delta", "delta": "hello "}),
+            json!({"type": "response.output_text.delta", "delta": "there"}),
+            json!({"type": "response.output_text.done", "text": "hello there"}),
+            json!({"type": "response.output_item.done", "item": {"content": [{"text": "hello there"}]}}),
+        ];
+
+        let merged = crate::analyzer::token::merge_response_output_text(&chunks);
+        assert_eq!(
+            merged.0, "hello there",
+            "the deltas must win over the closing replay, got {:?}",
+            merged.0
+        );
+
+        let count =
+            crate::analyzer::count_response_tokens(&chunks, &tokenizer).expect("response counts");
+        let once = tokenizer.count("hello there").expect("fixture counts");
+        assert_eq!(
+            count.total_tokens, once,
+            "the answer must be counted once: {:?}",
+            count.by_type
+        );
+
+        // A capture that only got the closing event still counts it.
+        let only_done = vec![json!({"type": "response.output_text.done", "text": "hello there"})];
+        let count = crate::analyzer::count_response_tokens(&only_done, &tokenizer)
+            .expect("response counts");
+        assert_eq!(count.total_tokens, once);
+    }
+
     #[test]
     fn breakdown_reports_the_model_the_command_was_given() {
         // `ChatMLTokenBreakdown::model_name` is documented as the model name
@@ -1126,6 +1165,54 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec![r#"read_file: {"path":"/tmp/a.md"}"#.to_string()]
+        );
+    }
+
+    /// Reasoning models on the Responses protocol stream their thinking as
+    /// `response.reasoning_text.delta` (qwen3-coder via dashscope) or
+    /// `response.reasoning_summary_text.delta` (o-series), the same events
+    /// the live analyzer folds into the chat view's `reasoning_content`.
+    /// Ignoring them left `ResponseData.reasoning_content` at `None`, so the
+    /// breakdown reported a zero-token reasoning child and understated the
+    /// response total that the percentages are computed from.
+    #[test]
+    fn sse_responses_reasoning_deltas_feed_breakdown() {
+        let events = vec![
+            sse(r#"{"type":"response.created","response":{"id":"resp_1"}}"#),
+            sse(r#"{"type":"response.reasoning_summary_text.delta","delta":"hello "}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"there"}"#),
+            sse(r#"{"type":"response.output_text.delta","delta":"final"}"#),
+            sse(r#"{"type":"response.completed","response":{}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("hello there"),
+            "both reasoning event kinds must accumulate in stream order"
+        );
+        assert_eq!(resp.content, vec!["final".to_string()]);
+
+        let tokenizer = fixture_tokenizer();
+        let blocks = vec![crate::token_breakdown::types::ChatMLBlock {
+            role: "user".to_string(),
+            raw_content: "hello".to_string(),
+        }];
+        let doc = classify_document(&blocks, Some(resp));
+        let breakdown =
+            compute_breakdown(&doc, &tokenizer, "qwen3.5-plus").expect("breakdown computes");
+        let response_event = breakdown
+            .events
+            .iter()
+            .find(|event| event.event_type == "response")
+            .expect("response event present");
+        let reasoning = response_event
+            .children
+            .iter()
+            .find(|child| child.name == "reasoning_content")
+            .expect("reasoning child present");
+        assert!(
+            reasoning.tokens > 0,
+            "reasoning tokens must be counted, got {reasoning:?}"
         );
     }
 
