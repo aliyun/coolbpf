@@ -3600,6 +3600,110 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn agent_health_delete_survives_a_poisoned_store_lock() {
+        // A panic in any thread that holds the health-store lock poisons it.
+        // The acknowledge (delete) and restart endpoints are the recovery
+        // actions for exactly that kind of trouble, so they must keep
+        // answering afterwards — the same recovery `get_agent_process_health`
+        // and the containment planner already apply to this lock.
+        let state = test_app_state(0);
+        let poison = Arc::clone(&state.health_store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("poison the health store");
+        })
+        .join();
+
+        let app = awtest::init_service(
+            App::new()
+                .app_data(state)
+                .route("/agent-health/{pid}", web::delete().to(delete_agent_health)),
+        )
+        .await;
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::delete()
+                .uri("/agent-health/9999")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a poisoned lock must not panic the acknowledge endpoint"
+        );
+    }
+
+    #[actix_web::test]
+    async fn agent_health_restart_survives_a_poisoned_store_lock() {
+        // End-to-end restart while the lock is poisoned: the handler reads
+        // the recorded command, signals the live process and clears the
+        // entry, all behind the same recovered guard.
+        let state = test_app_state(0);
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn a disposable sleep");
+        let pid = child.id();
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).expect("child exe link");
+        let exe = exe.to_string_lossy();
+        let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe).to_string();
+        {
+            let mut store = state.health_store.write().unwrap();
+            store.update(
+                pid,
+                crate::health::AgentHealthStatus {
+                    pid,
+                    agent_name: "Sleepy".to_string(),
+                    category: "agent".to_string(),
+                    exe_path: exe,
+                    workspace_path: None,
+                    ports: vec![],
+                    status: crate::health::store::AgentHealthState::Offline,
+                    last_check_time: 1,
+                    latency_ms: None,
+                    error_message: None,
+                    restart_cmd: Some(vec!["/bin/true".to_string()]),
+                    offline_since: Some(1),
+                    role: crate::health::store::AgentRole::Client,
+                    parent_pid: None,
+                    has_crash: false,
+                },
+            );
+        }
+        let poison = Arc::clone(&state.health_store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("poison the health store");
+        })
+        .join();
+
+        let app =
+            awtest::init_service(App::new().app_data(state).service(restart_agent_health)).await;
+        let resp = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri(&format!("/agent-health/{pid}/restart"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a poisoned lock must not panic the restart endpoint"
+        );
+        let body = service_response_json(resp).await;
+        assert_eq!(body["ok"], true);
+        assert_ne!(
+            body["new_pid"].as_u64(),
+            Some(pid as u64),
+            "the replacement process must be a new pid"
+        );
+        // The handler signalled the child; reap it so no zombie is left.
+        let _ = child.wait();
+    }
+
+    #[actix_web::test]
     async fn agent_health_lists_activity_from_both_sqlite_stores() {
         let genai_path = unique_handler_db("agent-activity-genai");
         write_completed_conversation_event(&genai_path, "agent-health");
@@ -4432,7 +4536,11 @@ pub async fn delete_agent_health(
     path: web::Path<u32>,
 ) -> impl Responder {
     let pid = path.into_inner();
-    let removed = data.health_store.write().unwrap().remove_by_pid(pid);
+    let removed = data
+        .health_store
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove_by_pid(pid);
     if removed {
         HttpResponse::Ok().json(serde_json::json!({"ok": true}))
     } else {
@@ -4451,7 +4559,7 @@ pub async fn restart_agent_health(
     let pid = path.into_inner();
 
     let (restart_cmd, recorded_exe) = {
-        let store = data.health_store.read().unwrap();
+        let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
         match store.all_agents().into_iter().find(|a| a.pid == pid) {
             Some(agent) => (agent.restart_cmd.clone(), agent.exe_path.clone()),
             None => (None, String::new()),
@@ -4507,7 +4615,10 @@ pub async fn restart_agent_health(
         Ok(child) => {
             let new_pid = child.id();
             log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
-            data.health_store.write().unwrap().remove_by_pid(pid);
+            data.health_store
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove_by_pid(pid);
             HttpResponse::Ok().json(serde_json::json!({
                 "ok": true,
                 "new_pid": new_pid,

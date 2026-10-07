@@ -2543,6 +2543,8 @@ fn test_enrich_pending_from_sse() {
         sse_event_count: Some(42),
         input_tokens: Some(999),
         output_tokens: Some(888),
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     store.enrich_pending_from_sse("call-5", &e).unwrap();
     let conn = store.conn.lock().unwrap();
@@ -2582,6 +2584,8 @@ fn test_enrich_pending_from_sse_records_tool_call_ids() {
         sse_event_count: Some(3),
         input_tokens: None,
         output_tokens: None,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     store.enrich_pending_from_sse("call-5", &e).unwrap();
 
@@ -2620,6 +2624,8 @@ fn test_enrich_pending_from_sse_skips_completed_call() {
         sse_event_count: Some(42),
         input_tokens: Some(999),
         output_tokens: Some(888),
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
     };
     // call-1 is status='complete' in the fixture.
     store.enrich_pending_from_sse("call-1", &e).unwrap();
@@ -2647,6 +2653,112 @@ fn test_enrich_pending_from_sse_skips_completed_call() {
         )
         .unwrap();
     assert_eq!(ids, r#"["tc-1","tc-2"]"#);
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_enrich_pending_from_sse_records_usage_cache_counters() {
+    // Anthropic reports the cache counters in `message_start` usage, outside
+    // `input_tokens`, and bills them on top of it; the live path writes both
+    // the columns and the billed total. The drain enrichment forwarded only
+    // input/output tokens, so a drained Anthropic call kept NULL cache columns
+    // and a `total_tokens` that omitted the cache the provider bills:
+    // `/api/traces` dropped `cache_read_tokens`, the ATIF export lost
+    // `cached_tokens`, and the cache-less totals fed the timeseries and
+    // session-savings aggregates for the very rows that never complete.
+    let (store, path) = create_populated_store("enrich_sse_cache");
+    // What `GenAIBuilder::extract_sse_enrichment` yields for a drained
+    // Anthropic stream (message_start usage merged with message_delta).
+    let enrichment = SseEnrichment {
+        model: Some("claude-sonnet-4-5".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: None,
+        sse_event_count: Some(2),
+        input_tokens: Some(10),
+        output_tokens: Some(5),
+        cache_creation_tokens: Some(1234),
+        cache_read_tokens: Some(24576),
+    };
+
+    store
+        .enrich_pending_from_sse("call-5", &enrichment)
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (cc, cr, total): (Option<i64>, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT cache_creation_tokens, cache_read_tokens, total_tokens \
+             FROM genai_events WHERE call_id = 'call-5'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (cc, cr),
+        (Some(1234), Some(24576)),
+        "the drained call must keep the cache counters its stream reported"
+    );
+    assert_eq!(
+        total,
+        10 + 1234 + 24576 + 5,
+        "an anthropic drained call totals the billed input (input + cache) plus output"
+    );
+    drop(conn);
+    cleanup_db(&path);
+}
+
+/// A provider that already counts cached tokens inside its reported input
+/// must not have them added again by the drained-call total — the same rule
+/// `billed_input_col!` states for the aggregations over these rows.
+#[test]
+fn test_enrich_pending_from_sse_does_not_double_count_cached_input() {
+    let (store, path) = create_populated_store("enrich_sse_cache_openai");
+    // OpenAI-style usage: `prompt_tokens` already includes the 64 cached
+    // tokens reported under `prompt_tokens_details.cached_tokens`.
+    let enrichment = SseEnrichment {
+        model: Some("gpt-4o".to_string()),
+        trace_id: None,
+        provider: None,
+        output_messages: None,
+        sse_event_count: Some(2),
+        input_tokens: Some(100),
+        output_tokens: Some(7),
+        cache_creation_tokens: None,
+        cache_read_tokens: Some(64),
+    };
+
+    // Enrichment only reaches calls still pending; call-1 is the fixture's
+    // openai row, so mark it drained-pending first.
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE genai_events SET status = 'pending' WHERE call_id = 'call-1'",
+            [],
+        )
+        .unwrap();
+    store
+        .enrich_pending_from_sse("call-1", &enrichment)
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (cr, total): (Option<i64>, i64) = conn
+        .query_row(
+            "SELECT cache_read_tokens, total_tokens \
+             FROM genai_events WHERE call_id = 'call-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cr, Some(64), "the reported cached part is still recorded");
+    assert_eq!(
+        total,
+        100 + 7,
+        "openai-style input already counts the cached part; adding it again would inflate the total"
+    );
     drop(conn);
     cleanup_db(&path);
 }
