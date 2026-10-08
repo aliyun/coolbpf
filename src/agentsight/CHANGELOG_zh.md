@@ -1,10 +1,26 @@
 # 更新日志
 
-## 未发布
+## 0.13.1
+
+### 新功能
+- 新增 JSON 输出与优雅的 CLI 错误提示。
 
 ### 修复
-- `agentsight-enforcer` 升级后可自行恢复：旧版本遗留的 enforcement 布局无法被新二进制复用时，现在会自动检测并替换，文件删除防护与 enforcement 健康检查不再需要人工清理旧布局才能恢复。(#3445)
-- 删除并重建 binding 时保留应用的进程树覆盖：重绑定会将存活的会话进程树迁入新的运行时域，对已运行应用调整策略不再静默使其进程脱离所有策略。(#3370)
+- 命名空间 PID 解析为宿主 PID，并做 init namespace 自检。(#3041)
+- 主日志器遵循 RUST_LOG 正则。(#3186)
+- 为 5.10/6.6 内核的 file-delete-guard 增加 inode guard 支持。
+- traces 列表中移除 trace_id 别名。(#3261)
+- 修复 enforcer ringbuf 消费者在 mmap 推进后的陈旧文件描述符。
+- 加强凭证发现逻辑。
+- 将 drain 触发条件固定为 membarrier。
+- 新增 token-plan provider 预设。
+- 从请求工具定义中补全空的 tool_call 名称。
+- 记录语义搜索降级原因。(#3443)
+- 加强 SQLite 生命周期管理。
+- 将 qwen3.8-max 映射到对应 tokenizer。(#3409)
+- `agentsight-enforcer` 升级后自动恢复旧版遗留的 enforcement 布局，文件删除防护与健康检查不再需要人工清理才能恢复。(#3445)
+- 删除并重建 binding 时保留应用的进程树覆盖。(#3370)
+- 拒绝不受支持的 audit case 事件过滤条件，避免静默忽略。
 
 ## 0.13.0
 

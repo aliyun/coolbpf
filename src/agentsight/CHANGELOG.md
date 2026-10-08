@@ -1,17 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.13.1
+
+### Features
+- Add JSON output and graceful CLI errors.
 
 ### Fixes
-- Let `agentsight-enforcer` recover by itself when an upgrade leaves an
-  enforcement layout the new binary cannot reuse: the stale layout is now
-  detected and replaced automatically, so file-delete guard and enforcement
-  health no longer stay down until someone removes the old layout by hand.
-  (#3445)
-- Keep an application's process tree under policy when its binding is deleted
-  and recreated: the rebind now migrates the live session tree into the fresh
-  runtime domain, so changing the policy of an already-running application no
-  longer silently drops its processes from every policy. (#3370)
+- Resolve namespace PIDs to host PIDs with an init-namespace self-check. (#3041)
+- Honor the RUST_LOG regex in the main logger. (#3186)
+- Add inode guard support for file-delete-guard on 5.10/6.6 kernels.
+- Drop the trace_id alias in the traces list. (#3261)
+- Fix a stale file descriptor in the enforcer ringbuf consumer after mmap advance.
+- Harden credential discovery.
+- Pin the drain trigger to membarrier.
+- Add a token-plan provider preset.
+- Recover empty tool_call names from request tool definitions.
+- Log semantic-search degradation causes. (#3443)
+- Harden the SQLite lifecycle.
+- Map qwen3.8-max to its tokenizer. (#3409)
+- Restore `agentsight-enforcer` automatically when an upgrade leaves a stale enforcement layout, so file-delete guard and enforcement health do not require manual cleanup. (#3445)
+- Keep an application's process tree under policy when its binding is recreated. (#3370)
+- Reject unsupported event filters on audit cases instead of silently ignoring them.
 
 ## 0.13.0
 
