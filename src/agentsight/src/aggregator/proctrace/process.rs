@@ -17,7 +17,16 @@ pub(crate) const MAX_RETAINED_PROCESS_OUTPUT_BYTES: usize = 64 * 1024;
 /// Append `data` up to the shared per-stream cap, returning the dropped byte count.
 fn append_capped(buffer: &mut Vec<u8>, data: &[u8]) -> usize {
     let remaining = MAX_RETAINED_PROCESS_OUTPUT_BYTES.saturating_sub(buffer.len());
-    let take = data.len().min(remaining);
+    let mut take = data.len().min(remaining);
+    // Back off to a UTF-8 character boundary: `String::from_utf8_lossy`
+    // converts the retained bytes into the chrome-trace stdout/stderr
+    // fields, and a mid-character cut produces a trailing U+FFFD replacement
+    // glyph that corrupts the last line of the trace payload.
+    if take > 0 && take < data.len() {
+        while take > 0 && (data[take] & 0xC0) == 0x80 {
+            take -= 1;
+        }
+    }
     buffer.extend_from_slice(&data[..take]);
     data.len() - take
 }

@@ -494,16 +494,21 @@ impl OpenAIParser {
         let mut refusal_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<serde_json::Value> = Vec::new();
         let mut finish_reason = Some("stop".to_string());
-        // A capped response ends with status="incomplete" and the cap reason
-        // in incomplete_details. Surface that as the chat-completions
-        // "length" finish so a truncated answer is not reported as a clean
-        // completion (the interruption detector's token-limit rules key on
-        // exactly that spelling).
-        let output_capped = body.get("status").and_then(|v| v.as_str()) == Some("incomplete")
-            && body
-                .pointer("/incomplete_details/reason")
-                .and_then(|v| v.as_str())
-                == Some("max_output_tokens");
+        // An incomplete response carries its reason in incomplete_details.
+        // Surface the ones with chat-completions spellings so a truncated or
+        // policy-filtered answer is not reported as a clean completion: the
+        // cap maps to "length" and the provider's safety cut maps to
+        // "content_filter", which the interruption detector's SafetyFilter
+        // rule and the chat-completions path both key on.
+        let incomplete = body.get("status").and_then(|v| v.as_str()) == Some("incomplete");
+        let incomplete_reason = incomplete
+            .then(|| {
+                body.pointer("/incomplete_details/reason")
+                    .and_then(|v| v.as_str())
+            })
+            .flatten();
+        let output_capped = incomplete_reason == Some("max_output_tokens");
+        let output_filtered = incomplete_reason == Some("content_filter");
 
         for item in output {
             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -599,6 +604,8 @@ impl OpenAIParser {
                 "message": message,
                 "finish_reason": if output_capped {
                     Some("length".to_string())
+                } else if output_filtered {
+                    Some("content_filter".to_string())
                 } else {
                     finish_reason
                 },
@@ -620,6 +627,7 @@ impl OpenAIParser {
         // Set by the terminal `response.incomplete` event when the stream
         // was cut by the output cap.
         let mut output_capped = false;
+        let mut output_filtered = false;
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -698,13 +706,15 @@ impl OpenAIParser {
                                 "total_tokens": u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                             })
                         });
-                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
-                            && resp
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
+                            match resp
                                 .pointer("/incomplete_details/reason")
                                 .and_then(|v| v.as_str())
-                                == Some("max_output_tokens")
-                        {
-                            output_capped = true;
+                            {
+                                Some("max_output_tokens") => output_capped = true,
+                                Some("content_filter") => output_filtered = true,
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -747,6 +757,8 @@ impl OpenAIParser {
             // tool call was in flight (its arguments may be cut mid-JSON,
             // so a normal "tool_calls" terminal would overstate the turn).
             "length"
+        } else if output_filtered {
+            "content_filter"
         } else if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
             "tool_calls"
@@ -1818,6 +1830,71 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 50);
         assert_eq!(usage.completion_tokens, 1024);
+    }
+
+    #[test]
+    fn test_parse_response_responses_incomplete_content_filter() {
+        // A response the provider's safety policy cut short ends with
+        // status="incomplete" and incomplete_details.reason="content_filter".
+        // The chat-completions path passes a provider "content_filter"
+        // finish straight through, and the interruption detector's
+        // SafetyFilter rule keys on exactly that spelling — so the
+        // normalized Responses view must surface it too, not "stop".
+        let json = serde_json::json!({
+            "id": "resp_filtered",
+            "object": "response",
+            "created_at": 1780560263,
+            "model": "qwen-plus",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "output": [{
+                "content": [{"text": "partial answer", "type": "output_text"}],
+                "id": "msg_filtered",
+                "role": "assistant",
+                "status": "incomplete",
+                "type": "message"
+            }],
+            "usage": {"input_tokens": 57, "output_tokens": 1024, "total_tokens": 1081}
+        });
+
+        let response = OpenAIParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("content_filter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_aggregate_responses_sse_chunks_content_filter() {
+        // The streaming form: the terminal response.incomplete event carries
+        // reason="content_filter", and the aggregated view must report the
+        // same finish_reason its non-streaming twin does.
+        let chunks = vec![
+            serde_json::json!({"type": "response.created", "response": {"id": "resp_cf_sse", "model": "qwen-plus", "status": "queued"}}),
+            serde_json::json!({"type": "response.in_progress"}),
+            serde_json::json!({"type": "response.output_item.added", "item": {"type": "message", "id": "msg_002", "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+            serde_json::json!({"type": "response.incomplete", "response": {
+                "id": "resp_cf_sse",
+                "model": "qwen-plus",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+                "usage": {"input_tokens": 50, "output_tokens": 1024, "total_tokens": 1074}
+            }}),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let response = OpenAIParser::parse_response(&body);
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("content_filter".to_string())
+        );
     }
 
     #[test]
