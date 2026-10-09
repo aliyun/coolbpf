@@ -46,8 +46,15 @@ function createHooksDriver() {
   const slots = [];          // useState/useRef storage, indexed by hook order
   const driver = {
     slots,
+    // useMemo/useCallback caches keyed by call order; they have always been
+    // kept out of the shared cursor, and the existing page slot maps depend
+    // on that. Tracking their deps lets tests emulate React's re-run rules.
+    _memos: [],
+    _callbackCache: [],
     render(Component, props = {}) {
       driver._cursor = 0;
+      driver._memoIndex = 0;
+      driver._callbackIndex = 0;
       driver._effects = [];
       driver._callbacks = [];
       const element = Component(props);
@@ -74,15 +81,38 @@ function createHooksDriver() {
       driver._cursor += 1;
       return slot.value;
     },
-    useEffect(fn) {
+    useEffect(fn, deps) {
+      // Record the dependency array so a test can emulate React's decision to
+      // re-run an effect only when one of its dependencies changed.
+      fn.__deps = Array.isArray(deps) ? deps : [];
       driver._effects.push(fn);
     },
-    useCallback(fn) {
-      driver._callbacks.push(fn);
-      return fn;
+    useCallback(fn, deps) {
+      const index = driver._callbackIndex;
+      driver._callbackIndex += 1;
+      const depList = Array.isArray(deps) ? deps : [];
+      const cached = driver._callbackCache[index];
+      const stable = cached
+        && cached.deps.length === depList.length
+        && cached.deps.every((dep, i) => Object.is(dep, depList[i]));
+      if (!stable) driver._callbackCache[index] = { fn, deps: depList };
+      const value = stable ? cached.fn : fn;
+      driver._callbacks.push(value);
+      return value;
     },
-    useMemo(factory) {
-      return factory();
+    useMemo(factory, deps) {
+      const index = driver._memoIndex;
+      driver._memoIndex += 1;
+      const depList = Array.isArray(deps) ? deps : [];
+      const cached = driver._memos[index];
+      if (cached
+          && cached.deps.length === depList.length
+          && cached.deps.every((dep, i) => Object.is(dep, depList[i]))) {
+        return cached.value;
+      }
+      const value = factory();
+      driver._memos[index] = { value, deps: depList };
+      return value;
     },
   };
   return driver;
@@ -484,6 +514,45 @@ test('security sessions: an older loadSessions response must not survive a newer
   );
 });
 
+test('security sessions: a superseded loadSessions still clears its loading flag', async () => {
+  const { calls, driver, rendered } = renderSecurityPage();
+  const loadOverview = rendered.callbacks[1];
+  const loadSessions = rendered.callbacks[3];
+
+  // 1. Entering the timeline runs loadSessions, which owns the sessions
+  //    spinner (slot 24) that disables the session <select>.
+  const sessionsPromise = loadSessions();
+  assert.equal(calls.fetchSecuritySessions.length, 1);
+  assert.equal(driver.slots[24].value, true, 'slot 24 must be sessionsLoading');
+
+  // 2. A newer overview batch (which also fetches sessions for the cards)
+  //    supersedes the in-flight loadSessions; it never touches the spinner.
+  const overviewPromise = loadOverview();
+  assert.equal(calls.fetchSecuritySessions.length, 2);
+  calls.fetchSecuritySummary[0].resolve({ state: 'ok', data: {} });
+  for (let i = 0; i < 4; i += 1) calls.fetchSecurityCountBy[i].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecurityEvents[0].resolve({ state: 'ok', data: { items: [] } });
+  calls.fetchSecuritySessions[1].resolve({
+    state: 'ok',
+    data: { items: [{ session_id: 'new-range-session' }] },
+  });
+  await overviewPromise;
+  await settle();
+  assert.equal(driver.slots[24].value, true,
+    'the overview batch must not clear the sessions spinner');
+
+  // 3. The superseded response lands last. Its state writes are dropped, but
+  //    it must still clear the spinner or the <select> stays disabled forever.
+  calls.fetchSecuritySessions[0].resolve({
+    state: 'ok',
+    data: { items: [{ session_id: 'old-range-session' }] },
+  });
+  await sessionsPromise;
+  await settle();
+  assert.equal(driver.slots[24].value, false,
+    'a superseded loadSessions must still clear sessionsLoading');
+});
+
 test('security event detail: clicking A then B with A resolving last must still show B', async () => {
   const { calls, driver, rendered } = renderSecurityPage();
   const loadEventDetail = rendered.callbacks[4];
@@ -675,6 +744,7 @@ test('security overview: a failed card must not keep the previous range payload'
   );
 });
 
+
 // ─── CausalAttributionPanel ──────────────────────────────────────────────────
 //
 // Hook-slot map: 0 complaint · 1 loading · 2 error · 3 caseData · 4 cached
@@ -801,4 +871,407 @@ test('causal attribution: a run superseded by a round switch must discard its re
     if (previousWindow === undefined) delete global.window;
     else global.window = previousWindow;
   }
+});
+
+// ─── AgentSessionsPage: unchanged poll must not repeat the paid search ───────
+//
+// Hook-slot map: 0 merged · 6 search · 7 semanticEnabled · 11 autoRefresh ·
+// 12 loadRequestIdRef. Effects per render: [loadData, auto-refresh,
+// optimize-config, clear-semantic, debounce, reset-page].
+
+const sameDeps = (a, b) =>
+  a.length === b.length && a.every((dep, i) => Object.is(dep, b[i]));
+
+test('agent sessions: an unchanged 10 s poll must not re-issue the semantic search', async () => {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchSessions',
+    'fetchTrajectories',
+    'fetchOptimizeConfig',
+    'semanticSearchSessions',
+  ]);
+  // A stable `t` identity matters: it is a useCallback dependency, and a new
+  // function per render would make React rebuild every callback each time.
+  const t = (key) => key;
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    'react-router-dom': { useNavigate: () => () => {} },
+    '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
+    '../utils/apiClient': { ...stubs },
+    '../utils/semanticSearchFilter': { applySemanticRanking: (rows) => rows },
+    '../utils/sessionModel': { mergeSessions: (ebpf) => ebpf },
+    '../components/CopyButton': componentStub('CopyButton'),
+  };
+  const pageModule = loadPageModule('src/pages/AgentSessionsPage.tsx', moduleStubs, driver);
+  const page = pageModule.AgentSessionsPage;
+  assert.equal(typeof page, 'function', 'AgentSessionsPage must be a component');
+
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const realSetInterval = global.setInterval;
+  const realClearInterval = global.clearInterval;
+  const settle = () => new Promise((resolve) => realSetTimeout(resolve, 0));
+  const timers = [];
+  const intervals = [];
+  const mounted = []; // mounted effect per index: { deps, cleanup }
+
+  // Emulate React: mount runs every effect; afterwards an effect re-runs only
+  // when a dependency changed, after running its previous cleanup. Timers and
+  // intervals are captured instead of really waiting 500 ms / 10 s.
+  const reactRunEffects = (rendered) => {
+    rendered.effects.forEach((fn, index) => {
+      const deps = fn.__deps;
+      const prev = mounted[index];
+      if (prev && sameDeps(prev.deps, deps)) return;
+      if (prev && typeof prev.cleanup === 'function') prev.cleanup();
+      global.setTimeout = (cb) => { timers.push(cb); return timers.length; };
+      global.clearTimeout = () => {};
+      global.setInterval = (cb) => { intervals.push(cb); return intervals.length; };
+      global.clearInterval = () => {};
+      let cleanup;
+      try {
+        cleanup = fn();
+      } finally {
+        global.setTimeout = realSetTimeout;
+        global.clearTimeout = realClearTimeout;
+        global.setInterval = realSetInterval;
+        global.clearInterval = realClearInterval;
+      }
+      mounted[index] = { deps, cleanup };
+    });
+  };
+
+  let rendered = driver.render(page);
+  assert.equal(driver.slots[6].value, '', 'slot 6 must be the search input');
+  assert.equal(driver.slots[11].value, false, 'slot 11 must be autoRefresh');
+  assert.equal(typeof driver.slots[12].value.current, 'number', 'slot 12 must be a request-id ref');
+  reactRunEffects(rendered);
+
+  // The initial load resolves with a fixed session set.
+  const makeSessions = () => Array.from({ length: 6 }, (_, i) => ({
+    session_id: `session-${i}`,
+    agent_name: 'claude',
+    model: 'm',
+    conversation_count: 1,
+    total_input_tokens: 10,
+    total_output_tokens: 5,
+    first_user_query: `question ${i}`,
+    last_user_query: `answer ${i}`,
+    last_seen_ns: Date.now() * 1_000_000,
+  }));
+  calls.fetchTrajectories[0].resolve([]);
+  calls.fetchSessions[0].resolve(makeSessions());
+  calls.fetchOptimizeConfig[0].resolve({ configured: true });
+  await settle();
+  await settle();
+
+  rendered = driver.render(page);
+  assert.equal(driver.slots[7].value, true, 'semantic search must be enabled');
+  reactRunEffects(rendered);
+
+  // Turn on auto-refresh: the interval callback becomes tickable by hand.
+  driver.slots[11].setter(true);
+  rendered = driver.render(page);
+  reactRunEffects(rendered);
+  assert.equal(intervals.length, 1, 'auto-refresh must register one interval');
+
+  // Type a query: the debounce schedules the LLM call.
+  driver.slots[6].setter('find the widget');
+  rendered = driver.render(page);
+  reactRunEffects(rendered);
+  assert.equal(timers.length, 1, 'the query must schedule one debounced search');
+
+  timers[0]();
+  assert.equal(calls.semanticSearchSessions.length, 1, 'the debounce must issue one search');
+  calls.semanticSearchSessions[0].resolve({
+    results: [{ session_id: 'session-0', relevance: 'high' }],
+  });
+  await settle();
+  rendered = driver.render(page);
+  reactRunEffects(rendered);
+
+  // Tick the 10 s poll; the server returns the same session set (fresh JSON).
+  intervals[0]();
+  calls.fetchTrajectories[1].resolve([]);
+  calls.fetchSessions[1].resolve(makeSessions());
+  await settle();
+  await settle();
+
+  const timersBeforePoll = timers.length;
+  rendered = driver.render(page);
+  reactRunEffects(rendered);
+  // A browser would fire whatever the re-armed debounce scheduled.
+  if (timers.length > timersBeforePoll) timers[timers.length - 1]();
+
+  assert.ok(calls.fetchSessions.length >= 2, 'sanity: the poll must have reloaded the data');
+  assert.equal(
+    calls.semanticSearchSessions.length,
+    1,
+    'an unchanged poll must not re-issue the paid semantic search',
+  );
+});
+
+// ─── AtifViewerPage: import vs in-flight load, live input vs loaded id ───────
+
+// The viewer renders rounds through the shared round model extracted into
+// src/utils/roundModel.ts, so the page module cannot be instantiated without
+// it ("unexpected require ... ../utils/roundModel"). Transpiled from source
+// (its only imports are `import type`, erased) so the page still renders
+// through the real model rather than a hand-written stand-in.
+const roundModel = (() => {
+  const module = { exports: {} };
+  const fn = new Function('require', 'module', 'exports', transpile('src/utils/roundModel.ts'));
+  fn(
+    (name) => {
+      throw new Error(`roundModel must not require anything at runtime: ${name}`);
+    },
+    module,
+    module.exports,
+  );
+  return module.exports;
+})();
+
+// One user step so the round view (and the causal panel next to it) renders.
+const atifDoc = (id) => ({
+  schema_version: 'ATIF-v1.0',
+  session_id: id,
+  steps: [{ step_id: 1, source: 'user', content: 'hello' }],
+});
+
+function findElementByType(node, type) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.type === type) return node;
+  for (const child of node.children ?? []) {
+    const found = findElementByType(child, type);
+    if (found) return found;
+  }
+  return null;
+}
+
+function renderAtifPage() {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchAtifBySession',
+    'fetchAtifByConversation',
+    'fetchTrajectoryAtif',
+    'fetchSessionSavings',
+  ]);
+  const t = (key) => key;
+  // One stable URLSearchParams/setter instance, as react-router provides.
+  const searchParams = new URLSearchParams();
+  const setSearchParams = () => {};
+  const panelStub = componentStub('CausalAttributionPanel');
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    'react-router-dom': { useSearchParams: () => [searchParams, setSearchParams] },
+    '../i18n': { useI18n: () => ({ t }), useLocaleTag: () => 'en-US' },
+    '../utils/apiClient': { ...stubs },
+    '../utils/roundModel': roundModel,
+    '../utils/savings': (() => {
+      const out = transpile('src/utils/savings.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
+    '../utils/trajectoryTextFilter': (() => {
+      // The page imports the real filter so a query matches the same rounds the
+      // browser does; it has no runtime imports of its own.
+      const out = transpile('src/utils/trajectoryTextFilter.ts');
+      const mod = { exports: {} };
+      new Function('require', 'module', 'exports', out)(() => ({}), mod, mod.exports);
+      return mod.exports;
+    })(),
+    '../components/SubagentGraph': componentStub('SubagentGraph'),
+    '../components/CausalAttributionPanel': panelStub,
+    '../utils/trajectoryTree': {
+      buildTrajectoryTree: () => null,
+      findNodeByPath: () => null,
+      findNodeByRef: () => null,
+      encodeNodePath: (path) => (Array.isArray(path) ? path.join('/') : ''),
+      decodeNodePath: () => [],
+    },
+  };
+  const pageModule = loadPageModule('src/pages/AtifViewerPage.tsx', moduleStubs, driver);
+  const page = pageModule.AtifViewerPage;
+  assert.equal(typeof page, 'function', 'AtifViewerPage must be a component');
+  const rendered = driver.render(page);
+  assert.equal(driver.slots[2].value, '', 'slot 2 must be queryId');
+  return { calls, driver, rendered, page, panelStub };
+}
+
+// The document slot moves when hooks are added, so locate it by content.
+const docBySession = (driver, id) => driver.slots.find(
+  (slot) => slot && slot.value && typeof slot.value === 'object'
+    && slot.value.schema_version && slot.value.session_id === id,
+);
+
+test('atif viewer: the causal panel follows the loaded id, not the edited input', async () => {
+  const { calls, driver, page, rendered, panelStub } = renderAtifPage();
+
+  const load = rendered.callbacks[3]('session', 'session-a');
+  calls.fetchAtifBySession[0].resolve(atifDoc('session-a'));
+  await load;
+  await settle();
+  calls.fetchSessionSavings[0].resolve({ items: [] });
+
+  // The user edits the input without pressing Load.
+  driver.slots[2].setter('session-b');
+  const rerendered = driver.render(page);
+
+  const panel = findElementByType(rerendered.element, panelStub.CausalAttributionPanel);
+  assert.ok(panel, 'the causal panel must render once a document is loaded');
+  assert.equal(panel.props.sessionId, 'session-a',
+    'editing the input must not retarget attribution at an unloaded id');
+  assert.equal(panel.props.idKind, 'session');
+});
+
+// ─── ConversationList ─────────────────────────────────────────────────────────
+//
+// Hook-slot map: 0 startMs · 1 endMs · 2 agentNames · 3 selectedAgent ·
+// 4 agentNamesLoading · 5 sessions · 6 loading · 7 error.
+// useCallback order: handleResolvedEvent, syncParams, loadAgentNames, runQuery,
+//   handleQuery.
+
+test('conversation list: the Query button must use the selected end time, not now', async () => {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchSessions',
+    'fetchTraces',
+    'fetchAgentNames',
+    'fetchTimeseries',
+    'fetchInterruptionCount',
+    'fetchInterruptionStats',
+    'fetchInterruptionSessionCounts',
+    'fetchInterruptionConversationCounts',
+    'fetchLatestEvaluation',
+    'fetchTokenSavings',
+  ]);
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    'react-router-dom': {
+      useNavigate: () => () => {},
+      useSearchParams: () => [{ get: () => null }, () => {}],
+    },
+    recharts: {
+      ...componentStub('LineChart'), ...componentStub('Line'), ...componentStub('BarChart'),
+      ...componentStub('Bar'), ...componentStub('XAxis'), ...componentStub('YAxis'),
+      ...componentStub('CartesianGrid'), ...componentStub('Tooltip'), ...componentStub('Legend'),
+      ...componentStub('ResponsiveContainer'),
+    },
+    '../components/InterruptionBadge': componentStub('InterruptionBadge'),
+    '../components/InterruptionPanel': componentStub('InterruptionPanel'),
+    '../components/EvaluationBadge': componentStub('EvaluationBadge'),
+    '../components/EvaluationPanel': componentStub('EvaluationPanel'),
+    '../components/DateTimePicker': componentStub('DateTimePicker'),
+    '../components/SessionIdHelp': componentStub('SessionIdHelp'),
+    '../components/SessionResourceChart': componentStub('SessionResourceChart'),
+    '../i18n': { useI18n: () => ({ t: (key) => key }), useLocaleTag: () => 'en-US' },
+    '../utils/datetime': { formatNsPadded: (ns) => String(ns) },
+    '../utils/timeseriesBuckets': {
+      fillModelBuckets: (data) => data,
+      fillTokenBuckets: (data) => data,
+    },
+    '../utils/apiClient': {
+      ...stubs,
+      conversationInterruptionKey: (sessionId, conversationId) => `${sessionId}\u0000${conversationId}`,
+      UNASSIGNED_INTERRUPTION_BUCKET: '__unassigned__',
+    },
+  };
+  const pageModule = loadPageModule('src/pages/ConversationList.tsx', moduleStubs, driver);
+  const page = pageModule.ConversationList;
+  assert.equal(typeof page, 'function', 'ConversationList must be a component');
+  driver.render(page);
+  // Sanity: slots 0/1 are the query time-range state.
+  const startMs = driver.slots[0].value;
+  assert.equal(typeof startMs, 'number', 'slot 0 must be startMs');
+
+  const selectedEnd = Date.UTC(2024, 0, 2, 3, 4, 5);
+  driver.slots[1].setter(selectedEnd);
+  const rendered = driver.render(page);
+  const handleQuery = rendered.callbacks[4];
+  assert.equal(typeof handleQuery, 'function', 'callbacks[4] must be handleQuery');
+
+  void handleQuery();
+  assert.equal(driver.slots[1].value, selectedEnd,
+    'handleQuery must not overwrite the selected end time');
+  assert.equal(calls.fetchSessions.length, 1, 'the query must fetch sessions');
+  assert.deepEqual(
+    calls.fetchSessions[0].args,
+    [startMs * 1_000_000, selectedEnd * 1_000_000],
+    'the sessions fetch must carry the selected end time',
+  );
+});
+
+// ─── InterruptionPanel ────────────────────────────────────────────────────────
+//
+// Hook-slot map: 0 events · 1 loading · 2 error; useCallback: load.
+
+function collectElements(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const child of node) collectElements(child, out);
+    return out;
+  }
+  if (node.type) out.push(node);
+  if (node.children) collectElements(node.children, out);
+  return out;
+}
+
+test('interruption panel: resolved events are neither counted nor offered Resolve', async () => {
+  const payload = [
+    {
+      interruption_id: 'unresolved-1', resolved: false, severity: 'high',
+      interruption_type: 'loop', occurred_at_ns: 1, call_id: null, detail: null,
+    },
+    {
+      interruption_id: 'resolved-1', resolved: true, severity: 'high',
+      interruption_type: 'loop', occurred_at_ns: 2, call_id: null, detail: null,
+    },
+  ];
+  const tCalls = [];
+  const t = (key, params) => {
+    tCalls.push({ key, params });
+    return key;
+  };
+  const driver = createHooksDriver();
+  const moduleStubs = {
+    '../utils/apiClient': {
+      fetchSessionInterruptions: async () => payload,
+      fetchConversationInterruptions: async () => payload,
+      resolveInterruption: async () => {},
+    },
+    '../i18n': {
+      useI18n: () => ({ t }),
+      useLocaleTag: () => 'en-US',
+      interruptionTypeKey: () => null,
+    },
+    '../utils/datetime': { formatNs: (ns) => String(ns) },
+  };
+  const module = loadPageModule('src/components/InterruptionPanel.tsx', moduleStubs, driver);
+  const Panel = module.InterruptionPanel;
+  assert.equal(typeof Panel, 'function', 'InterruptionPanel must be a component');
+
+  let rendered = driver.render(Panel, { sessionId: 's1' });
+  assert.equal(driver.slots[1].value, true, 'slot 1 must be the loading flag');
+  await rendered.callbacks[0]();
+  rendered = driver.render(Panel, { sessionId: 's1' });
+
+  const countCall = tCalls.find((call) => call.key === 'comp.interrupt.unresolvedCount');
+  assert.ok(countCall, 'the panel must render the unresolved count');
+  assert.equal(countCall.params.n, 1, 'only unresolved events may be counted');
+
+  const elements = collectElements(rendered.element);
+  const rows = elements.filter(
+    (el) => el.props && el.props.event && typeof el.props.onResolved === 'function',
+  );
+  assert.deepEqual(
+    rows.map((el) => el.props.event.interruption_id),
+    ['unresolved-1'],
+    'resolved events must not get a row',
+  );
+
+  // The single row must expose exactly one Resolve affordance.
+  const rowDriver = createHooksDriver();
+  const rowRender = rowDriver.render(rows[0].type, rows[0].props);
+  const resolveButtons = collectElements(rowRender.element).filter(
+    (el) => el.props && el.props.title === 'comp.interrupt.markResolvedTitle',
+  );
+  assert.equal(resolveButtons.length, 1, 'the unresolved row must offer Resolve');
 });

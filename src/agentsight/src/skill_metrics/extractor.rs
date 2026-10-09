@@ -67,10 +67,13 @@ const SKILL_FUNCTION_NAMES: &[&str] = &["skill", "skill_view"];
 /// For other agents: parses `system_instructions` JSON (Vec<InputMessage>)
 /// and applies regex to extract skill names from the XML block.
 pub fn extract_skill_downloads(event: &TraceEventDetail) -> Vec<SkillDownloadRecord> {
+    // conversation_id groups every LLM call of one user query (the task
+    // these session records are documented over); trace_id is the per-call
+    // response id and only remains as a fallback.
     let session_id = event
-        .trace_id
+        .conversation_id
         .clone()
-        .or_else(|| event.conversation_id.clone())
+        .or_else(|| event.trace_id.clone())
         .unwrap_or_default();
     let timestamp_ns = event.start_timestamp_ns;
 
@@ -179,10 +182,13 @@ fn detect_skill_load(name: &str, arguments: &Option<serde_json::Value>) -> Optio
 /// Looks for tool calls where function_name matches Read/ReadFile/read_file
 /// and the file_path argument ends with `/SKILL.md`.
 pub fn extract_skill_loads(event: &TraceEventDetail) -> Vec<SkillLoadRecord> {
+    // conversation_id groups every LLM call of one user query (the task
+    // these session records are documented over); trace_id is the per-call
+    // response id and only remains as a fallback.
     let session_id = event
-        .trace_id
+        .conversation_id
         .clone()
-        .or_else(|| event.conversation_id.clone())
+        .or_else(|| event.trace_id.clone())
         .unwrap_or_default();
     let call_id = event.call_id.clone().unwrap_or_default();
     let timestamp_ns = event.start_timestamp_ns;
@@ -621,8 +627,8 @@ the list is refreshed later in the prompt:
             pid: Some(100),
             user_query: None,
             event_json: None,
-            trace_id: Some("session-1".into()),
-            conversation_id: Some("conv-1".into()),
+            trace_id: Some("resp-1".into()),
+            conversation_id: Some("session-1".into()),
             cache_read_tokens: None,
             status: Some("complete".into()),
             interruption_type: None,
@@ -660,8 +666,8 @@ the list is refreshed later in the prompt:
             pid: Some(9999),
             user_query: None,
             event_json: None,
-            trace_id: Some("cosh-session-1".into()),
-            conversation_id: Some("cosh-conv-1".into()),
+            trace_id: Some("resp-cosh-1".into()),
+            conversation_id: Some("cosh-session-1".into()),
             cache_read_tokens: None,
             status: Some("complete".into()),
             interruption_type: None,
@@ -873,8 +879,8 @@ the list is refreshed later in the prompt:
             pid: Some(8888),
             user_query: None,
             event_json: None,
-            trace_id: Some("qwen-session-1".into()),
-            conversation_id: Some("qwen-conv-1".into()),
+            trace_id: Some("resp-qwen-1".into()),
+            conversation_id: Some("qwen-session-1".into()),
             cache_read_tokens: None,
             status: Some("complete".into()),
             interruption_type: None,

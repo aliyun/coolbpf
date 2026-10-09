@@ -82,6 +82,10 @@ impl AuditStore {
         let extra_json =
             serde_json::to_string(&record.extra).context("Failed to serialize extra")?;
 
+        // Refuse rather than wrap nanosecond values the table cannot hold.
+        let timestamp_ns = ns_to_sqlite(record.timestamp_ns, "timestamp")?;
+        let duration_ns = ns_to_sqlite(record.duration_ns, "duration")?;
+
         let sql = format!(
             "INSERT INTO {} (event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -91,11 +95,11 @@ impl AuditStore {
             &sql,
             params![
                 event_type_str,
-                record.timestamp_ns as i64,
+                timestamp_ns,
                 record.pid,
                 record.ppid.map(|v| v as i64),
                 record.comm,
-                record.duration_ns as i64,
+                duration_ns,
                 extra_json,
                 record.session_id,
             ],
@@ -110,6 +114,7 @@ impl AuditStore {
         since_ns: u64,
         event_type: Option<AuditEventType>,
     ) -> Result<Vec<AuditRecord>> {
+        let since_ns = ns_to_sqlite(since_ns, "since bound")?;
         let (sql, type_str);
         let query_params: Vec<Box<dyn rusqlite::types::ToSql>>;
 
@@ -121,7 +126,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(since_ns as i64), Box::new(type_str.clone())];
+            query_params = vec![Box::new(since_ns), Box::new(type_str.clone())];
         } else {
             sql = format!(
                 "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
@@ -129,7 +134,7 @@ impl AuditStore {
                  ORDER BY timestamp_ns ASC",
                 self.table_name
             );
-            query_params = vec![Box::new(since_ns as i64)];
+            query_params = vec![Box::new(since_ns)];
         }
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -210,7 +215,8 @@ impl AuditStore {
     /// Returns the number of deleted rows.
     pub fn purge_before(&self, cutoff_ns: u64) -> Result<u64> {
         let sql = format!("DELETE FROM {} WHERE timestamp_ns < ?1", self.table_name);
-        let deleted = self.conn.execute(&sql, params![cutoff_ns as i64])?;
+        let cutoff_ns = ns_to_sqlite(cutoff_ns, "purge cutoff")?;
+        let deleted = self.conn.execute(&sql, params![cutoff_ns])?;
         Ok(deleted as u64)
     }
 
@@ -398,6 +404,21 @@ impl AuditStore {
             top_commands,
         })
     }
+}
+
+/// Nanoseconds into the signed representation the audit tables use, refusing
+/// what SQLite cannot hold.
+///
+/// Representability is already enforced one layer up — `system_audit`'s
+/// `reject_unrepresentable_window` refuses it on the API and the sibling
+/// stores check the same conversion — because a wrap is silently wrong in
+/// both directions: a timestamp beyond `i64::MAX` becomes negative, sorts
+/// before every real row, and turns a "since year 2262" bound into "every
+/// row" (`query_since`) or a "purge everything" cutoff into "delete nothing"
+/// (`purge_before`).
+fn ns_to_sqlite(ns: u64, what: &str) -> Result<i64> {
+    i64::try_from(ns)
+        .map_err(|_| anyhow::anyhow!("{what} {ns}ns does not fit in SQLite's signed integer"))
 }
 
 /// Parse a database row into an AuditRecord
@@ -762,5 +783,91 @@ mod tests {
             "billed input = anthropic raw + cache, openai raw only"
         );
         assert_eq!(summary.total_output_tokens, 30);
+    }
+
+    /// In-memory store with the production schema, for the boundary tests.
+    fn in_memory_store() -> AuditStore {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        }
+    }
+
+    fn process_action_at(timestamp_ns: u64) -> AuditRecord {
+        AuditRecord {
+            id: None,
+            event_type: AuditEventType::ProcessAction,
+            timestamp_ns,
+            pid: 42,
+            ppid: Some(1),
+            comm: "bash".to_string(),
+            duration_ns: 0,
+            extra: AuditExtra::ProcessAction {
+                filename: Some("/bin/true".to_string()),
+                args: None,
+                exit_code: Some(0),
+            },
+            session_id: None,
+        }
+    }
+
+    /// The audit tables keep timestamps as i64 nanoseconds — the
+    /// representation the audit API already refuses unrepresentable values
+    /// for (`reject_unrepresentable_window`, and the sibling stores'
+    /// `TimestampOutOfRange`) — but this store's own conversions used a raw
+    /// `as i64`. A larger u64 wrapped into a negative number, so every caller
+    /// silently got the wrong result: `insert` stored a pre-1970 timestamp,
+    /// `query_since` answered EVERY row for a bound in the year 2262+, and
+    /// `purge_before` deleted nothing for a cutoff that means "purge
+    /// everything".
+    #[test]
+    fn nanoseconds_beyond_i64_are_refused_not_wrapped() {
+        let store = in_memory_store();
+        let beyond = u64::MAX; // one nanosecond past 2^63 ns (year 2262+)
+
+        assert!(
+            store.insert(&process_action_at(beyond)).is_err(),
+            "insert must refuse a timestamp that cannot be stored as i64 ns"
+        );
+        assert!(
+            store.query_since(beyond, None).is_err(),
+            "a since bound beyond i64 ns must be refused, not answer every row"
+        );
+        assert!(
+            store.purge_before(beyond).is_err(),
+            "a purge cutoff beyond i64 ns must be refused, not delete nothing"
+        );
+
+        // A duration is the same u64 nanosecond quantity.
+        let mut record = process_action_at(1_000);
+        record.duration_ns = beyond;
+        assert!(
+            store.insert(&record).is_err(),
+            "insert must refuse a duration that cannot be stored as i64 ns"
+        );
+
+        // Representable values keep working end to end.
+        store.insert(&process_action_at(1_000)).unwrap();
+        assert_eq!(store.query_since(1_000, None).unwrap().len(), 1);
+        assert_eq!(
+            store.purge_before(1_001).unwrap(),
+            1,
+            "a representable cutoff still purges"
+        );
     }
 }

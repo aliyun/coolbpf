@@ -1000,6 +1000,35 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::Instant;
 
+    /// A restarted agent is reaped.
+    ///
+    /// Nothing in this crate installs a SIGCHLD handler or calls `waitpid`, so
+    /// a spawned `Child` that is simply dropped leaves the process as a zombie
+    /// until the server exits: one per restart, until the container's `pid_max`
+    /// runs out and every later spawn fails.
+    #[test]
+    fn restarted_agents_are_reaped() {
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+        let pid = super::spawn_restarted_agent(&cmd).expect("the fixture should spawn");
+
+        // The child exits at once. Only a parent that waits removes its /proc
+        // entry; an unreaped one stays with state `Z`.
+        let stat_path = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while stat_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let stat = std::fs::read_to_string(&stat_path).unwrap_or_default();
+        assert!(!stat_path.exists(), "pid {pid} was not reaped: {stat}");
+    }
+
+    /// A restart command with no program is reported, not spawned.
+    #[test]
+    fn a_restart_command_without_a_program_is_an_error() {
+        let error = super::spawn_restarted_agent(&[]).expect_err("an empty command cannot spawn");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
     use actix_web::App;
     use actix_web::body::to_bytes;
     use actix_web::test as awtest;
@@ -2692,6 +2721,98 @@ mod tests {
             detail: Some(r#"{"error":"rate limit"}"#.to_string()),
             resolved: false,
         }
+    }
+
+    /// Both count endpoints build their arrays from a grouping map, so the row
+    /// order was the map's own: arbitrary, and different between two identical
+    /// requests. Every sibling list endpoint orders its array.
+    #[actix_web::test]
+    async fn interruption_count_breakdowns_have_a_defined_order() {
+        let interruption_path = unique_handler_db("interruptions-count-order");
+        let istore = Arc::new(
+            crate::storage::sqlite::InterruptionStore::new_with_path(&interruption_path).unwrap(),
+        );
+        // Totals differ (3, 2, 1, 1, 1) and the ids do not line up with the
+        // order the rows are inserted in.
+        for (id, session, total) in [
+            ("a", "sess-zulu", 3),
+            ("b", "sess-mike", 2),
+            ("c", "sess-alpha", 1),
+            ("d", "sess-kilo", 1),
+            ("e", "sess-yankee", 1),
+        ] {
+            for n in 0..total {
+                istore
+                    .insert(&make_interruption_event(
+                        &format!("int-order-{id}-{n}"),
+                        session,
+                        &format!("conv-order-{id}-{n}"),
+                        crate::interruption::InterruptionType::RateLimit,
+                    ))
+                    .unwrap();
+            }
+        }
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_interruption_store(Arc::clone(&istore)))
+                .service(interruption_session_counts)
+                .service(interruption_conversation_counts),
+        )
+        .await;
+
+        let rows_of = |uri: &str| {
+            let uri = uri.to_string();
+            let app = &app;
+            async move {
+                let body = service_response_json(
+                    awtest::call_service(app, awtest::TestRequest::get().uri(&uri).to_request())
+                        .await,
+                )
+                .await;
+                body.as_array()
+                    .expect("the endpoint returns an array")
+                    .iter()
+                    .map(|row| {
+                        (
+                            row["session_id"].as_str().unwrap_or_default().to_string(),
+                            row["total"].as_i64().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let expected = vec![
+            ("sess-zulu".to_string(), 3),
+            ("sess-mike".to_string(), 2),
+            ("sess-alpha".to_string(), 1),
+            ("sess-kilo".to_string(), 1),
+            ("sess-yankee".to_string(), 1),
+        ];
+        let window = "start_ns=0&end_ns=9223372036854775807";
+        assert_eq!(
+            rows_of(&format!("/interruptions/session-counts?{window}")).await,
+            expected,
+            "biggest total first, then the id"
+        );
+        // The per-conversation breakdown groups by (session, conversation), and
+        // this fixture gives every event its own conversation: eight rows, all
+        // with total 1, so the rule falls through to the ids.
+        let conversation_expected = vec![
+            ("sess-alpha".to_string(), 1),
+            ("sess-kilo".to_string(), 1),
+            ("sess-mike".to_string(), 1),
+            ("sess-mike".to_string(), 1),
+            ("sess-yankee".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+            ("sess-zulu".to_string(), 1),
+        ];
+        assert_eq!(
+            rows_of(&format!("/interruptions/conversation-counts?{window}")).await,
+            conversation_expected,
+            "the per-conversation breakdown uses the same rule"
+        );
     }
 
     #[actix_web::test]
@@ -4653,6 +4774,30 @@ pub async fn delete_agent_health(
 /// POST /api/agent-health/{pid}/restart
 ///
 /// Kill the hung process and re-launch it with its original command line.
+/// Spawn the restarted agent and hand its child handle to a reaper thread.
+///
+/// The request must not wait for the agent to finish, but the process still
+/// needs a parent that calls `wait`: nothing in this crate installs a SIGCHLD
+/// handler or calls `waitpid`, so dropping the `Child` left the re-exec'd agent
+/// as a zombie for the rest of the server's life. Agents restart repeatedly, so
+/// those zombies accumulated one per restart until the container's `pid_max`
+/// ran out and every later `spawn` failed.
+fn spawn_restarted_agent(cmd: &[String]) -> std::io::Result<u32> {
+    let (exe, args) = cmd.split_first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty restart command")
+    })?;
+    let mut child = std::process::Command::new(exe).args(args).spawn()?;
+    let new_pid = child.id();
+    // Detached by design: the handler answers as soon as the agent is started,
+    // so the wait has to happen somewhere that outlives the request.
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            log::warn!("reaping restarted agent pid={new_pid} failed: {error}");
+        }
+    });
+    Ok(new_pid)
+}
+
 #[post("/agent-health/{pid}/restart")]
 pub async fn restart_agent_health(
     data: web::Data<AppState>,
@@ -4710,12 +4855,9 @@ pub async fn restart_agent_health(
     // Step 2: short wait for process to exit
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Step 3: re-exec (background, don't wait)
-    let exe = &cmd[0];
-    let args = &cmd[1..];
-    match Command::new(exe).args(args).spawn() {
-        Ok(child) => {
-            let new_pid = child.id();
+    // Step 3: re-exec (background, don't wait for it to finish)
+    match spawn_restarted_agent(&cmd) {
+        Ok(new_pid) => {
             log::info!("Restarted agent pid={pid} -> new pid={new_pid}, cmd={cmd:?}");
             data.health_store
                 .write()
@@ -5141,9 +5283,17 @@ pub async fn interruption_session_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
+            // Biggest first, then by id. The grouping map's order is arbitrary,
+            // so two identical requests returned the same rows in different
+            // positions; every sibling list endpoint orders its array.
+            let mut grouped: Vec<_> = map
                 .into_iter()
-                .map(|(sid, (total, by_sev, types))| {
+                .map(|(sid, (total, by_sev, types))| (sid, total, by_sev, types))
+                .collect();
+            grouped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let json: Vec<_> = grouped
+                .into_iter()
+                .map(|(sid, total, by_sev, types)| {
                     serde_json::json!({
                         "session_id": sid,
                         "total": total,
@@ -5228,9 +5378,18 @@ pub async fn interruption_conversation_counts(
                     "count": cnt,
                 }));
             }
-            let json: Vec<_> = map
+            // Same ordering rule as the per-session breakdown above.
+            let mut grouped: Vec<_> = map
                 .into_iter()
-                .map(|((sid, cid), (total, by_sev, types))| {
+                .map(|((sid, cid), (total, by_sev, types))| (sid, cid, total, by_sev, types))
+                .collect();
+            grouped.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            });
+            let json: Vec<_> = grouped
+                .into_iter()
+                .map(|(sid, cid, total, by_sev, types)| {
                     serde_json::json!({
                         "session_id": sid,
                         "conversation_id": cid,

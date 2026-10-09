@@ -21,6 +21,23 @@ use std::collections::HashMap;
 /// a single JSON field into an unbounded allocation.
 const MAX_TOOL_CALL_SLOTS: u64 = 256;
 
+/// Accumulate cumulative-or-incremental text into `buf`.
+///
+/// A frame that repeats the whole text so far replaces the buffer; a frame that
+/// carries only an increment appends. Shared by the DashScope native envelope
+/// and by the `choices[].message` snapshots some gateways send, because the
+/// request's `incremental_output` flag is not visible on the response path.
+fn accumulate_text(buf: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if next.starts_with(buf.as_str()) {
+        *buf = next.to_string();
+    } else {
+        buf.push_str(next);
+    }
+}
+
 impl GenAIBuilder {
     /// 从 HTTP request body 直接解析 LLMRequest（OpenAI/Anthropic 格式）
     pub(super) fn parse_request_body(body: &str) -> Option<LLMRequest> {
@@ -537,25 +554,55 @@ impl GenAIBuilder {
                 None => continue,
             };
             for choice in choices {
-                let delta = match choice.get("delta") {
-                    Some(d) => d,
-                    None => continue,
+                // A choice carries either a streaming `delta` or a cumulative
+                // `message` snapshot. SysOM's Copilot stream — and some
+                // OpenAI-compatible gateways, whose final frame is a whole
+                // `message` instead of a last `delta` — send the latter, so
+                // reading only `delta` dropped those frames entirely: their
+                // text, and the `finish_reason` sitting beside them. A snapshot
+                // repeats the answer so far, so it accumulates like the
+                // DashScope native envelope rather than appending blindly.
+                let (delta, cumulative) = match (choice.get("delta"), choice.get("message")) {
+                    (Some(delta), _) => (delta, false),
+                    (None, Some(message)) => (message, true),
+                    (None, None) => {
+                        // Even a choice with no payload can carry the terminal
+                        // finish reason.
+                        if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+                            finish_reason = Some(fr.to_string());
+                        }
+                        continue;
+                    }
                 };
                 // Content
                 if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
-                    content_buf.push_str(c);
+                    if cumulative {
+                        accumulate_text(&mut content_buf, c);
+                    } else {
+                        content_buf.push_str(c);
+                    }
                 }
                 // Reasoning
                 if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                    reasoning_buf.push_str(r);
+                    if cumulative {
+                        accumulate_text(&mut reasoning_buf, r);
+                    } else {
+                        reasoning_buf.push_str(r);
+                    }
                 }
                 // Refusal: OpenAI's safety refusal arrives in its own delta
                 // field, with no content delta alongside it.
                 if let Some(r) = delta.get("refusal").and_then(|v| v.as_str()) {
                     refusal_buf.push_str(r);
                 }
-                // Tool call deltas — merge by index
-                if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                // Tool call deltas — merge by index. A snapshot's calls are
+                // whole, not fragments, so they are left to the typed parsers
+                // that understand their provider shape rather than being
+                // appended into the delta accumulator frame after frame.
+                if let (false, Some(calls)) = (
+                    cumulative,
+                    delta.get("tool_calls").and_then(|v| v.as_array()),
+                ) {
                     for tc in calls {
                         // `index` comes off the wire. A value outside the slot
                         // range must not be truncated into another slot, which
@@ -826,9 +873,12 @@ impl GenAIBuilder {
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
     /// `response.*` events: text arrives as `response.output_text.delta`,
-    /// function calls as `response.output_item.added` (type `function_call`)
+    /// reasoning as `response.reasoning_text.delta` /
+    /// `response.reasoning_summary_text.delta`, function calls as
+    /// `response.output_item.added` (type `function_call`)
     /// plus `response.function_call_arguments.delta`, and the stream closes
-    /// with `response.completed`. The live path reconstructs this through the
+    /// with `response.completed` or, when the output cap ended it,
+    /// `response.incomplete`. The live path reconstructs this through the
     /// analyzer's message parser (`aggregate_responses_sse_chunks`), but the
     /// dead-pid/flush drain path persists through `extract_sse_enrichment` →
     /// `merge_sse_chunks`, which understood none of it — a drained Responses
@@ -845,6 +895,7 @@ impl GenAIBuilder {
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         let mut text_buf = String::new();
+        let mut reasoning_buf = String::new();
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
@@ -860,6 +911,9 @@ impl GenAIBuilder {
             std::collections::HashSet::new();
         let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut orphan_done: Vec<(String, String, String)> = Vec::new();
+        // Set by the terminal `response.incomplete` event when the stream was
+        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`.
+        let mut output_capped = false;
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -869,6 +923,16 @@ impl GenAIBuilder {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
                         text_buf.push_str(delta);
+                    }
+                }
+                // Reasoning models stream their thinking as text deltas on the
+                // same event channel (qwen3-coder via dashscope sends
+                // reasoning_text, the o-series summary_text); both become a
+                // `Reasoning` part like the live parser's reasoning_content.
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                    saw_responses_event = true;
+                    if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        reasoning_buf.push_str(delta);
                     }
                 }
                 "response.output_item.added" => {
@@ -944,6 +1008,21 @@ impl GenAIBuilder {
                         }
                     }
                 }
+                // A capped stream terminates with response.incomplete instead
+                // of response.completed; the cap reason must surface as the
+                // chat-completions "length" finish rather than a clean "stop".
+                "response.incomplete" => {
+                    if let Some(resp) = chunk.get("response") {
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
+                            && resp
+                                .pointer("/incomplete_details/reason")
+                                .and_then(|v| v.as_str())
+                                == Some("max_output_tokens")
+                        {
+                            output_capped = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -981,6 +1060,12 @@ impl GenAIBuilder {
         }
 
         let mut parts = Vec::new();
+        // Reasoning first, same order as the OpenAI chat-completions merger.
+        if !reasoning_buf.is_empty() {
+            parts.push(MessagePart::Reasoning {
+                content: reasoning_buf,
+            });
+        }
         if !text_buf.is_empty() {
             parts.push(MessagePart::Text { content: text_buf });
         }
@@ -991,8 +1076,12 @@ impl GenAIBuilder {
         }
         parts.extend(tool_parts);
 
-        // Same finish-reason convention as the analyzer's aggregator.
-        let finish_reason = if parts
+        // Same finish-reason convention as the analyzer's aggregator: the cap
+        // wins even when a tool call was in flight, because its arguments may
+        // be cut mid-JSON.
+        let finish_reason = if output_capped {
+            Some("length".to_string())
+        } else if parts
             .iter()
             .any(|p| matches!(p, MessagePart::ToolCall { .. }))
         {
@@ -1024,17 +1113,6 @@ impl GenAIBuilder {
         chunks: &[serde_json::Value],
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
         /// Accumulate cumulative-or-incremental text into `buf`.
-        fn accumulate(buf: &mut String, next: &str) {
-            if next.is_empty() {
-                return;
-            }
-            if next.starts_with(buf.as_str()) {
-                *buf = next.to_string();
-            } else {
-                buf.push_str(next);
-            }
-        }
-
         /// Native `content` is a string or an array of `{"text": …}` blocks.
         fn content_text(content: &serde_json::Value) -> String {
             if let Some(s) = content.as_str() {
@@ -1067,7 +1145,7 @@ impl GenAIBuilder {
             saw_native_envelope = true;
 
             if let Some(text) = output.get("text").and_then(|t| t.as_str()) {
-                accumulate(&mut content_buf, text);
+                accumulate_text(&mut content_buf, text);
             }
             if let Some(fr) = Self::dashscope_terminal_finish_reason(output) {
                 finish_reason = Some(fr);
@@ -1086,10 +1164,10 @@ impl GenAIBuilder {
                     continue;
                 };
                 if let Some(content) = message.get("content") {
-                    accumulate(&mut content_buf, &content_text(content));
+                    accumulate_text(&mut content_buf, &content_text(content));
                 }
                 if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
-                    accumulate(&mut reasoning_buf, reasoning);
+                    accumulate_text(&mut reasoning_buf, reasoning);
                 }
                 for (idx, tc) in message
                     .get("tool_calls")
@@ -1705,6 +1783,51 @@ mod tests {
         assert_eq!(finish.as_deref(), Some("tool_calls"));
     }
 
+    /// A drained Responses stream must keep reasoning deltas the same way the
+    /// live parser does (`aggregate_responses_sse_chunks` in
+    /// `analyzer/message/openai.rs`); the merger ignored both reasoning event
+    /// types, so the persisted `output_messages` lost the thinking while the
+    /// same stream captured live kept it as a `Reasoning` part.
+    #[test]
+    fn test_responses_sse_reasoning_deltas_keep_reasoning_part() {
+        let body = r#"[
+            {"type":"response.created","response":{"id":"resp_1","model":"qwen3-coder-plus"}},
+            {"type":"response.reasoning_summary_text.delta","delta":"think "},
+            {"type":"response.reasoning_text.delta","delta":"harder"},
+            {"type":"response.output_text.delta","delta":"answer"},
+            {"type":"response.completed","response":{"id":"resp_1"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2, "reasoning part + text part");
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Reasoning { content } if content == "think harder"
+        ));
+        assert!(matches!(
+            &parts[1],
+            MessagePart::Text { content } if content == "answer"
+        ));
+    }
+
+    /// A token-capped Responses stream terminates with `response.incomplete`
+    /// and `incomplete_details.reason = "max_output_tokens"`. The live parser
+    /// maps that to the chat-completions "length"; the merger hardcoded "stop",
+    /// so a drained row under-reported truncation.
+    #[test]
+    fn test_responses_sse_incomplete_max_output_tokens_is_length() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(finish.as_deref(), Some("length"));
+    }
+
     #[test]
     fn test_extract_parts_from_sse_body_tool_calls() {
         let body = r#"[
@@ -1811,6 +1934,58 @@ mod tests {
     /// DashScope native streaming defaults to `incremental_output=false`, so
     /// every chunk repeats the *cumulative* text. Concatenating would produce
     /// "你你好你好吗". The reconstruction must replace instead.
+    /// A choice may carry a cumulative `message` snapshot instead of a `delta`.
+    /// SysOM's Copilot stream always does, and some OpenAI-compatible gateways
+    /// send one as the final frame; reading only `delta` dropped those frames
+    /// entirely — their text, and the `finish_reason` beside them.
+    #[test]
+    fn test_merge_sse_chunks_reads_message_snapshots() {
+        let body = r#"[
+            {"choices":[{"message":{"content":"Hello"}}]},
+            {"choices":[{"message":{"content":"Hello there!"}}]},
+            {"choices":[{"message":{"content":"Hello there!"},"finish_reason":"stop"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(finish, Some("stop".to_string()));
+        assert_eq!(parts.len(), 1);
+        // The snapshot repeats the answer so far: the last one wins instead of
+        // the three being concatenated.
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "Hello there!"),
+            "{parts:?}"
+        );
+    }
+
+    /// The final OpenAI-compatible frame can be a whole `message` after a run of
+    /// `delta` frames; the snapshot completes the text and carries the finish
+    /// reason the deltas never did.
+    #[test]
+    fn test_merge_sse_chunks_finishes_a_delta_stream_with_a_message_snapshot() {
+        let body = r#"[
+            {"choices":[{"delta":{"content":"Do"},"finish_reason":null}]},
+            {"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(finish, Some("stop".to_string()));
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "Done"),
+            "{parts:?}"
+        );
+    }
+
+    /// A choice that carries neither member still reports its finish reason
+    /// instead of being skipped whole.
+    #[test]
+    fn test_merge_sse_chunks_reads_a_payloadless_finish_reason() {
+        let body = r#"[
+            {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]},
+            {"choices":[{"index":0,"finish_reason":"length"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(finish, Some("length".to_string()));
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "hi"));
+    }
+
     #[test]
     fn test_extract_parts_from_sse_body_dashscope_native_cumulative() {
         let body = r#"[
