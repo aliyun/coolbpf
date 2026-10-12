@@ -637,18 +637,30 @@ impl GenAIBuilder {
                     }
                 }
                 // Refusal: OpenAI's safety refusal arrives in its own delta
-                // field, with no content delta alongside it.
+                // field, with no content delta alongside it. Message snapshots
+                // repeat the refusal accumulated so far, so replace/extend it
+                // using the same rule as snapshot text.
                 if let Some(r) = delta.get("refusal").and_then(|v| v.as_str()) {
-                    refusal_buf.push_str(r);
+                    if cumulative {
+                        accumulate_text(&mut refusal_buf, r);
+                    } else {
+                        refusal_buf.push_str(r);
+                    }
                 }
-                // Tool call deltas — merge by index. A snapshot's calls are
-                // whole, not fragments, so they are left to the typed parsers
-                // that understand their provider shape rather than being
-                // appended into the delta accumulator frame after frame.
-                if let (false, Some(calls)) = (
-                    cumulative,
-                    delta.get("tool_calls").and_then(|v| v.as_array()),
-                ) {
+                // OpenAI tool_calls deltas are fragments; SysOM tool_use and
+                // OpenAI message.tool_calls are complete snapshots. Merge both
+                // by index while preserving each format's update semantics.
+                let tool_calls = delta
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| {
+                        if cumulative {
+                            delta.get("tool_use").and_then(|v| v.as_array())
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(calls) = tool_calls {
                     for tc in calls {
                         // `index` comes off the wire. A value outside the slot
                         // range must not be truncated into another slot, which
@@ -681,7 +693,13 @@ impl GenAIBuilder {
                                 // name:"" on every continuation delta.
                             }
                             if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                                entry.2.push_str(args);
+                                if cumulative {
+                                    if !args.is_empty() {
+                                        entry.2 = args.to_string();
+                                    }
+                                } else {
+                                    entry.2.push_str(args);
+                                }
                             }
                         }
                     }
