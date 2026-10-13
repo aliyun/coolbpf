@@ -789,6 +789,9 @@ impl OpenAIParser {
         let mut first_chunk: Option<&serde_json::Value> = None;
         // Merge tool_call deltas by index: index -> (id, name, arguments_accumulated)
         let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Slot each choice is currently extending, for index-less compatible
+        // streams whose call boundary is not on the wire.
+        let mut current_slot: HashMap<u32, u32> = HashMap::new();
         // Legacy `function_call` deltas (pre-`tool_calls` spelling): the name
         // arrives once, the arguments as string fragments, so they accumulate
         // the same way the indexed tool_calls above do.
@@ -826,7 +829,33 @@ impl OpenAIParser {
                             // slot range must not be truncated into another
                             // slot, which would overwrite a valid tool call's
                             // id, name and arguments.
-                            let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let idx = match tc.get("index").and_then(|v| v.as_u64()) {
+                                Some(idx) => idx,
+                                None => {
+                                    // Unindexed compatible streams keep the
+                                    // sequential fallback: a fragment that
+                                    // carries a name starts the next call,
+                                    // unnamed fragments extend the call they
+                                    // belong to. Keying every index-less
+                                    // fragment to slot 0 folded a later call
+                                    // into the first one's slot.
+                                    let starts_call = tc
+                                        .get("function")
+                                        .and_then(|func| func.get("name"))
+                                        .and_then(|v| v.as_str())
+                                        .is_some_and(|name| !name.is_empty());
+                                    if starts_call {
+                                        tool_call_map
+                                            .keys()
+                                            .max()
+                                            .map_or(0, |slot| u64::from(*slot).saturating_add(1))
+                                    } else {
+                                        u64::from(
+                                            current_slot.get(&choice.index).copied().unwrap_or(0),
+                                        )
+                                    }
+                                }
+                            };
                             if idx >= MAX_TOOL_CALL_SLOTS {
                                 log::debug!(
                                     "[OpenAI] dropping SSE tool_call with out-of-range index {idx}"
@@ -834,6 +863,7 @@ impl OpenAIParser {
                                 continue;
                             }
                             let idx = idx as u32;
+                            current_slot.insert(choice.index, idx);
                             let entry = tool_call_map
                                 .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
@@ -2263,6 +2293,65 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"x\":1}"
+        );
+    }
+
+    /// Compatible providers stream Chat tool calls without an `index`: a
+    /// fragment that carries the name starts a call, unnamed fragments extend
+    /// the call they belong to. Keying every index-less fragment to slot 0
+    /// made the second call's name overwrite the first call's name and
+    /// concatenated both calls' argument fragments into one invalid JSON
+    /// string, so the recorded message held one mangled call instead of two.
+    #[test]
+    fn test_aggregate_sse_chunks_unindexed_sequential_tool_calls() {
+        let chunk = |tc: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"function": {"arguments": "\"/tmp/a.md\"}"}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"id": "call_b", "function": {"name": "write_file", "arguments": "{\"path\":\"/tmp/b.md\"}"}}),
+                Some("tool_calls"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "a name starts a new call; the second call must not overwrite the first: {tc:?}"
+        );
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_a");
+        assert_eq!(tc[0]["function"]["name"].as_str().unwrap(), "read_file");
+        assert_eq!(
+            tc[0]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\":\"/tmp/a.md\"}"
+        );
+        assert_eq!(tc[1].get("id").unwrap().as_str().unwrap(), "call_b");
+        assert_eq!(tc[1]["function"]["name"].as_str().unwrap(), "write_file");
+        assert_eq!(
+            tc[1]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\":\"/tmp/b.md\"}"
         );
     }
 }

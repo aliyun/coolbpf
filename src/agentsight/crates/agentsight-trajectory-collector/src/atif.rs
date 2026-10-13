@@ -319,8 +319,6 @@ pub fn convert_qoder_events(
 
             // Collect tool_results that follow
             let mut k = j;
-            let mut obs_results: Vec<ObservationResult> = Vec::new();
-            let mut result_timestamps: HashMap<String, String> = HashMap::new();
             while k < events.len() {
                 let ne = &events[k];
                 let nt = ne.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -341,55 +339,12 @@ pub fn convert_qoder_events(
                     // break instead so the main loop emits the user step.
                     if !trs.is_empty() && !has_text_block(&nc) {
                         let result_ts = ne.get("timestamp").and_then(|v| v.as_str());
-                        for tr in &trs {
-                            let extra = if tr.is_error {
-                                let mut m = HashMap::new();
-                                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
-                                Some(m)
-                            } else {
-                                None
-                            };
-                            obs_results.push(ObservationResult {
-                                source_call_id: Some(tr.tool_use_id.clone()),
-                                content: Some(serde_json::Value::String(tr.content.clone())),
-                                subagent_trajectory_ref: None,
-                                extra,
-                            });
-                            if let Some(ts) = result_ts {
-                                result_timestamps.insert(tr.tool_use_id.clone(), ts.to_string());
-                            }
-                        }
+                        let _ = merge_tool_results_into_agent_steps(&mut steps, &trs, result_ts);
                         k += 1;
                         continue;
                     }
                 }
                 break;
-            }
-
-            // Write result_timestamp into ToolCall.extra
-            if !result_timestamps.is_empty() {
-                if let Some(last_step) = steps.last_mut() {
-                    if let Some(tcs) = last_step.tool_calls.as_mut() {
-                        for tc in tcs.iter_mut() {
-                            if let Some(ts) = result_timestamps.get(&tc.tool_call_id) {
-                                let mut extra = tc.extra.take().unwrap_or_default();
-                                extra.insert(
-                                    "result_timestamp".into(),
-                                    serde_json::Value::String(ts.clone()),
-                                );
-                                tc.extra = Some(extra);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !obs_results.is_empty() {
-                if let Some(last_step) = steps.last_mut() {
-                    last_step.observation = Some(Observation {
-                        results: obs_results,
-                    });
-                }
             }
 
             i = k;
@@ -894,6 +849,47 @@ mod tests {
             user.observation
         );
         assert!(user.message.contains("also update the docs"));
+    }
+
+    #[test]
+    fn test_convert_late_tool_result_merges_into_its_calling_step() {
+        // A result can arrive after a user interjection and a later assistant
+        // reply. It still belongs to the earlier step that issued the call.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:02Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"actually, hold on\"}]}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-25T10:00:03Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"sure, standing by\"}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-07-25T10:00:04Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"done\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "qoder").unwrap();
+        traj.validate_step_ids().unwrap();
+
+        let calling_step = &traj.steps[0];
+        assert_eq!(calling_step.source, StepSource::Agent);
+        let observation = calling_step
+            .observation
+            .as_ref()
+            .expect("late result must merge into the step that issued the call");
+        assert_eq!(observation.results.len(), 1);
+        assert_eq!(observation.results[0].source_call_id.as_deref(), Some("t1"));
+        assert_eq!(
+            observation.results[0].content.as_ref(),
+            Some(&serde_json::Value::String("done".to_string()))
+        );
+        let tool_call = &calling_step.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(
+            tool_call.extra.as_ref().unwrap().get("result_timestamp"),
+            Some(&serde_json::Value::String(
+                "2026-07-25T10:00:04Z".to_string()
+            ))
+        );
+
+        assert_eq!(traj.steps[1].source, StepSource::User);
+        assert_eq!(traj.steps[1].message, "actually, hold on");
+        assert_eq!(traj.steps[2].source, StepSource::Agent);
+        assert_eq!(traj.steps[2].message, "sure, standing by");
+        assert!(traj.steps[2].observation.is_none());
     }
 
     #[test]
