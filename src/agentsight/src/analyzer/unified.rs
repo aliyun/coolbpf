@@ -27,7 +27,7 @@ use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
 
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
-use super::token::merge_usage;
+use super::token::merge_usage_from_event;
 use super::{
     AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
     TokenRecord, TokenUsage,
@@ -502,17 +502,18 @@ impl Analyzer {
                     // An HTTP/2 SSE body has no `ParsedSseEvent`s, so the h2
                     // path never reaches `extract_token_from_sse`; this array is
                     // its only token source. It must merge like every other SSE
-                    // path: Anthropic splits usage across `message_start`
-                    // (input + cache) and `message_delta` (output) and ends with
-                    // a usage-free `message_stop`, so taking the last event
-                    // yields either no record at all or one with a zero input
-                    // count.
+                    // path: Anthropic splits usage across `message_start` and
+                    // `message_delta`, whose explicitly reported input/cache
+                    // values are authoritative, then ends with a usage-free
+                    // `message_stop`.
                     if let Ok(events) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
                         let parser = TokenParser::new();
-                        let usage = events
-                            .iter()
-                            .filter_map(|event| parser.parse_json(event))
-                            .fold(None, merge_usage);
+                        let usage = events.iter().fold(None, |usage, event| {
+                            match parser.parse_json(event) {
+                                Some(parsed) => merge_usage_from_event(usage, parsed, event),
+                                None => usage,
+                            }
+                        });
                         token_result = usage
                             .map(|usage| {
                                 TokenRecord::new(
@@ -697,10 +698,15 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let mut usage = sse_events
-            .iter()
-            .filter_map(|e| self.token.parse_event(e))
-            .fold(None, merge_usage);
+        let mut usage = sse_events.iter().fold(None, |usage, event| {
+            let Some(parsed) = self.token.parse_event(event) else {
+                return usage;
+            };
+            match event.json_body() {
+                Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                None => crate::analyzer::token::merge_usage(usage, parsed),
+            }
+        });
 
         // The continuation buffer holds the bytes of events a TLS record split,
         // and a split event produces no `ParsedSseEvent` of its own. Its usage
@@ -708,11 +714,11 @@ impl Analyzer {
         // only as a replacement for "nothing at all": Anthropic splits its
         // counters across events (`message_start` carries input plus the cache
         // counters and a placeholder `output_tokens` of 1, the terminal
-        // `message_delta` carries the real output count), so a split that lands
-        // on the terminal event left the placeholder in place while the bytes
-        // that would correct it sat unread in the same call. `merge_usage` takes
-        // the max of each cumulative counter, so folding the reassembled events
-        // in can only raise a counter, never lose one.
+        // `message_delta` carries the final usage), so a split that lands on
+        // the terminal event left preliminary counts in place while the bytes
+        // that would correct them sat unread in the same call. The event merge
+        // preserves cumulative counters and honors explicit final Anthropic
+        // input/cache values.
         if let Some(extra) = continuation_bytes {
             // Re-parse with the legacy SSEParser, which concatenates
             // multi-line `data:` fields — what the OpenAI Responses API's
@@ -720,14 +726,17 @@ impl Analyzer {
             // a single record.
             let text = String::from_utf8_lossy(extra);
             let reassembled = SSEParser::parse_stream(&text);
-            let from_reassembled = reassembled
-                .events
-                .iter()
-                .filter_map(|e| self.token.parse_data(&e.data))
-                .fold(None, merge_usage);
-            if let Some(from_reassembled) = from_reassembled {
-                usage = merge_usage(usage, from_reassembled);
-            }
+            usage = reassembled.events.iter().fold(usage, |usage, event| {
+                let parsed = self.token.parse_data(&event.data);
+                let event_json = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+                match parsed {
+                    Some(parsed) => match event_json {
+                        Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                        None => crate::analyzer::token::merge_usage(usage, parsed),
+                    },
+                    None => usage,
+                }
+            });
             if usage.is_none() {
                 // Last resort: a regex-free scan over the raw buffer text. It
                 // reads the number after a usage field name in arbitrary text,
@@ -1346,6 +1355,9 @@ mod tests {
     use std::rc::Rc;
 
     fn create_test_event(data: &str) -> ParsedSseEvent {
+        // The event stores only its data payload; the `data:` field prefix is
+        // part of the wire format, not the parsed event contents.
+        let data = data.strip_prefix("data: ").unwrap_or(data);
         let ssl_event = Rc::new(SslEvent {
             source: 0,
             timestamp_ns: 1234567890,
@@ -1660,11 +1672,11 @@ mod tests {
         let analyzer = Analyzer::new();
         let request_body = br#"{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}"#;
         let body = concat!(
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1234,",
-            "\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":19480,",
+            "\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":20565,\"output_tokens\":0}}}\n\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},",
-            "\"usage\":{\"output_tokens\":42}}\n\n",
+            "\"usage\":{\"input_tokens\":6,\"output_tokens\":105,\"cache_creation_input_tokens\":100,\"cache_read_input_tokens\":20565}}\n\n",
             "data: {\"type\":\"message_stop\"}\n\n"
         );
         let stream = build_http2_stream(
@@ -1683,9 +1695,14 @@ mod tests {
             })
             .expect("an Anthropic h2 SSE stream must yield a merged TokenRecord");
 
-        assert_eq!(record.input_tokens, 1234, "input comes from message_start");
-        assert_eq!(record.output_tokens, 42, "output comes from message_delta");
-        assert_eq!(record.cache_read_tokens, Some(90));
+        assert_eq!(
+            record.input_tokens, 6,
+            "input comes from final message_delta"
+        );
+        assert_eq!(record.output_tokens, 105, "output comes from message_delta");
+        assert_eq!(record.cache_creation_tokens, Some(100));
+        assert_eq!(record.cache_read_tokens, Some(20565));
+        assert_eq!(record.total_tokens(), 20776);
         assert_eq!(record.provider, "anthropic");
     }
 
@@ -2062,6 +2079,19 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
     }
 
     #[test]
+    fn test_extract_token_from_sse_keeps_partial_event_scan_fallback() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            r#"{"usage":{"input_tokens":57,"output_tokens":3"#,
+        )];
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "test")
+            .expect("partial SSE event should retain scanned token usage");
+        assert_eq!(record.input_tokens, 57);
+        assert_eq!(record.output_tokens, 3);
+    }
+
+    #[test]
     fn test_extract_token_from_sse_continuation_no_usage_returns_none() {
         // Continuation buffer with no parseable token data at all.
         let analyzer = Analyzer::new();
@@ -2075,16 +2105,15 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
 
     #[test]
     fn test_extract_token_from_sse_anthropic_official_merges_start_and_delta() {
-        // Dialect A: message_start carries input + cache, terminal message_delta
-        // carries only output_tokens. The merge must combine both instead of
-        // picking one event (which would drop output or drop input+cache).
+        // DashScope's terminal message_delta carries the final four usage
+        // counters; message_start provides the provisional input snapshot.
         let analyzer = Analyzer::new();
         let events = vec![
             create_test_event(
-                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"cache_creation_input_tokens\":5678,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
             ),
             create_test_event(
-                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1234,\"output_tokens\":42,\"cache_creation_input_tokens\":5678,\"cache_read_input_tokens\":90}}",
             ),
         ];
         let record = analyzer
@@ -2094,6 +2123,27 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         assert_eq!(record.output_tokens, 42);
         assert_eq!(record.cache_creation_tokens, Some(5678));
         assert_eq!(record.cache_read_tokens, Some(90));
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_uses_dashscope_terminal_input() {
+        let analyzer = Analyzer::new();
+        let events = vec![
+            create_test_event(
+                "{\"type\":\"message_start\",\"message\":{\"model\":\"qwen3.7-max\",\"usage\":{\"input_tokens\":19247,\"output_tokens\":0}}}",
+            ),
+            create_test_event(
+                "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":6,\"output_tokens\":241,\"cache_creation_input_tokens\":20351,\"cache_read_input_tokens\":0}}",
+            ),
+        ];
+
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "openclaw")
+            .expect("final Anthropic-compatible usage must produce a record");
+        assert_eq!(record.input_tokens, 6);
+        assert_eq!(record.output_tokens, 241);
+        assert_eq!(record.cache_creation_tokens, Some(20351));
+        assert_eq!(record.total_tokens(), 20598);
     }
 
     /// Anthropic splits its counters across events, and the terminal one can be
@@ -2121,22 +2171,20 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
     }
 
     #[test]
-    fn a_continuation_buffer_cannot_lower_the_event_counters() {
-        // The merge takes the max of each counter, so a continuation buffer
-        // whose text mentions a smaller count leaves the exact value in place.
+    fn a_continuation_terminal_delta_replaces_preliminary_input() {
         let analyzer = Analyzer::new();
         let events = vec![create_test_event(
-            "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":42}}",
+            "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":19247,\"output_tokens\":0}}}",
         )];
-        let continuation =
-            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
+        let continuation = b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":6,\"output_tokens\":241,\"cache_creation_input_tokens\":20351}}\n\n";
 
         let record = analyzer
             .extract_token_from_sse(&events, Some(continuation), 1234, "test")
             .expect("the event usage must be kept");
 
-        assert_eq!(record.input_tokens, 1234);
-        assert_eq!(record.output_tokens, 42);
+        assert_eq!(record.input_tokens, 6);
+        assert_eq!(record.output_tokens, 241);
+        assert_eq!(record.total_tokens(), 20598);
     }
 
     #[test]

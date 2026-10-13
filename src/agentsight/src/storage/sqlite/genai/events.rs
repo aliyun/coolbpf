@@ -88,7 +88,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -202,7 +205,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -254,7 +260,10 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -310,7 +319,10 @@ impl GenAISqliteStore {
         let sql = if agent_name.is_some() {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -324,7 +336,10 @@ impl GenAISqliteStore {
         } else {
             "SELECT id, call_id, start_timestamp_ns, end_timestamp_ns,
                     model,
-                    COALESCE(input_tokens, 0)  AS input_tokens,
+                    CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
+                         WHEN LOWER(COALESCE(provider, '')) = 'anthropic'
+                         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)
+                         ELSE COALESCE(input_tokens, 0) END AS input_tokens,
                     COALESCE(output_tokens, 0) AS output_tokens,
                     COALESCE(total_tokens, 0)  AS total_tokens,
                     input_messages, output_messages, system_instructions,
@@ -524,12 +539,12 @@ impl GenAISqliteStore {
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
                         is_sse, sse_event_count, event_json, tool_call_ids, call_kind,
-                        first_output_timestamp_ns
+                        first_output_timestamp_ns, input_tokens_includes_cache
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
                     )",
                     params![
                         "llm_call",
@@ -576,6 +591,7 @@ impl GenAISqliteStore {
                         call.metadata
                             .get("first_output_timestamp_ns")
                             .and_then(|value| value.parse::<i64>().ok()),
+                        1i64,
                     ],
                 )?;
             }

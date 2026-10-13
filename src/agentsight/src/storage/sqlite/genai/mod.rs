@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{BatchConfig, PeriodicStoragePolicy};
 
-/// SQL mirror of [`TokenRecord::billed_input_tokens`], as a `CASE` expression
-/// over the raw columns.
+/// SQL mirror of [`TokenRecord::billed_input_tokens`], accounting for legacy
+/// rows that stored provider-reported input separately from cache counters.
 ///
 /// Anthropic reports `cache_creation_tokens` / `cache_read_tokens` outside
 /// `input_tokens`, so they add to the billed input. OpenAI-compatible gateways
@@ -36,10 +36,8 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// cannot call the Rust helper, so the rule is restated here — keep the two in
 /// sync.
 ///
-/// Deriving totals from the raw columns instead of reading the stored
-/// `total_tokens` also corrects rows written before this rule existed, since
-/// `input_tokens` and the cache columns have always held what the provider
-/// reported.
+/// New rows store semantic input tokens (including cache tokens) and mark
+/// that representation. Older rows retain their provider-reported values.
 ///
 /// Expands to a string literal so callers assemble their query with `concat!`
 /// into a fixed `&'static str`, honouring the storage-layer rule that SQL is
@@ -49,9 +47,10 @@ use crate::config::{BatchConfig, PeriodicStoragePolicy};
 /// [`TokenRecord::billed_input_tokens`]: crate::analyzer::TokenRecord::billed_input_tokens
 macro_rules! billed_input_col {
     () => {
-        "CASE WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
-         THEN input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
-         ELSE input_tokens END"
+        "CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0) \
+         WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
+         THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
+         ELSE COALESCE(input_tokens, 0) END"
     };
 }
 pub(crate) use billed_input_col;
