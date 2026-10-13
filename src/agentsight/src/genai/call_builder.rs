@@ -74,7 +74,9 @@ impl GenAIBuilder {
         // Build token usage from TokenRecord
         let token_usage = token_record.as_ref().map(|t| {
             TokenUsage {
-                input_tokens: t.input_tokens as u32,
+                // GenAI semantic conventions include cached tokens in the
+                // input total, even when the provider reports them separately.
+                input_tokens: t.billed_input_tokens() as u32,
                 output_tokens: t.output_tokens as u32,
                 // Whether the cache counters belong in the total depends on the
                 // provider, so let TokenRecord own that rule.
@@ -1502,6 +1504,26 @@ mod tests {
         assert_eq!(tu.total_tokens, 30);
         assert_eq!(tu.cache_creation_input_tokens, Some(5));
         assert_eq!(tu.cache_read_input_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_build_llm_call_includes_anthropic_cache_in_semantic_input() {
+        let builder = GenAIBuilder::new();
+        let http = make_http("/v1/messages", None, None);
+        let token = TokenRecord::new(100, "openclaw".to_string(), "anthropic".to_string(), 6, 105)
+            .with_cache_tokens(100, 20_565);
+
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
+        )
+        .expect("Anthropic call builds");
+        let usage = call.token_usage.expect("token usage is present");
+        assert_eq!(usage.input_tokens, 20_671);
+        assert_eq!(usage.output_tokens, 105);
+        assert_eq!(usage.total_tokens, 20_776);
+        assert_eq!(usage.cache_creation_input_tokens, Some(100));
+        assert_eq!(usage.cache_read_input_tokens, Some(20_565));
     }
 
     #[test]

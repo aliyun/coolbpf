@@ -81,9 +81,9 @@ pub struct SseEnrichment {
     pub sse_event_count: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
-    /// Cache counters as the provider reported them; the live path stores the
-    /// same columns, and the drained-call total bills them for providers that
-    /// keep them outside `input_tokens` (see `billed_input_col!`).
+    /// Cache counters as the provider reported them. Drain persistence folds
+    /// these into semantic input for Anthropic-compatible providers that
+    /// report them outside `input_tokens`.
     pub cache_creation_tokens: Option<i64>,
     pub cache_read_tokens: Option<i64>,
 }
@@ -304,6 +304,7 @@ impl GenAISqliteStore {
                         finish_reasons      = ?15,
                         server_address      = ?16,
                         input_tokens        = ?17,
+                        input_tokens_includes_cache = 1,
                         output_tokens       = ?18,
                         total_tokens        = ?19,
                         cache_creation_tokens = ?20,
@@ -419,6 +420,7 @@ impl GenAISqliteStore {
                             finish_reasons      = ?15,
                             server_address      = ?16,
                             input_tokens        = ?17,
+                            input_tokens_includes_cache = 1,
                             output_tokens       = ?18,
                             total_tokens        = ?19,
                             cache_creation_tokens = ?20,
@@ -582,8 +584,14 @@ impl GenAISqliteStore {
     ) -> Vec<crate::interruption::RecentCallSummary> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // Subquery fetches latest N rows desc, outer query reverses to asc order
-        let sql = "SELECT call_id, output_messages, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0) \
-                   FROM (SELECT call_id, output_messages, input_tokens, output_tokens, start_timestamp_ns \
+        let sql = "SELECT call_id, output_messages, \
+                          CASE WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0) \
+                               WHEN LOWER(COALESCE(provider, '')) = 'anthropic' \
+                               THEN COALESCE(input_tokens, 0) + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0) \
+                               ELSE COALESCE(input_tokens, 0) END, \
+                          COALESCE(output_tokens, 0) \
+                   FROM (SELECT call_id, output_messages, input_tokens, output_tokens, \
+                                provider, cache_creation_tokens, cache_read_tokens, input_tokens_includes_cache, start_timestamp_ns \
                          FROM genai_events \
                          WHERE event_type = 'llm_call' \
                            AND conversation_id = ?1 \
@@ -755,28 +763,43 @@ impl GenAISqliteStore {
             })
             .and_then(|messages| crate::genai::semantic::tool_call_ids_json(&messages));
         conn.execute(
-            // `total_tokens` restates the billed-input rule of
-            // `billed_input_col!`: Anthropic reports the cache counters
-            // outside `input_tokens` and bills them on top, every other
-            // provider already includes cached tokens in its reported input.
-            // The provider is taken after this UPDATE's own COALESCE so the
-            // row's stored provider and the enrichment's agree.
+            // The SSE enrichment contains provider-reported input. Store the
+            // semantic input convention used by live GenAI events, and mark
+            // it so aggregate readers do not add Anthropic cache tokens a
+            // second time. The provider is taken after this UPDATE's own
+            // COALESCE so the row's stored provider and the enrichment agree.
             "UPDATE genai_events SET
                 model            = COALESCE(?2, model),
                 trace_id         = COALESCE(?3, trace_id),
                 provider         = COALESCE(?4, provider),
                 output_messages  = COALESCE(?5, output_messages),
                 sse_event_count  = COALESCE(?6, sse_event_count),
-                input_tokens     = COALESCE(?7, input_tokens),
+                input_tokens     = CASE
+                                     WHEN ?7 IS NULL THEN input_tokens
+                                     WHEN LOWER(COALESCE(COALESCE(?4, provider), '')) = 'anthropic'
+                                     THEN ?7 + COALESCE(?10, cache_creation_tokens, 0)
+                                          + COALESCE(?11, cache_read_tokens, 0)
+                                     ELSE ?7
+                                   END,
+                input_tokens_includes_cache = CASE
+                                     WHEN ?7 IS NOT NULL THEN 1
+                                     ELSE input_tokens_includes_cache
+                                   END,
                 output_tokens    = COALESCE(?8, output_tokens),
                 cache_creation_tokens = COALESCE(?10, cache_creation_tokens),
                 cache_read_tokens     = COALESCE(?11, cache_read_tokens),
                 total_tokens     = CASE
+                                     WHEN ?7 IS NOT NULL
+                                          AND LOWER(COALESCE(COALESCE(?4, provider), '')) = 'anthropic'
+                                     THEN ?7 + COALESCE(?10, cache_creation_tokens, 0)
+                                              + COALESCE(?11, cache_read_tokens, 0)
+                                     WHEN ?7 IS NOT NULL THEN ?7
+                                     WHEN input_tokens_includes_cache = 1 THEN COALESCE(input_tokens, 0)
                                      WHEN LOWER(COALESCE(COALESCE(?4, provider), '')) = 'anthropic'
-                                     THEN COALESCE(?7, input_tokens, 0)
+                                     THEN COALESCE(input_tokens, 0)
                                         + COALESCE(?10, cache_creation_tokens, 0)
                                         + COALESCE(?11, cache_read_tokens, 0)
-                                     ELSE COALESCE(?7, input_tokens, 0)
+                                     ELSE COALESCE(input_tokens, 0)
                                    END
                                  + COALESCE(?8, output_tokens, 0),
                 tool_call_ids    = COALESCE(?9, tool_call_ids)

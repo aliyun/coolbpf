@@ -2841,12 +2841,12 @@ fn test_enrich_pending_from_sse_records_usage_cache_counters() {
         .unwrap();
 
     let conn = store.conn.lock().unwrap();
-    let (cc, cr, total): (Option<i64>, Option<i64>, i64) = conn
+    let (cc, cr, input, total): (Option<i64>, Option<i64>, i64, i64) = conn
         .query_row(
-            "SELECT cache_creation_tokens, cache_read_tokens, total_tokens \
+            "SELECT cache_creation_tokens, cache_read_tokens, input_tokens, total_tokens \
              FROM genai_events WHERE call_id = 'call-5'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap();
     assert_eq!(
@@ -2855,9 +2855,29 @@ fn test_enrich_pending_from_sse_records_usage_cache_counters() {
         "the drained call must keep the cache counters its stream reported"
     );
     assert_eq!(
+        input,
+        10 + 1234 + 24576,
+        "new drained rows store semantic input including cached tokens"
+    );
+    let billed_input: i64 = conn
+        .query_row(
+            concat!(
+                "SELECT ",
+                billed_input_col!(),
+                " FROM genai_events WHERE call_id = 'call-5'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        billed_input, input,
+        "aggregation must not add cached tokens again"
+    );
+    assert_eq!(
         total,
-        10 + 1234 + 24576 + 5,
-        "an anthropic drained call totals the billed input (input + cache) plus output"
+        input + 5,
+        "total_tokens uses semantic input plus output"
     );
     drop(conn);
     cleanup_db(&path);

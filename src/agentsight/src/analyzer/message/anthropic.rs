@@ -30,15 +30,6 @@ use super::types::{
     MessageRole,
 };
 
-/// Max of two optional counters, preserving a value when only one is set.
-fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (x, None) => x,
-        (None, y) => y,
-    }
-}
-
 /// Parser for Anthropic Messages API
 ///
 /// Provides methods to parse JSON request and response bodies
@@ -334,29 +325,27 @@ impl AnthropicParser {
                             stop_reason = delta.stop_reason.clone();
                         }
                         if let Some(du) = delta_usage {
-                            // Counters are cumulative and split across events:
-                            // official Anthropic puts input+cache in
-                            // message_start, while some proxies report the full
-                            // terminal usage here instead. Take the max of each
-                            // so neither layout loses data.
+                            // The start event is an early snapshot; compatible
+                            // providers can correct its input/cache counts in the
+                            // final delta. Use explicitly reported delta fields,
+                            // while retaining fields omitted by official
+                            // Anthropic's output-only terminal delta.
                             let prev = usage.as_ref();
                             usage = Some(AnthropicUsage {
-                                input_tokens: prev
-                                    .map(|u| u.input_tokens)
-                                    .unwrap_or(0)
-                                    .max(du.input_tokens.unwrap_or(0)),
+                                input_tokens: du
+                                    .input_tokens
+                                    .or_else(|| prev.map(|u| u.input_tokens))
+                                    .unwrap_or(0),
                                 output_tokens: prev
                                     .map(|u| u.output_tokens)
                                     .unwrap_or(0)
                                     .max(du.output_tokens),
-                                cache_creation_input_tokens: max_opt(
-                                    prev.and_then(|u| u.cache_creation_input_tokens),
-                                    du.cache_creation_input_tokens,
-                                ),
-                                cache_read_input_tokens: max_opt(
-                                    prev.and_then(|u| u.cache_read_input_tokens),
-                                    du.cache_read_input_tokens,
-                                ),
+                                cache_creation_input_tokens: du
+                                    .cache_creation_input_tokens
+                                    .or_else(|| prev.and_then(|u| u.cache_creation_input_tokens)),
+                                cache_read_input_tokens: du
+                                    .cache_read_input_tokens
+                                    .or_else(|| prev.and_then(|u| u.cache_read_input_tokens)),
                             });
                         }
                     }
@@ -1008,6 +997,30 @@ mod tests {
         assert_eq!(resp.usage.output_tokens, 13);
         assert_eq!(resp.usage.cache_creation_input_tokens, Some(22178));
         assert_eq!(resp.usage.cache_read_input_tokens, Some(7));
+    }
+
+    /// DashScope's documented terminal event replaces the preliminary input
+    /// count from `message_start`, even when the final value is lower.
+    #[test]
+    fn test_aggregate_sse_terminal_usage_replaces_preliminary_input() {
+        let events = serde_json::json!([
+            {"type": "message_start", "message": {
+                "id": "msg_dashscope", "type": "message", "role": "assistant",
+                "model": "qwen3.7-max", "content": [],
+                "usage": {"input_tokens": 19480, "output_tokens": 0,
+                           "cache_creation_input_tokens": 100,
+                           "cache_read_input_tokens": 20565}}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"input_tokens": 6, "output_tokens": 105,
+                       "cache_creation_input_tokens": 100,
+                       "cache_read_input_tokens": 20565}}
+        ]);
+
+        let response = AnthropicParser::parse_response(&events).expect("should aggregate");
+        assert_eq!(response.usage.input_tokens, 6);
+        assert_eq!(response.usage.output_tokens, 105);
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(100));
+        assert_eq!(response.usage.cache_read_input_tokens, Some(20565));
     }
 
     /// Test: SSE stream whose terminal `message_delta` reports only the cache

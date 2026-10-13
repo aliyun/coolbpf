@@ -212,6 +212,9 @@ impl GenAISqliteStore {
         // v9: first provider event that carries model output
         ensure_col!("first_output_timestamp_ns", "INTEGER");
 
+        // v10: distinguish semantic input totals from legacy raw provider input
+        ensure_col!("input_tokens_includes_cache", "INTEGER NOT NULL DEFAULT 0");
+
         Ok(())
     }
 

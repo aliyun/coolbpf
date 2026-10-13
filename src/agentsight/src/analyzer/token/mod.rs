@@ -320,6 +320,46 @@ pub(crate) fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<T
     Some(cur)
 }
 
+/// Merge one parsed usage snapshot with its source event.
+///
+/// Anthropic-compatible streams can send preliminary counts in `message_start`
+/// and authoritative counts in the final `message_delta`. Preserve the
+/// cumulative max behavior for other fields and providers, but let an
+/// explicitly present Anthropic input/cache field replace the earlier value.
+pub(crate) fn merge_usage_from_event(
+    acc: Option<TokenUsage>,
+    next: TokenUsage,
+    event: &serde_json::Value,
+) -> Option<TokenUsage> {
+    let mut merged = merge_usage(acc, next)?;
+    if event.get("type").and_then(serde_json::Value::as_str) != Some("message_delta") {
+        return Some(merged);
+    }
+
+    let Some(usage) = event.get("usage") else {
+        return Some(merged);
+    };
+    if let Some(input_tokens) = usage
+        .get("input_tokens")
+        .and_then(serde_json::Value::as_u64)
+    {
+        merged.input_tokens = input_tokens;
+    }
+    if let Some(cache_tokens) = usage
+        .get("cache_creation_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+    {
+        merged.cache_creation_input_tokens = Some(cache_tokens);
+    }
+    if let Some(cache_tokens) = usage
+        .get("cache_read_input_tokens")
+        .and_then(serde_json::Value::as_u64)
+    {
+        merged.cache_read_input_tokens = Some(cache_tokens);
+    }
+    Some(merged)
+}
+
 /// Max of two optional counters, preserving a value when only one is set.
 fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
