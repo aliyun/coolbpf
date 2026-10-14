@@ -172,7 +172,8 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 
     // ============== Yi Models (01.AI) ==============
     m.insert("yi-6b-chat", "01-ai/Yi-6B-Chat");
-    m.insert("yi-9b-chat", "01-ai/Yi-9B-Chat");
+    // 01.AI never released a Yi-9B chat model; its 9B chat release is Yi-1.5.
+    m.insert("yi-9b-chat", "01-ai/Yi-1.5-9B-Chat");
     m.insert("yi-34b-chat", "01-ai/Yi-34B-Chat");
     m.insert("yi-1.5-9b-chat", "01-ai/Yi-1.5-9B-Chat");
     m.insert("yi-1.5-34b-chat", "01-ai/Yi-1.5-34B-Chat");
@@ -449,6 +450,13 @@ mod tests {
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
+    }
+
+    /// `01-ai/Yi-9B-Chat` does not exist (the 9B chat release is Yi-1.5), so
+    /// `yi-9b-chat` failed `register_from_hf` on every call.
+    #[test]
+    fn test_yi_9b_chat_maps_to_a_published_repo() {
+        assert_eq!(map_to_hf_model_id("yi-9b-chat"), "01-ai/Yi-1.5-9B-Chat");
     }
 
     #[test]
