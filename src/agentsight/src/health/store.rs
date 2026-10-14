@@ -5,7 +5,7 @@
 //! health checker thread and the API handler via `Arc<RwLock<...>>`.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -178,12 +178,20 @@ impl HealthStore {
     }
 }
 
-/// Current time in Unix milliseconds
+/// Current time in Unix milliseconds; 0 if the clock is before the epoch.
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    now_ms_at(SystemTime::now())
+}
+
+/// Milliseconds since the Unix epoch at `at`, 0 when the clock reads before it.
+///
+/// Split from `now_ms` so the pre-epoch boundary is exercisable directly. A
+/// host whose realtime clock reads before 1970-01-01 (a failed RTC battery, a
+/// VM restored from a stale snapshot) makes `duration_since` fail while the
+/// health checker calls this on every scan; it degrades to 0 like the
+/// `utils::epoch_nanos` family instead of taking the scan down.
+fn now_ms_at(at: SystemTime) -> u64 {
+    crate::utils::epoch_nanos(at) / 1_000_000
 }
 
 #[cfg(test)]
@@ -388,5 +396,24 @@ mod tests {
         let store = HealthStore::default();
         assert_eq!(store.all_agents().len(), 0);
         assert_eq!(store.last_scan_time, 0);
+    }
+
+    /// A host whose realtime clock reads before 1970-01-01 (a failed RTC
+    /// battery, a VM restored from a stale snapshot) makes `duration_since`
+    /// fail; the health checker calls `now_ms` on every scan, so this must
+    /// degrade to 0 like the `utils::epoch_nanos` family instead of panicking.
+    #[test]
+    fn now_ms_maps_a_pre_epoch_clock_to_zero_without_panicking() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(now_ms_at(UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(now_ms_at(UNIX_EPOCH - Duration::from_secs(1_000_000)), 0);
+        assert_eq!(now_ms_at(UNIX_EPOCH), 0);
+    }
+
+    #[test]
+    fn now_ms_counts_forward_from_the_epoch() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(now_ms_at(UNIX_EPOCH + Duration::from_secs(1)), 1_000);
+        assert_eq!(now_ms_at(UNIX_EPOCH + Duration::from_millis(1)), 1);
     }
 }
