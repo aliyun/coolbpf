@@ -136,6 +136,9 @@ agentsight audit --pid 12345 --type llm
 
 # Summary statistics
 agentsight audit --summary
+
+# Read a database copied from another host
+agentsight audit --db /backup/agentsight/agentsight.db
 ```
 
 ### `agentsight serve`

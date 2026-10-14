@@ -91,6 +91,13 @@ fn interruption_type_values() -> &'static [&'static str] {
 /// Severity levels: critical, high, medium, low
 #[derive(Debug, StructOpt, Clone)]
 pub struct InterruptionCommand {
+    /// Override the database path
+    ///
+    /// Reads a copy of the database instead of the default location — for
+    /// example a database copied from another host for offline analysis.
+    #[structopt(long)]
+    pub db: Option<String>,
+
     #[structopt(subcommand)]
     pub action: InterruptionAction,
 }
@@ -234,11 +241,21 @@ pub enum InterruptionAction {
 }
 
 impl InterruptionCommand {
-    pub fn execute(&self) {
-        let db_path = default_db_path();
+    /// Resolve the database path: `--db` reads a copy of the database (a
+    /// database copied from another host, or one in a non-default data
+    /// directory); without it the default location is used.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(default_db_path)
+    }
 
-        if !db_path.exists() {
-            eprintln!("Database file not found: {db_path:?}");
+    pub fn execute(&self) {
+        let db_path = self.db_path();
+
+        if let Err(error) = agentsight::check_data_file(&db_path) {
+            eprintln!("{error}");
             std::process::exit(1);
         }
 
@@ -711,6 +728,28 @@ mod tests {
             }
             other => panic!("expected List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn db_path_honours_the_override_and_falls_back_to_the_default() {
+        // `--db` must be accepted in the documented position (before the
+        // subcommand) and reach the query path: reverting the wiring
+        // (returning the default unconditionally) makes this fail.
+        let plain = InterruptionCommand::from_iter_safe(["interruption", "list"])
+            .expect("a plain invocation still parses");
+        assert_eq!(plain.db_path(), default_db_path());
+
+        let overridden = InterruptionCommand::from_iter_safe([
+            "interruption",
+            "--db",
+            "/tmp/agentsight_interruption_override.db",
+            "list",
+        ])
+        .expect("--db must parse before the subcommand, as documented");
+        assert_eq!(
+            overridden.db_path(),
+            std::path::PathBuf::from("/tmp/agentsight_interruption_override.db")
+        );
     }
 
     #[test]
