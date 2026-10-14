@@ -35,12 +35,12 @@ fn contains_tool_failure_signal(raw: &str) -> bool {
         return true;
     }
 
+    // An unparseable payload that still names a tool response carries that
+    // response's text verbatim, so the same error signals apply — with the
+    // generic words excluded like everywhere else in this file.
     let text = raw.to_ascii_lowercase();
     text.contains("tool_call_response")
-        && (text.contains("\"error\"")
-            || text.contains("traceback")
-            || text.contains("exception")
-            || text.contains("failed"))
+        && (text.contains("\"error\"") || text.contains("traceback"))
 }
 
 fn contains_structured_tool_failure_signal(raw: &str) -> bool {
@@ -133,11 +133,18 @@ fn value_has_error_signal(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether free-form tool text carries an error signal.
+///
+/// Deliberately excludes generic words like "exception" or "failed" — the
+/// detector's twin scan (`text_has_tool_error_signal`) excludes them for the
+/// same reason: normal, non-error output routinely contains them ("handled the
+/// exception gracefully", "test result: ok. 30 passed; 0 failed"). Reading
+/// them here flagged a passing run as a deterministic tool failure, so the
+/// `tool_use` dimension scored 0.45 with a `tool_failure` finding while the
+/// detector recorded no failure for the same payload.
 fn text_has_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
-        || lower.contains("exception")
-        || lower.contains("failed")
         || mentions_failing_exit_code(&lower)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
@@ -571,6 +578,55 @@ mod tests {
             assert!(
                 looks_like_tool_failure(&event),
                 "an errno spelling is a tool failure: {payload}"
+            );
+        }
+    }
+
+    /// A passing run reports how many checks failed, and free-form output
+    /// routinely mentions an exception it handled. The detector's twin scan
+    /// deliberately excludes those bare words, so the same payload must not
+    /// be a deterministic failure here either: before this, a clean
+    /// `test result: ok. 30 passed; 0 failed` scored `tool_use` 0.45 with a
+    /// `tool_failure` finding while the detector recorded no failure.
+    #[test]
+    fn a_passing_run_reporting_its_failure_count_is_not_a_tool_failure() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"test result: ok. 30 passed; 0 failed"}]"#,
+            r#"[{"type":"tool_result","content":"handled the exception gracefully"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a result that only mentions failures is not one: {payload}"
+            );
+        }
+
+        // The request replay carries the same result in the parts shape.
+        let replayed = event(
+            Some(
+                r#"[{"role":"user","parts":[{"type":"tool_call_response","id":"t1","response":{"content":"scanned 3 files; 0 failed checks"}}]}]"#,
+            ),
+            Some(r#"[{"role":"assistant","parts":[{"type":"text","content":"done"}]}]"#),
+            None,
+        );
+        assert!(
+            !looks_like_tool_failure(&replayed),
+            "a replayed pass count is not a failure either"
+        );
+    }
+
+    /// The trim does not silence the real signals: a traceback and an error
+    /// prefix keep firing after the generic words are gone.
+    #[test]
+    fn the_remaining_signals_still_fire_after_the_trim() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"Traceback (most recent call last):"}]"#,
+            r#"[{"type":"tool_result","content":"Error: cannot open the config"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "a real signal still fires: {payload}"
             );
         }
     }

@@ -596,8 +596,11 @@ mod tests {
     fn weighted_score_and_score_cutoffs_are_discriminating() {
         let mut snapshot = input(vec![event(1, "complete", 250_000)]);
         snapshot.interruptions = vec![interruption("rate_limit", "medium", false)];
+        // The fixture needs a tool_use failure; it names a traceback because
+        // the bare word "failed" alone is not a failure signal in either scan
+        // (a passing run's "0 failed" summary contains it).
         snapshot.events[0].output_messages = Some(
-            r#"[{"role":"assistant","content":"tool_call_response: {\"error\":\"failed\"}"}]"#
+            r#"[{"role":"assistant","content":"tool_call_response: {\"error\":\"failed to read config\", \"traceback\":\"FileNotFoundError\"}"}]"#
                 .to_string(),
         );
 
