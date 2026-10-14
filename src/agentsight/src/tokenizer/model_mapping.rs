@@ -94,11 +94,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qwen-max", "Qwen/Qwen2.5-72B-Instruct");
     m.insert("qwen-long", "Qwen/Qwen2.5-32B-Instruct");
 
-    // Qwen 3 series (newer)
-    m.insert("qwen3-8b-instruct", "Qwen/Qwen3-8B-Instruct");
-    m.insert("qwen3-14b-instruct", "Qwen/Qwen3-14B-Instruct");
-    m.insert("qwen3-32b-instruct", "Qwen/Qwen3-32B-Instruct");
-    m.insert("qwen3-72b-instruct", "Qwen/Qwen3-72B-Instruct");
+    // Qwen 3 series (newer). Qwen3 ships its dense models as one hybrid
+    // repo per size with no `-Instruct` suffix, and has no 72B; every size
+    // shares one vocabulary, so the 72B name takes the largest dense repo.
+    m.insert("qwen3-8b-instruct", "Qwen/Qwen3-8B");
+    m.insert("qwen3-14b-instruct", "Qwen/Qwen3-14B");
+    m.insert("qwen3-32b-instruct", "Qwen/Qwen3-32B");
+    m.insert("qwen3-72b-instruct", "Qwen/Qwen3-32B");
     // Qwen 3 coder family (used by codex 0.137+ via dashscope) — fall back
     // to the same-vocabulary Qwen2.5-Coder tokenizer for offline counting.
     m.insert("qwen3-coder-plus", "Qwen/Qwen2.5-Coder-32B-Instruct");
@@ -432,6 +434,21 @@ mod tests {
             map_to_hf_model_id("qwen2.5-7b-instruct"),
             "Qwen/Qwen2.5-7B-Instruct"
         );
+    }
+
+    /// Qwen3 publishes no `-Instruct` repos and no 72B, so the four names
+    /// mapped to `Qwen/Qwen3-<size>-Instruct` failed `register_from_hf` on
+    /// every call. Each must map to a published Qwen3 repo.
+    #[test]
+    fn test_qwen3_names_map_to_published_repos() {
+        for (name, repo) in [
+            ("qwen3-8b-instruct", "Qwen/Qwen3-8B"),
+            ("qwen3-14b-instruct", "Qwen/Qwen3-14B"),
+            ("qwen3-32b-instruct", "Qwen/Qwen3-32B"),
+            ("qwen3-72b-instruct", "Qwen/Qwen3-32B"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
     }
 
     #[test]
