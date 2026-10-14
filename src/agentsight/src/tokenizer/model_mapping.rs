@@ -5,7 +5,7 @@
 //!
 //! This is necessary because API providers often use simplified model names
 //! (e.g., "gpt-4", "claude-3-opus", "qwen-turbo") that don't match HuggingFace's
-//! naming convention (e.g., "openai/gpt-4", "anthropic/claude-3-opus").
+//! naming convention (e.g., "Xenova/gpt-4", "deepseek-ai/DeepSeek-V3").
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -19,24 +19,29 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
 
     // ============== OpenAI Models ==============
+    // These API-only models have no repo on the Hub, so an `openai/<model>`
+    // ID never resolved and `register_from_hf` failed for every one of these
+    // names. The Xenova repos publish their tiktoken encodings as
+    // tokenizer.json: cl100k_base for GPT-4 and GPT-3.5, o200k_base for
+    // GPT-4o and o1.
     // GPT-4 series
-    m.insert("gpt-4", "openai/gpt-4");
-    m.insert("gpt-4-turbo", "openai/gpt-4-turbo");
-    m.insert("gpt-4-turbo-preview", "openai/gpt-4-turbo");
-    m.insert("gpt-4o", "openai/gpt-4o");
-    m.insert("gpt-4o-mini", "openai/gpt-4o-mini");
-    m.insert("gpt-4-32k", "openai/gpt-4-32k");
-    m.insert("gpt-4-vision-preview", "openai/gpt-4-vision");
+    m.insert("gpt-4", "Xenova/gpt-4");
+    m.insert("gpt-4-turbo", "Xenova/gpt-4");
+    m.insert("gpt-4-turbo-preview", "Xenova/gpt-4");
+    m.insert("gpt-4o", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini", "Xenova/gpt-4o");
+    m.insert("gpt-4-32k", "Xenova/gpt-4");
+    m.insert("gpt-4-vision-preview", "Xenova/gpt-4");
 
     // GPT-3.5 series
-    m.insert("gpt-3.5-turbo", "openai/gpt-3.5-turbo");
-    m.insert("gpt-3.5-turbo-16k", "openai/gpt-3.5-turbo-16k");
-    m.insert("gpt-3.5-turbo-instruct", "openai/gpt-3.5-turbo-instruct");
+    m.insert("gpt-3.5-turbo", "Xenova/gpt-3.5-turbo");
+    m.insert("gpt-3.5-turbo-16k", "Xenova/gpt-3.5-turbo");
+    m.insert("gpt-3.5-turbo-instruct", "Xenova/gpt-3.5-turbo");
 
     // o1 series
-    m.insert("o1", "openai/o1");
-    m.insert("o1-mini", "openai/o1-mini");
-    m.insert("o1-preview", "openai/o1-preview");
+    m.insert("o1", "Xenova/gpt-4o");
+    m.insert("o1-mini", "Xenova/gpt-4o");
+    m.insert("o1-preview", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
     // Claude 3 series
@@ -275,13 +280,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 /// * `model_name` - The model name from API request (e.g., "gpt-4", "qwen-turbo")
 ///
 /// # Returns
-/// The corresponding HuggingFace model ID (e.g., "openai/gpt-4", "Qwen/Qwen2.5-7B-Instruct")
+/// The corresponding HuggingFace model ID (e.g., "Xenova/gpt-4", "Qwen/Qwen2.5-7B-Instruct")
 ///
 /// # Examples
 /// ```
 /// use agentsight::tokenizer::model_mapping::map_to_hf_model_id;
 ///
-/// assert_eq!(map_to_hf_model_id("gpt-4"), "openai/gpt-4");
+/// assert_eq!(map_to_hf_model_id("gpt-4"), "Xenova/gpt-4");
 /// assert_eq!(map_to_hf_model_id("qwen-turbo"), "Qwen/Qwen2.5-7B-Instruct");
 /// assert_eq!(map_to_hf_model_id("meta-llama/Llama-2-7b"), "meta-llama/Llama-2-7b");
 /// ```
@@ -338,10 +343,35 @@ mod tests {
 
     #[test]
     fn test_openai_mapping() {
-        assert_eq!(map_to_hf_model_id("gpt-4"), "openai/gpt-4");
-        assert_eq!(map_to_hf_model_id("gpt-4o"), "openai/gpt-4o");
-        assert_eq!(map_to_hf_model_id("gpt-4o-mini"), "openai/gpt-4o-mini");
-        assert_eq!(map_to_hf_model_id("gpt-3.5-turbo"), "openai/gpt-3.5-turbo");
+        assert_eq!(map_to_hf_model_id("gpt-4"), "Xenova/gpt-4");
+        assert_eq!(map_to_hf_model_id("gpt-4o"), "Xenova/gpt-4o");
+        assert_eq!(map_to_hf_model_id("gpt-4o-mini"), "Xenova/gpt-4o");
+        assert_eq!(map_to_hf_model_id("gpt-3.5-turbo"), "Xenova/gpt-3.5-turbo");
+    }
+
+    /// The OpenAI API models have no repo on the Hub, so a name mapped to
+    /// `openai/<model>` fails `register_from_hf` on every call — worse than no
+    /// entry, since the unknown-model fallback at least resolves. Every OpenAI
+    /// name must map to a published repo that carries its tiktoken encoding.
+    #[test]
+    fn test_openai_names_map_to_published_tokenizers() {
+        for (name, repo) in [
+            ("gpt-4", "Xenova/gpt-4"),
+            ("gpt-4-turbo", "Xenova/gpt-4"),
+            ("gpt-4-turbo-preview", "Xenova/gpt-4"),
+            ("gpt-4-32k", "Xenova/gpt-4"),
+            ("gpt-4-vision-preview", "Xenova/gpt-4"),
+            ("gpt-3.5-turbo", "Xenova/gpt-3.5-turbo"),
+            ("gpt-3.5-turbo-16k", "Xenova/gpt-3.5-turbo"),
+            ("gpt-3.5-turbo-instruct", "Xenova/gpt-3.5-turbo"),
+            ("gpt-4o", "Xenova/gpt-4o"),
+            ("gpt-4o-mini", "Xenova/gpt-4o"),
+            ("o1", "Xenova/gpt-4o"),
+            ("o1-mini", "Xenova/gpt-4o"),
+            ("o1-preview", "Xenova/gpt-4o"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
     }
 
     #[test]
@@ -450,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        assert_eq!(map_to_hf_model_id("GPT-4"), "openai/gpt-4");
+        assert_eq!(map_to_hf_model_id("GPT-4"), "Xenova/gpt-4");
         assert_eq!(map_to_hf_model_id("QWEN-TURBO"), "Qwen/Qwen2.5-7B-Instruct");
     }
 
