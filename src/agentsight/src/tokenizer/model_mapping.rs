@@ -44,24 +44,28 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o1-preview", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
+    // No Claude model has a repo on the Hub, so `anthropic/<model>` never
+    // resolved. Anthropic has not published the Claude 3 tokenizer; the one
+    // it published for earlier Claude models (Xenova/claude-tokenizer) is the
+    // closest public vocabulary, an approximation like every fallback here.
     // Claude 3 series
-    m.insert("claude-3-opus", "anthropic/claude-3-opus");
-    m.insert("claude-3-opus-20240229", "anthropic/claude-3-opus");
-    m.insert("claude-3-sonnet", "anthropic/claude-3-sonnet");
-    m.insert("claude-3-sonnet-20240229", "anthropic/claude-3-sonnet");
-    m.insert("claude-3-haiku", "anthropic/claude-3-haiku");
-    m.insert("claude-3-haiku-20240307", "anthropic/claude-3-haiku");
+    m.insert("claude-3-opus", "Xenova/claude-tokenizer");
+    m.insert("claude-3-opus-20240229", "Xenova/claude-tokenizer");
+    m.insert("claude-3-sonnet", "Xenova/claude-tokenizer");
+    m.insert("claude-3-sonnet-20240229", "Xenova/claude-tokenizer");
+    m.insert("claude-3-haiku", "Xenova/claude-tokenizer");
+    m.insert("claude-3-haiku-20240307", "Xenova/claude-tokenizer");
 
     // Claude 3.5 series
-    m.insert("claude-3.5-sonnet", "anthropic/claude-3.5-sonnet");
-    m.insert("claude-3-5-sonnet", "anthropic/claude-3.5-sonnet");
-    m.insert("claude-3-5-sonnet-20240620", "anthropic/claude-3.5-sonnet");
-    m.insert("claude-3.5-haiku", "anthropic/claude-3.5-haiku");
-    m.insert("claude-3-5-haiku", "anthropic/claude-3.5-haiku");
+    m.insert("claude-3.5-sonnet", "Xenova/claude-tokenizer");
+    m.insert("claude-3-5-sonnet", "Xenova/claude-tokenizer");
+    m.insert("claude-3-5-sonnet-20240620", "Xenova/claude-tokenizer");
+    m.insert("claude-3.5-haiku", "Xenova/claude-tokenizer");
+    m.insert("claude-3-5-haiku", "Xenova/claude-tokenizer");
 
     // Claude 3.7 series
-    m.insert("claude-3.7-sonnet", "anthropic/claude-3.7-sonnet");
-    m.insert("claude-3-7-sonnet", "anthropic/claude-3.7-sonnet");
+    m.insert("claude-3.7-sonnet", "Xenova/claude-tokenizer");
+    m.insert("claude-3-7-sonnet", "Xenova/claude-tokenizer");
 
     // ============== Qwen (Alibaba) Models ==============
     // Qwen 2.5 series
@@ -378,16 +382,44 @@ mod tests {
     fn test_anthropic_mapping() {
         assert_eq!(
             map_to_hf_model_id("claude-3-opus"),
-            "anthropic/claude-3-opus"
+            "Xenova/claude-tokenizer"
         );
         assert_eq!(
             map_to_hf_model_id("claude-3.5-sonnet"),
-            "anthropic/claude-3.5-sonnet"
+            "Xenova/claude-tokenizer"
         );
         assert_eq!(
             map_to_hf_model_id("claude-3-5-sonnet"),
-            "anthropic/claude-3.5-sonnet"
+            "Xenova/claude-tokenizer"
         );
+    }
+
+    /// No Claude model has a repo on the Hub, so a name mapped to
+    /// `anthropic/<model>` fails `register_from_hf` on every call. Every
+    /// Claude name must map to the published Claude tokenizer.
+    #[test]
+    fn test_claude_names_map_to_a_published_tokenizer() {
+        for name in [
+            "claude-3-opus",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet",
+            "claude-3-sonnet-20240229",
+            "claude-3-haiku",
+            "claude-3-haiku-20240307",
+            "claude-3.5-sonnet",
+            "claude-3-5-sonnet",
+            "claude-3-5-sonnet-20240620",
+            "claude-3.5-haiku",
+            "claude-3-5-haiku",
+            "claude-3.7-sonnet",
+            "claude-3-7-sonnet",
+        ] {
+            assert_eq!(
+                map_to_hf_model_id(name),
+                "Xenova/claude-tokenizer",
+                "{name}"
+            );
+        }
     }
 
     #[test]
