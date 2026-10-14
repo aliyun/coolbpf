@@ -217,7 +217,10 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // ============== Phi Models (Microsoft) ==============
     m.insert("phi-2", "microsoft/phi-2");
     m.insert("phi-3-mini", "microsoft/Phi-3-mini-4k-instruct");
-    m.insert("phi-3-small", "microsoft/Phi-3-small-8k-instruct");
+    // Phi-3-small ships tiktoken's cl100k_base (cl100k_base.tiktoken) and no
+    // tokenizer.json, so its own repo cannot be loaded; Xenova/gpt-4 publishes
+    // the same encoding as tokenizer.json.
+    m.insert("phi-3-small", "Xenova/gpt-4");
     m.insert("phi-3-medium", "microsoft/Phi-3-medium-4k-instruct");
     m.insert("phi-4", "microsoft/phi-4");
 
@@ -446,5 +449,13 @@ mod tests {
         assert!(has_mapping("gpt-4"));
         assert!(has_mapping("qwen-turbo"));
         assert!(!has_mapping("some-unknown-model"));
+    }
+
+    /// `register_from_hf` loads `tokenizer.json`, which the Phi-3-small repo
+    /// does not ship (its vocabulary is `cl100k_base.tiktoken`), so the name
+    /// must map to a repo that publishes the same encoding as tokenizer.json.
+    #[test]
+    fn test_phi_3_small_maps_to_its_encoding() {
+        assert_eq!(map_to_hf_model_id("phi-3-small"), "Xenova/gpt-4");
     }
 }
