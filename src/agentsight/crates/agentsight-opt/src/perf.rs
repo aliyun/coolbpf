@@ -171,7 +171,7 @@ fn detect_idle_gaps(traj: &AtifTrajectory, threshold: f64) -> Vec<IdleGap> {
                 });
                 if let Some(u) = user_ts {
                     let dur = (u - end).as_seconds_f64();
-                    if dur > threshold {
+                    if dur >= threshold {
                         gaps.push(IdleGap {
                             start: (end - origin).as_seconds_f64(),
                             end: (u - origin).as_seconds_f64(),
