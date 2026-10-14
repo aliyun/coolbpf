@@ -10,6 +10,10 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
+/// The repo an unmapped name falls back to, and the one a mapped name takes
+/// when its own repo publishes no `tokenizer.json`.
+const FALLBACK_HF_MODEL_ID: &str = "Qwen/Qwen3.5-397B-A17B";
+
 /// Global model name mapping table
 static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
@@ -171,9 +175,12 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("chatglm_pro", "THUDM/glm-4-9b-chat");
 
     // ============== Baichuan Models ==============
-    m.insert("baichuan2-7b-chat", "baichuan-inc/Baichuan2-7B-Chat");
-    m.insert("baichuan2-13b-chat", "baichuan-inc/Baichuan2-13B-Chat");
-    m.insert("baichuan-7b", "baichuan-inc/Baichuan-7B");
+    // The Baichuan repos ship only a sentencepiece tokenizer.model, which
+    // `register_from_hf` cannot load, so these names take the unknown-model
+    // fallback explicitly instead of a repo that always fails.
+    m.insert("baichuan2-7b-chat", FALLBACK_HF_MODEL_ID);
+    m.insert("baichuan2-13b-chat", FALLBACK_HF_MODEL_ID);
+    m.insert("baichuan-7b", FALLBACK_HF_MODEL_ID);
 
     // ============== Moonshot Models ==============
     // Moonshot ships a custom tokenizer with no public HF repo. A bare model
@@ -298,7 +305,7 @@ pub fn map_to_hf_model_id(model_name: &str) -> &str {
     // DrainCheck can still compute tokens (pinned by `test_unknown_model`);
     // the approximation is wrong for unrelated families, so production models
     // must be added to MODEL_MAPPING explicitly rather than fixed here.
-    "Qwen/Qwen3.5-397B-A17B"
+    FALLBACK_HF_MODEL_ID
 }
 
 /// Check if a model name has a known mapping to HuggingFace.
@@ -457,5 +464,15 @@ mod tests {
     #[test]
     fn test_phi_3_small_maps_to_its_encoding() {
         assert_eq!(map_to_hf_model_id("phi-3-small"), "Xenova/gpt-4");
+    }
+
+    /// The Baichuan repos publish no `tokenizer.json` (only a sentencepiece
+    /// `tokenizer.model`), so mapping to them failed `register_from_hf` on
+    /// every call; they take the fallback that does load.
+    #[test]
+    fn test_baichuan_names_take_a_loadable_tokenizer() {
+        for name in ["baichuan2-7b-chat", "baichuan2-13b-chat", "baichuan-7b"] {
+            assert_eq!(map_to_hf_model_id(name), "Qwen/Qwen3.5-397B-A17B", "{name}");
+        }
     }
 }
