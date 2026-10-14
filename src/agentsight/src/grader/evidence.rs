@@ -138,12 +138,34 @@ fn text_has_error_signal(text: &str) -> bool {
     lower.contains("traceback")
         || lower.contains("exception")
         || lower.contains("failed")
-        || lower.contains("exit code 1")
+        || mentions_failing_exit_code(&lower)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
+        || lower.contains("eacces")
+        || lower.contains("eperm")
         || lower.contains("\"error\"")
         || lower.contains("error:")
+}
+
+/// Whether any `exit code N` mention carries a non-zero status.
+///
+/// The detector's twin scan (`tool_response_failure_text`) reads the same
+/// payloads with this same rule: `exit code 0` is the success spelling a
+/// passing command's output routinely carries ("60 passing (exit code 0)"),
+/// while any non-zero status is the failure signal. The status may be
+/// separated from the words by spaces, a colon or an equals sign.
+fn mentions_failing_exit_code(lower: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(found) = lower[search_from..].find("exit code") {
+        let after = &lower[search_from + found + "exit code".len()..];
+        let status = after.trim_start_matches([' ', ':', '=']);
+        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+            return true;
+        }
+        search_from += found + "exit code".len();
+    }
+    false
 }
 
 pub(super) fn first_event_refs(input: &EvaluationInput, label: &str) -> Vec<EvaluationRef> {
@@ -507,5 +529,49 @@ mod tests {
         );
 
         assert!(!looks_like_tool_failure(&event));
+    }
+
+    /// The detector's twin scan treats any non-zero `exit code N` as a tool
+    /// failure ("exit code 2", "exit code 127" keep firing after the
+    /// `exit code 0` false positive was closed); this scan looked for the
+    /// literal "exit code 1", so a command that failed with any other status
+    /// scored as a clean result while the detector flagged the same record.
+    #[test]
+    fn detects_a_non_zero_exit_code_other_than_one() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"make check\n(exit code 2)"}]"#,
+            r#"[{"type":"tool_result","content":"tool runner (exit code 127)"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "a non-zero exit code is a tool failure: {payload}"
+            );
+        }
+
+        // The success spelling stays clean, matching the detector.
+        let clean = event(
+            None,
+            Some(r#"[{"type":"tool_result","content":"60 passing (exit code 0)"}]"#),
+            None,
+        );
+        assert!(!looks_like_tool_failure(&clean));
+    }
+
+    /// The detector reads the `EPERM` / `EACCES` errno spellings in tool
+    /// output as failure signals; this scan only knew the prose spellings, so
+    /// a denied call that printed the errno scored as a clean tool result.
+    #[test]
+    fn detects_the_errno_spellings_the_detector_reads() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"open /etc/shadow: EACCES"}]"#,
+            r#"[{"type":"tool_result","content":"mount: EPERM"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "an errno spelling is a tool failure: {payload}"
+            );
+        }
     }
 }
