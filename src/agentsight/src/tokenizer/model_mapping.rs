@@ -237,10 +237,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("qwq", "Qwen/QwQ-32B-Preview");
 
     // ============== InternLM Models ==============
-    m.insert("internlm2-7b-chat", "internlm/internlm2-chat-7b");
-    m.insert("internlm2-20b-chat", "internlm/internlm2-chat-20b");
-    m.insert("internlm2.5-7b-chat", "internlm/internlm2_5-7b-chat");
-    m.insert("internlm3-8b-instruct", "internlm/internlm3-8b-instruct");
+    // The InternLM repos ship only a sentencepiece tokenizer.model, which
+    // `register_from_hf` cannot load, so these names take the unknown-model
+    // fallback explicitly instead of a repo that always fails.
+    m.insert("internlm2-7b-chat", FALLBACK_HF_MODEL_ID);
+    m.insert("internlm2-20b-chat", FALLBACK_HF_MODEL_ID);
+    m.insert("internlm2.5-7b-chat", FALLBACK_HF_MODEL_ID);
+    m.insert("internlm3-8b-instruct", FALLBACK_HF_MODEL_ID);
 
     // ============== Command R Models (Cohere) ==============
     m.insert("command-r", "CohereForAI/c4ai-command-r-v01");
@@ -472,6 +475,21 @@ mod tests {
     #[test]
     fn test_baichuan_names_take_a_loadable_tokenizer() {
         for name in ["baichuan2-7b-chat", "baichuan2-13b-chat", "baichuan-7b"] {
+            assert_eq!(map_to_hf_model_id(name), "Qwen/Qwen3.5-397B-A17B", "{name}");
+        }
+    }
+
+    /// The InternLM repos publish no `tokenizer.json` (only a sentencepiece
+    /// `tokenizer.model`), so mapping to them failed `register_from_hf` on
+    /// every call; they take the fallback that does load.
+    #[test]
+    fn test_internlm_names_take_a_loadable_tokenizer() {
+        for name in [
+            "internlm2-7b-chat",
+            "internlm2-20b-chat",
+            "internlm2.5-7b-chat",
+            "internlm3-8b-instruct",
+        ] {
             assert_eq!(map_to_hf_model_id(name), "Qwen/Qwen3.5-397B-A17B", "{name}");
         }
     }
