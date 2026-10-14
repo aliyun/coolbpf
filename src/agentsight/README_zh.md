@@ -136,6 +136,9 @@ agentsight audit --pid 12345 --type llm
 
 # 汇总统计
 agentsight audit --summary
+
+# 读取从其他主机拷贝来的数据库
+agentsight audit --db /backup/agentsight/agentsight.db
 ```
 
 ### `agentsight serve`

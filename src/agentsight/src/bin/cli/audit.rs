@@ -33,6 +33,14 @@ pub struct AuditCommand {
     /// `--exclude "command -v" --exclude grepconf`. The hidden count is reported.
     #[structopt(long)]
     pub exclude: Vec<String>,
+
+    /// Override the database path
+    ///
+    /// Reads a copy of the database instead of the configured default — for
+    /// example a database copied from another host, or one written to the
+    /// `$HOME/.local/share/agentsight/` fallback directory.
+    #[structopt(long)]
+    pub db: Option<String>,
 }
 
 /// Resolve the optional `--type` filter into an [`AuditEventType`].
@@ -56,10 +64,10 @@ fn resolve_event_type(raw: Option<&str>) -> Result<Option<AuditEventType>, Strin
 
 impl AuditCommand {
     pub fn execute(&self) {
-        let db_path = SqliteConfig::default().db_path();
+        let db_path = self.db_path();
 
-        if !db_path.exists() {
-            eprintln!("Database file not found: {db_path:?}");
+        if let Err(error) = agentsight::check_data_file(&db_path) {
+            eprintln!("{error}");
             std::process::exit(1);
         }
 
@@ -88,6 +96,16 @@ impl AuditCommand {
             eprintln!("{error:#}");
             std::process::exit(1);
         }
+    }
+
+    /// Resolve the database path: `--db` reads a copy of the database (a
+    /// database copied from another host, or one in a non-default data
+    /// directory); without it the configured default is used.
+    fn db_path(&self) -> std::path::PathBuf {
+        self.db
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| SqliteConfig::default().db_path())
     }
 
     /// Run the requested query and report whether it succeeded.
@@ -313,7 +331,21 @@ mod tests {
             json,
             summary: false,
             exclude,
+            db: None,
         }
+    }
+
+    #[test]
+    fn db_path_honours_the_override_and_falls_back_to_the_default() {
+        // `--db` must reach the query path: reverting the wiring (returning
+        // the default unconditionally) makes this fail.
+        let mut c = cmd(vec![], false);
+        assert_eq!(c.db_path(), SqliteConfig::default().db_path());
+        c.db = Some("/tmp/agentsight_audit_override.db".into());
+        assert_eq!(
+            c.db_path(),
+            std::path::PathBuf::from("/tmp/agentsight_audit_override.db")
+        );
     }
 
     #[test]
