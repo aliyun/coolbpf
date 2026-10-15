@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.14.1
+
+### Features
+- Accept `--db` in the query commands. (#7478)
+- Content-probe unknown executables for static BoringSSL, with negative caching of misses.
+- Support explicit prebuilt targets and build prebuilt agentsight artifacts in CI.
+
+### Fixes
+- Map OpenAI, Claude, Qwen3, InternLM, Baichuan, phi-3-small and yi-9b-chat model names to real, loadable tokenizers.
+- Parse Gemini streaming responses, honor final Anthropic usage, fold whole-message chat SSE snapshots, and parse CR-ended SSE lines. (#7329, #7193, #7398)
+- Aggregate HTTP/2 responses that finish before the request, cut chunked terminators only at line boundaries, and honor previously inert HTTP config options. (#6562)
+- Keep unindexed and nameless tool calls apart, match late results by tool call, and retain mixed tool results. (#7385)
+- Exempt trusted sinks by address, let exec wildcard basenames match any command, and map every legacy rule verb to an enforcement mode.
+- Preserve numeric JSON keys, null payload members, evidence numbers, and full cost signatures; keep every skill in reports and tolerate null agent names in CSV export. (#7451, #7032, #7403, #7413)
+- Treat CJK punctuation and pipes as literal delimiters, and keep health reporting working with a pre-epoch clock. (#7488, #7479, #7239)
+- Merge case-variant agents and models across filters, token breakdowns and model series. (#7456, #7184)
+- Isolate SQLite maintenance, serialize opt-store migration, and warn when purge stalls within the size limit.
+- Bound payload memory lifetimes and the protection scan directory. (#6781)
+- Harden audit windows, ATIF token totals and session ids, containment snapshots, and grounding evidence matching. (#7326, #7467)
+- Fix dashboard pagination, ranking refresh, cached-only step metrics, idle gaps, and timestamp precision. (#7183, #7093, #7091, #7089, #7095)
+- Let recap-only sessions materialize, retain captured session children, and split analyzer call kinds.
+- Gate server-only modules behind the server feature.
+
 ## 0.14.0
 
 ### Features
