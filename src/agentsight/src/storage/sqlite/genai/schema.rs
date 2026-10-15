@@ -221,6 +221,29 @@ impl GenAISqliteStore {
         // v10: distinguish semantic input totals from legacy raw provider input
         ensure_col!("input_tokens_includes_cache", "INTEGER NOT NULL DEFAULT 0");
 
+        // v11: reclassify legacy analyzer rows (#2750, #7271). Builds before
+        // the CallKind::Analyzer split persisted the cosh-ng personal-analyzer
+        // background summary as 'recap'; with the session predicate now
+        // admitting recap-only sessions, those rows would resurface as
+        // 0-token noise sessions on hosts that already have data. The fixed
+        // prompt is written to user_query on every row, so a prefix match is
+        // sufficient. Idempotent: after the first pass it matches zero rows.
+        // Guarded on user_query because hand-built pre-v1 databases (see the
+        // legacy-migration test) predate that base column.
+        if existing_cols.contains("user_query") {
+            let reclassified = conn.execute(
+                "UPDATE genai_events SET call_kind = 'analyzer' \
+                 WHERE call_kind = 'recap' \
+                 AND user_query LIKE 'Summarize only grounded work into the supplied JSON schema%'",
+                [],
+            )?;
+            if reclassified > 0 {
+                log::info!(
+                    "Migrated genai_events: reclassified {reclassified} legacy analyzer recap rows"
+                );
+            }
+        }
+
         Ok(())
     }
 

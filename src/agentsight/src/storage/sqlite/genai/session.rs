@@ -64,9 +64,12 @@ impl GenAISqliteStore {
     ///
     /// With `include_auxiliary=false` (the default for /api/sessions), recap
     /// calls may still *form* a session (recap-only sessions surface with zero
-    /// tokens, #7271) but do not contribute tokens, conversation counts, query
-    /// previews, or the last_seen/model/agent aggregates; analyzer-only
-    /// (cosh-ng background, #2750) and web_search-only sessions stay hidden.
+    /// tokens, #7271) but do not contribute tokens or conversation counts;
+    /// query previews and model/agent aggregates fall back to recap rows only
+    /// when the session has no main rows. Analyzer-only (cosh-ng background,
+    /// #2750) and web_search-only sessions stay hidden. Note the sibling
+    /// `list_traces_by_session` uses the same flag for trace visibility only —
+    /// billing there is unfiltered.
     pub fn list_sessions(
         &self,
         start_ns: i64,
@@ -112,11 +115,42 @@ impl GenAISqliteStore {
             "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN conversation_id END"
                 .to_string()
         };
+        // Nullable-text fallbacks must only kick in when the session has no
+        // main rows at all (#7271 review): if main rows exist but carry NULL
+        // model/agent_name, falling back to a recap row would change what
+        // pre-#7271 queries returned.
+        let has_main = if include_auxiliary {
+            ""
+        } else {
+            "MAX(CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN 1 ELSE 0 END) = 1"
+        };
+        let model_expr = if include_auxiliary {
+            "MAX(model)".to_string()
+        } else {
+            format!(
+                "CASE WHEN {has_main} THEN MAX({text_aux_guard}model{text_aux_end}) ELSE MAX(model) END"
+            )
+        };
+        let agent_expr = if include_auxiliary {
+            "COALESCE(MAX(agent_name), MAX(process_name))".to_string()
+        } else {
+            format!(
+                "CASE WHEN {has_main} \
+                 THEN COALESCE(MAX({text_aux_guard}agent_name{text_aux_end}), \
+                            MAX({text_aux_guard}process_name{text_aux_end})) \
+                 ELSE COALESCE(MAX(agent_name), MAX(process_name)) END"
+            )
+        };
         // Same filter for the correlated user-query subqueries (g2-qualified).
+        // Recap rows become visible when the session has no main rows, so a
+        // recap-only session's preview is inspectable instead of NULL (#7271
+        // review P1); mixed sessions keep main-only previews.
         let sub_call_kind_filter = if include_auxiliary {
             ""
         } else {
-            " AND (g2.call_kind = 'main' OR g2.call_kind IS NULL)"
+            " AND ((g2.call_kind = 'main' OR g2.call_kind IS NULL) OR (g2.call_kind = 'recap' \
+             AND NOT EXISTS (SELECT 1 FROM genai_events gm WHERE gm.session_id = g1.session_id \
+             AND gm.event_type = 'llm_call' AND (gm.call_kind = 'main' OR gm.call_kind IS NULL))))"
         };
         let sql = format!(
             concat!(
@@ -128,10 +162,8 @@ impl GenAISqliteStore {
                 billed_input_col!(),
                 "{aux_close}), 0)  AS total_input,
                     COALESCE(SUM({aux_guard}output_tokens{aux_close}), 0) AS total_output,
-                    COALESCE(MAX({text_aux_guard}model{text_aux_end}), MAX(model)) AS model,
-                    COALESCE(MAX({text_aux_guard}agent_name{text_aux_end}),
-                             MAX(agent_name),
-                             MAX(process_name)) AS agent_name,
+                    {model_expr} AS model,
+                    {agent_expr} AS agent_name,
                     (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
                       WHERE g2.session_id = g1.session_id
                         AND g2.event_type = 'llm_call'
@@ -157,6 +189,8 @@ impl GenAISqliteStore {
             aux_close = aux_guard_close,
             text_aux_guard = text_aux_guard,
             text_aux_end = text_aux_end,
+            model_expr = model_expr,
+            agent_expr = agent_expr,
             conv_count_expr = conv_count_expr
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -416,10 +450,20 @@ impl GenAISqliteStore {
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
+        // Trace visibility mirrors the session predicate (#7271 review P1):
+        // recap rows are visible when the session has no main rows, so a
+        // recap-only session drill-down is inspectable instead of rendering
+        // "no traces" while the ATIF event view shows content. Mixed sessions
+        // keep main-only traces. `genai_events.session_id` correlates to the
+        // outer driving table in both usage contexts (outer WHERE and the
+        // correlated user_query subquery, whose FROM aliases the inner table
+        // as g2).
         let call_kind_filter = if include_auxiliary {
             ""
         } else {
-            " AND (call_kind = 'main' OR call_kind IS NULL)"
+            " AND ((call_kind = 'main' OR call_kind IS NULL) OR (call_kind = 'recap' \
+             AND NOT EXISTS (SELECT 1 FROM genai_events gm WHERE gm.session_id = genai_events.session_id \
+             AND gm.event_type = 'llm_call' AND (gm.call_kind = 'main' OR gm.call_kind IS NULL))))"
         };
 
         // When both start_ns and end_ns are present, rewrite with BETWEEN
