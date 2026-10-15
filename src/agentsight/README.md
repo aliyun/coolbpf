@@ -373,6 +373,18 @@ the private enforcer directory only after packaging has consumed its receipt.
 
 > `cargo build --release` only compiles Rust. It does not rebuild the embedded Dashboard UI, so use `make build-all` for user-facing builds.
 
+### GitHub prebuilt artifacts
+
+Release Preview builds Linux x86_64, Linux ARM64 and macOS ARM64 from the selected
+source commit; formal releases additionally require `sight/v<version>` to point
+at that commit. Each target produces `agentsight-<version>-<os>-<arch>.tar.gz`,
+its `.sha256`, a CycloneDX `.cdx.json` SBOM and the SBOM's `.sha256` (12 files in
+all). Linux targets require glibc 2.28; macOS ARM64 retains the 11.0 baseline.
+The action builds the embedded viewer and invokes this component's packager and
+contract from the same revision. Linux SBOMs include the attested enforcer's
+actual dependency graph. Download verification covers all three targets before
+Release publication. It does not attest ARM64 real-kernel eBPF behavior.
+
 ### Build on macOS
 
 macOS builds `agentsight trace` (trajectory collector) and `agentsight serve` (Dashboard viewer). It does not require libbpf, clang/llvm, kernel headers, root, or Linux BPF capabilities.
