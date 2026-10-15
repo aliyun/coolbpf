@@ -61,6 +61,12 @@ impl GenAISqliteStore {
     // ─── Query methods ───────────────────────────────────────────────────────
 
     /// List all sessions within a nanosecond timestamp range.
+    ///
+    /// With `include_auxiliary=false` (the default for /api/sessions), recap
+    /// calls may still *form* a session (recap-only sessions surface with zero
+    /// tokens, #7271) but do not contribute tokens, conversation counts, query
+    /// previews, or the last_seen/model/agent aggregates; analyzer-only
+    /// (cosh-ng background, #2750) and web_search-only sessions stay hidden.
     pub fn list_sessions(
         &self,
         start_ns: i64,
@@ -68,10 +74,43 @@ impl GenAISqliteStore {
         include_auxiliary: bool,
     ) -> Result<Vec<SessionSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Session-formation predicate. Recap rows are allowed to *form* a
+        // session (#7271): a qwen CLI headless call whose main LLM call was
+        // missed by the capture path leaves only its follow-up managed-memory
+        // recap row; excluding recap entirely made such a user session
+        // permanently invisible in /api/sessions. The cosh-ng background
+        // analyzer is classified as its own 'analyzer' kind (#2750, #7271) so
+        // analyzer-only background sessions stay hidden; web_search-only
+        // sessions stay hidden too.
         let call_kind_filter = if include_auxiliary {
             ""
         } else {
-            " AND (call_kind = 'main' OR call_kind IS NULL)"
+            " AND (call_kind = 'main' OR call_kind IS NULL OR call_kind = 'recap')"
+        };
+        // Numbers stay billed on main calls only so existing sessions' token
+        // totals and conversation counts are unchanged; a recap-only session
+        // surfaces with zero tokens.
+        let aux_guard = if include_auxiliary {
+            ""
+        } else {
+            "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN "
+        };
+        let aux_guard_close = if include_auxiliary { "" } else { " ELSE 0 END" };
+        // Text aggregates guard with a NULL else (MAX skips NULLs); recap-only
+        // sessions fall back to their recap rows via COALESCE so the required
+        // last_seen_ns stays non-NULL. With include_auxiliary the guard is
+        // empty and COALESCE(x, x) is a no-op.
+        let text_aux_guard = if include_auxiliary {
+            ""
+        } else {
+            "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN "
+        };
+        let text_aux_end = if include_auxiliary { "" } else { " END" };
+        let conv_count_expr = if include_auxiliary {
+            "conversation_id".to_string()
+        } else {
+            "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN conversation_id END"
+                .to_string()
         };
         // Same filter for the correlated user-query subqueries (g2-qualified).
         let sub_call_kind_filter = if include_auxiliary {
@@ -82,15 +121,16 @@ impl GenAISqliteStore {
         let sql = format!(
             concat!(
                 "SELECT session_id,
-                    COUNT(DISTINCT conversation_id) AS conversation_count,
-                    MIN(start_timestamp_ns)  AS first_seen_ns,
-                    MAX(start_timestamp_ns)  AS last_seen_ns,
-                    COALESCE(SUM(",
+                    COUNT(DISTINCT {conv_count_expr}) AS conversation_count,
+                    COALESCE(MIN({text_aux_guard}start_timestamp_ns{text_aux_end}), MIN(start_timestamp_ns)) AS first_seen_ns,
+                    COALESCE(MAX({text_aux_guard}start_timestamp_ns{text_aux_end}), MAX(start_timestamp_ns)) AS last_seen_ns,
+                    COALESCE(SUM({aux_guard}",
                 billed_input_col!(),
-                "), 0)  AS total_input,
-                    COALESCE(SUM(output_tokens), 0) AS total_output,
-                    MAX(model)               AS model,
-                    COALESCE(MAX(agent_name),
+                "{aux_close}), 0)  AS total_input,
+                    COALESCE(SUM({aux_guard}output_tokens{aux_close}), 0) AS total_output,
+                    COALESCE(MAX({text_aux_guard}model{text_aux_end}), MAX(model)) AS model,
+                    COALESCE(MAX({text_aux_guard}agent_name{text_aux_end}),
+                             MAX(agent_name),
                              MAX(process_name)) AS agent_name,
                     (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
                       WHERE g2.session_id = g1.session_id
@@ -112,7 +152,12 @@ impl GenAISqliteStore {
              ORDER BY last_seen_ns DESC"
             ),
             sub_call_kind_filter = sub_call_kind_filter,
-            call_kind_filter = call_kind_filter
+            call_kind_filter = call_kind_filter,
+            aux_guard = aux_guard,
+            aux_close = aux_guard_close,
+            text_aux_guard = text_aux_guard,
+            text_aux_end = text_aux_end,
+            conv_count_expr = conv_count_expr
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {

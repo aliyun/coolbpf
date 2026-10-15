@@ -11,12 +11,20 @@ use crate::config::default_cmdline_rules;
 use crate::discovery::matcher::{CmdlineGlobMatcher, ProcessContext};
 use std::borrow::Cow;
 
-/// LLM call classification: Main (normal), Recap (compaction/summary), WebSearch.
+/// LLM call classification: Main (normal), Recap (compaction/summary),
+/// Analyzer (cosh-ng background analyzer), WebSearch.
+///
+/// Analyzer is split from Recap (#2750, #7271): the cosh-ng personal analyzer
+/// runs as a standalone background session whose rows are row-identical to a
+/// qwen in-session recap once the main call is missed. Giving it its own kind
+/// lets the session predicate admit recap-only user sessions while keeping
+/// analyzer-only background sessions hidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(super) enum CallKind {
     Main,
     Recap,
+    Analyzer,
     WebSearch,
 }
 
@@ -25,6 +33,7 @@ impl CallKind {
         match self {
             CallKind::Main => "main",
             CallKind::Recap => "recap",
+            CallKind::Analyzer => "analyzer",
             CallKind::WebSearch => "web_search",
         }
     }
@@ -96,11 +105,13 @@ pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
         {
             return CallKind::Recap;
         }
-        // Cosh-shell personal analyzer background summary (#2750): fixed
-        // prompt from cosh-ng recommendation/personal_analyzer.rs; runs in a
-        // setsid child process, must not surface as a user session.
+        // Cosh-shell personal analyzer background summary (#2750, #7271):
+        // fixed prompt from cosh-ng recommendation/personal_analyzer.rs; runs
+        // in a setsid child process with its own session_id. Split from Recap
+        // so the session predicate can admit recap-only user sessions while
+        // analyzer-only background sessions stay hidden.
         if text.starts_with("Summarize only grounded work into the supplied JSON schema") {
-            return CallKind::Recap;
+            return CallKind::Analyzer;
         }
         // QwenCode memory extraction subagent
         if text.starts_with("Managed memory has TWO directories") {
@@ -184,10 +195,15 @@ pub(super) fn classify_call_kind_from_raw(
             && first_user_text.contains("Do NOT call any tools"))
         || first_user_text.starts_with("Managed memory has TWO directories")
         || first_user_text.starts_with("[SUGGESTION MODE:")
-        // Cosh-shell personal analyzer background summary (#2750)
-        || first_user_text.starts_with("Summarize only grounded work into the supplied JSON schema")
     {
         "recap"
+    } else if first_user_text
+        .starts_with("Summarize only grounded work into the supplied JSON schema")
+    {
+        // Cosh-shell personal analyzer background summary (#2750, #7271):
+        // own kind so recap-only user sessions can materialize while
+        // analyzer-only background sessions stay hidden.
+        "analyzer"
     } else if first_user_text.contains("Perform a web search for the query:") {
         "web_search"
     } else {
@@ -747,9 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_cosh_personal_analyzer_recap() {
+    fn test_classify_cosh_personal_analyzer_analyzer() {
         // cosh-shell personal analyzer background summary: fixed prompt from
-        // cosh-ng recommendation/personal_analyzer.rs build_fixed_prompt (#2750).
+        // cosh-ng recommendation/personal_analyzer.rs build_fixed_prompt
+        // (#2750). Own kind (#7271): must not surface as a user session even
+        // when recap-only sessions materialize.
         let req = make_llm_request(vec![InputMessage {
             role: "user".to_string(),
             parts: vec![MessagePart::Text {
@@ -757,7 +775,7 @@ mod tests {
             }],
             name: None,
         }]);
-        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+        assert_eq!(classify_call_kind(&req), CallKind::Analyzer);
     }
 
     #[test]
@@ -1392,9 +1410,9 @@ mod tests {
     }
 
     #[test]
-    fn test_raw_classify_recap_cosh_personal_analyzer() {
+    fn test_raw_classify_analyzer_cosh_personal_analyzer() {
         let first_user = "Summarize only grounded work into the supplied JSON schema. List every business entity mentioned by a summary or prompt in that item's entities field.\nSCHEMA:\n{}";
-        assert_eq!(classify_call_kind_from_raw(&None, first_user), "recap");
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "analyzer");
     }
 
     #[test]
@@ -1457,6 +1475,7 @@ mod tests {
     fn test_call_kind_as_str() {
         assert_eq!(CallKind::Main.as_str(), "main");
         assert_eq!(CallKind::Recap.as_str(), "recap");
+        assert_eq!(CallKind::Analyzer.as_str(), "analyzer");
         assert_eq!(CallKind::WebSearch.as_str(), "web_search");
     }
 
