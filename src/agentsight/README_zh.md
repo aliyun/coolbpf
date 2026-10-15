@@ -367,6 +367,17 @@ macOS ARM64 使用 `.anolisa/component.macos.toml`，仅包含主程序。
 以跳过可选的 `bpf-build` 宿主依赖。
 打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。
 
+### GitHub 预构建产物
+
+Release Preview 从选定的源码提交构建 Linux x86_64、Linux ARM64 与 macOS ARM64；
+正式发布还要求 `sight/v<版本>` 指向该提交。每个平台输出
+`agentsight-<版本>-<系统>-<架构>.tar.gz`、其 `.sha256`、CycloneDX `.cdx.json`
+SBOM 及 SBOM 的 `.sha256`，共 12 个文件。Linux 保持 glibc 2.28 基线，
+macOS ARM64 保持 11.0 基线。
+Action 构建内嵌前端，并调用同一提交中的组件打包器与契约。Linux SBOM 包含
+经校验 enforcer 的实际依赖图。正式发布前下载核验三个平台的完整产物集合；
+该验证不代表 ARM64 真实内核上的 eBPF 验证。
+
 ### macOS 构建
 
 macOS 构建 `agentsight trace`（轨迹采集器）和 `agentsight serve`（Dashboard 查看器）。不需要 libbpf、clang/llvm、内核头文件、root 权限或 Linux BPF capabilities。
