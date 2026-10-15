@@ -3179,13 +3179,73 @@ fn test_list_sessions_only_auxiliary_hidden() {
         ("c1", "sess-recap", "conv-1", "recap", 1000),
         ("c2", "sess-recap", "conv-2", "web_search", 2000),
     ]);
+    // #7271: recap may form a session so a qwen headless call whose main
+    // capture was missed still surfaces (zero tokens); it must not contribute
+    // tokens or conversation counts.
     let sessions = store.list_sessions(0, 10000, false).unwrap();
-    assert!(
-        sessions.is_empty(),
-        "sessions with only auxiliary calls should be hidden"
-    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].conversation_count, 0);
+    assert_eq!(sessions[0].total_input_tokens, 0);
+    assert_eq!(sessions[0].total_output_tokens, 0);
+    assert_eq!(sessions[0].first_user_query, None);
     let sessions_all = store.list_sessions(0, 10000, true).unwrap();
     assert_eq!(sessions_all.len(), 1);
+}
+
+#[test]
+fn test_list_sessions_recap_only_materializes_without_tokens() {
+    // The exact #7271 shape: the capture path missed the main call, leaving
+    // only the managed-memory recap row; the session must still be listed by
+    // default.
+    let store = make_store_with_pending(&[("c1", "sess-qwen", "conv-1", "recap", 1000)]);
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "sess-qwen");
+    assert_eq!(sessions[0].total_input_tokens, 0);
+}
+
+#[test]
+fn test_list_sessions_web_search_only_hidden() {
+    // web_search rows must not form sessions even though recap now may.
+    let store = make_store_with_pending(&[("c1", "sess-ws", "conv-1", "web_search", 1000)]);
+    assert!(store.list_sessions(0, 10000, false).unwrap().is_empty());
+    assert_eq!(store.list_sessions(0, 10000, true).unwrap().len(), 1);
+}
+
+#[test]
+fn test_list_sessions_recap_does_not_inflate_main_session_numbers() {
+    // An existing session with both main and recap keeps its token totals and
+    // conversation counts identical to the pre-#7271 behavior.
+    let store = make_store_with_pending(&[
+        ("c1", "sess-a", "conv-1", "main", 1000),
+        ("c2", "sess-a", "conv-2", "recap", 2000),
+    ]);
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].conversation_count, 1);
+    assert_eq!(sessions[0].total_input_tokens, 0); // no usage rows in fixture
+    let with_usage = make_store_with_pending(&[("c1", "sess-a", "conv-1", "main", 1000)]);
+    {
+        let conn = with_usage.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET input_tokens = 100, output_tokens = 50 WHERE call_id = 'c1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, input_tokens, output_tokens, total_tokens, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, event_json) \
+             VALUES ('c2','llm_call',2000,2000,0,70,30,100,'sess-a','t','conv-2','test-agent',1,'complete','recap','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = with_usage.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions[0].total_input_tokens, 100, "recap tokens excluded");
+    assert_eq!(sessions[0].total_output_tokens, 50, "recap tokens excluded");
+    assert_eq!(
+        sessions[0].conversation_count, 1,
+        "recap conversation excluded"
+    );
 }
 
 #[test]
