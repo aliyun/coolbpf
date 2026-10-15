@@ -50,6 +50,20 @@ $PATCH_0009_FILE
 $PATCH_0010_FILE"
 CARGO=${CARGO:-cargo}
 
+# An explicit target is opt-in; native callers retain their existing behavior.
+case "$#" in
+    0) BUILD_TARGET=$(rustc -vV | sed -n 's/^host: //p') ;;
+    2)
+        [ "$1" = --target ] || { echo 'usage: build-enforcer.sh [--target TARGET]' >&2; exit 1; }
+        BUILD_TARGET=$2
+        case "$BUILD_TARGET" in
+            x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu) ;;
+            *) echo "unsupported enforcer target: $BUILD_TARGET" >&2; exit 1 ;;
+        esac
+        ;;
+    *) echo 'usage: build-enforcer.sh [--target TARGET]' >&2; exit 1 ;;
+esac
+
 DECLARED_REVISION_COUNT=$(grep -F -c "rev = \"$ACTPLANE_REVISION\"" "$AGENTSIGHT_ROOT/Cargo.toml" || true)
 if [ "$DECLARED_REVISION_COUNT" -ne 2 ]; then
     echo "ActPlane build revision does not match both workspace dependencies" >&2
@@ -60,7 +74,7 @@ fi
 # CARGO_TARGET_DIR selects only a parent, never the actual Cargo output directory.
 TARGET_ROOT=${CARGO_TARGET_DIR:-$AGENTSIGHT_ROOT/target}
 if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
-    echo "CARGO_BUILD_TARGET is not supported by the native attested enforcer build" >&2
+    echo "CARGO_BUILD_TARGET is not supported; use build-enforcer.sh --target instead" >&2
     exit 1
 fi
 if [ -n "${ACTPLANE_SOURCE_DIR:-}" ]; then
@@ -249,14 +263,9 @@ trap 'rm -rf "$PRIVATE_DIR"' EXIT
 trap 'exit 1' HUP INT TERM
 PRIVATE_TARGET="$PRIVATE_DIR/target"
 cd "$AGENTSIGHT_ROOT"
-# An explicit host target also overrides build.target in Cargo configuration.
-HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
-if [ -z "$HOST_TARGET" ]; then
-    echo "could not determine the native Rust target" >&2
-    exit 1
-fi
+# An explicit target also overrides build.target in Cargo configuration.
 CARGO_TARGET_DIR="$PRIVATE_TARGET" "$CARGO" build --release -p agentsight-enforcer \
-    --target-dir "$PRIVATE_TARGET" --target "$HOST_TARGET" \
+    --target-dir "$PRIVATE_TARGET" --target "$BUILD_TARGET" \
     --no-default-features --features actplane \
     --config "patch.\"$ACTPLANE_REPOSITORY\".ebpf-ifc-engine.path=\"$SOURCE_DIR/bpf\""
 
@@ -281,7 +290,7 @@ if [ "$STAGED_BLOB" != "$ACTPLANE_STAGED_PREBUILT_BPF_BLOB" ] \
 fi
 
 ENFORCER_BIN="$PRIVATE_DIR/agentsight-enforcer"
-python3 - "$PRIVATE_TARGET/$HOST_TARGET/release/agentsight-enforcer" "$ENFORCER_BIN" \
+python3 - "$PRIVATE_TARGET/$BUILD_TARGET/release/agentsight-enforcer" "$ENFORCER_BIN" \
     "$SOURCE_DIR/bpf/prebuilt/process.bpf.o" \
     "$SOURCE_DIR/bpf/prebuilt/process-inode-only.bpf.o" <<'PY'
 import hashlib

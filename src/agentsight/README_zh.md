@@ -353,8 +353,19 @@ make build-all
 
 二进制文件输出至 `target/release/agentsight`。在受支持的 Linux 系统上，
 `make build-all` 还会调用 `scripts/build-enforcer.sh`，以构建经验证的
-ActPlane `target/release/agentsight-enforcer` 二进制。`make build-mac` 不会构建
-enforcer。
+ActPlane enforcer，输出到每次新建的独立目录。脚本打印其绝对路径；保留相邻的
+`.sha256` 凭据，并将该路径作为 `ENFORCER_BIN` 传给 raw 打包器。
+共享目录中的 `target/release/agentsight-enforcer` 不代表经验证的本次构建结果。
+`make build-mac` 不会构建 enforcer。
+
+Linux 交叉构建通过 `scripts/build-enforcer.sh --target
+<aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` 显式选择目标；不传参数时
+保持宿主构建。`CARGO` 可指定准备好的 Cross 包装入口，但必须遵守指定目标。
+两种 Linux 架构使用相同 raw 包布局及源码自有的 `.anolisa/component.toml`。
+macOS ARM64 使用 `.anolisa/component.macos.toml`，仅包含主程序。
+从 Linux 交叉构建 macOS 时使用 `--no-default-features --features server`，
+以跳过可选的 `bpf-build` 宿主依赖。
+打包器消费凭据并完成打包后，才可清理本次 enforcer 独立目录。
 
 ### macOS 构建
 

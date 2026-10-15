@@ -356,8 +356,20 @@ make build-all
 
 The binary is output to `target/release/agentsight`. On supported Linux systems,
 `make build-all` also invokes `scripts/build-enforcer.sh` to build the attested
-ActPlane `target/release/agentsight-enforcer` binary. `make build-mac` does not
-build the enforcer.
+ActPlane enforcer in a new private directory. The script prints its absolute
+path; keep the adjacent `.sha256` receipt and pass that exact path as
+`ENFORCER_BIN` to the raw packager. A shared `target/release/agentsight-enforcer`
+is not a verified build result. `make build-mac` does not build the enforcer.
+
+For Linux cross builds, `scripts/build-enforcer.sh --target
+<aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu>` selects the target explicitly;
+without arguments it builds for the host. `CARGO` may select a prepared Cross
+wrapper, but must honor the requested target. Both Linux architectures use the
+same raw payload layout and source-owned `.anolisa/component.toml`. macOS ARM64
+uses `.anolisa/component.macos.toml` and ships only the main executable. Cross
+compiling macOS from Linux requires `--no-default-features --features server` to
+skip the optional `bpf-build` host dependencies. Remove
+the private enforcer directory only after packaging has consumed its receipt.
 
 > `cargo build --release` only compiles Rust. It does not rebuild the embedded Dashboard UI, so use `make build-all` for user-facing builds.
 

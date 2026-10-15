@@ -24,7 +24,7 @@ BUILD_METADATA="$BIN_DIR/agentsight-build.toml"
 mkdir -p "$BIN_DIR"
 
 write_elf() {
-    python3 - "$1" <<'PY'
+    python3 - "$1" "${2:-62}" <<'PY'
 import pathlib
 import struct
 import sys
@@ -33,7 +33,7 @@ header = bytearray(64)
 header[:4] = b"\x7fELF"
 header[4] = 2
 header[5] = 1
-struct.pack_into("<H", header, 18, 62)
+struct.pack_into("<H", header, 18, int(sys.argv[2]))
 pathlib.Path(sys.argv[1]).write_bytes(header)
 PY
     chmod 0755 "$1"
@@ -193,12 +193,39 @@ if AGENTSIGHT_SOURCE_DIR="$SOURCE_ROOT" \
     AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" \
     BIN_DIR="$BIN_DIR" \
     OUTPUT_DIR="$TMP_ROOT/unsupported" \
-    TARGET_OS=linux \
-    TARGET_ARCH=aarch64 \
+    TARGET_OS=macos \
+    TARGET_ARCH=x86_64 \
     SOURCE_DATE_EPOCH=1700000000 \
         "$SOURCE_ROOT/packaging/raw/package.sh" package >/dev/null 2>&1; then
-    printf 'ERROR: package accepted unsupported Linux aarch64 target\n' >&2
+    printf 'ERROR: package accepted unsupported macOS x86_64 target\n' >&2
     exit 1
 fi
+
+
+write_elf "$BIN_DIR/agentsight" 183
+write_elf "$BIN_DIR/agentsight-enforcer" 183
+sha256sum "$BIN_DIR/agentsight-enforcer" | cut -d ' ' -f 1 > "$BIN_DIR/agentsight-enforcer.sha256"
+write_metadata linux aarch64 "$BIN_DIR/agentsight" "$BIN_DIR/agentsight-enforcer"
+for output in "$TMP_ROOT/arm-one" "$TMP_ROOT/arm-two"; do
+    AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" BIN_DIR="$BIN_DIR" \
+        OUTPUT_DIR="$output" TARGET_OS=linux TARGET_ARCH=aarch64 \
+        SOURCE_DATE_EPOCH=1700000000 "$SOURCE_ROOT/packaging/raw/package.sh" package >/dev/null
+done
+ARM_ARTIFACT="agentsight-$VERSION-linux-aarch64.tar.gz"
+cmp "$TMP_ROOT/arm-one/$ARM_ARTIFACT" "$TMP_ROOT/arm-two/$ARM_ARTIFACT"
+tar -tzf "$TMP_ROOT/arm-one/$ARM_ARTIFACT" | cmp - "$TMP_ROOT/linux-members"
+tar -xzOf "$TMP_ROOT/arm-one/$ARM_ARTIFACT" ./.anolisa/component.toml | \
+    cmp - "$SOURCE_ROOT/.anolisa/component.toml"
+# A valid receipt does not make a host-architecture enforcer an ARM64 binary.
+write_elf "$BIN_DIR/agentsight-enforcer"
+sha256sum "$BIN_DIR/agentsight-enforcer" | cut -d ' ' -f 1 > "$BIN_DIR/agentsight-enforcer.sha256"
+write_metadata linux aarch64 "$BIN_DIR/agentsight" "$BIN_DIR/agentsight-enforcer"
+if AGENTSIGHT_BUILD_METADATA="$BUILD_METADATA" BIN_DIR="$BIN_DIR" \
+    OUTPUT_DIR="$TMP_ROOT/wrong-arch" TARGET_OS=linux TARGET_ARCH=aarch64 \
+    "$SOURCE_ROOT/packaging/raw/package.sh" package >"$TMP_ROOT/arch-error" 2>&1; then
+    echo 'ERROR: ARM64 package accepted an x86_64 enforcer' >&2
+    exit 1
+fi
+grep -Fq 'ELF machine 62 does not match aarch64' "$TMP_ROOT/arch-error"
 
 printf 'AgentSight raw package tests passed\n'

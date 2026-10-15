@@ -51,7 +51,9 @@ version = "0.14.0"
 edition = "2024"
 
 [features]
-default = ["server"]
+default = ["server", "bpf-build"]
+# Disable for macOS cross builds so Linux host tools are not compiled.
+bpf-build = ["dep:libbpf-cargo", "dep:bindgen", "dep:cc", "dep:cbindgen"]
 server = [
     "dep:actix-web",
     "dep:actix-cors",
@@ -161,10 +163,10 @@ debug-assertions = false
 
 # Linux-only build dependencies (eBPF skeleton + C header generation)
 [target.'cfg(target_os = "linux")'.build-dependencies]
-libbpf-cargo = "0.23.3"
-bindgen = "0.69.4"
-cc = "1.1.31"
-cbindgen = "0.27"
+libbpf-cargo = { version = "0.23.3", optional = true }
+bindgen = { version = "0.69.4", optional = true }
+cc = { version = "1.1.31", optional = true }
+cbindgen = { version = "0.27", optional = true }
 
 # Redirect the pinned ActPlane git dependencies to the reviewed vendored copies.
 # The git+rev pins above are what scripts/build-enforcer.sh attests against; this
