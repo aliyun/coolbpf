@@ -1379,6 +1379,77 @@ impl HttpConnectionAggregator {
         self.idle_snapshotted.clear();
         self.ready.clear();
     }
+
+    /// Complete a live-tracked pid's partially-assembled responses (#7553).
+    ///
+    /// Called when the owning process exits cleanly: an application that
+    /// never reads its declared response body (or whose body bytes were
+    /// never captured) leaves the connection `ResponsePending` forever; on
+    /// a clean exit the pair is completed from whatever bytes arrived so
+    /// the call lands as a usable `complete` row instead of degrading into
+    /// a pending row that the stale scan later flips to `interrupted`.
+    /// Crashed processes keep the interrupted-evidence drain path. Entries
+    /// whose header block is unusable stay on the request-evidence path.
+    pub(crate) fn complete_pid_partial_responses(&mut self, pid: u32) -> Vec<AggregatedResult> {
+        let keys: Vec<ConnectionId> = self
+            .connections
+            .iter()
+            .filter(|(k, _)| k.pid == pid)
+            .map(|(k, _)| *k)
+            .collect();
+
+        let mut completed = Vec::new();
+        for key in keys {
+            let Some(state) = self.connections.pop(&key) else {
+                continue;
+            };
+            let ConnectionState::ResponsePending { request, assembly } = state else {
+                // Not a partially-assembled response (in-flight request,
+                // active SSE stream, …): keep it so the exit drain below can
+                // persist it as pending/interrupted evidence. Dropping it
+                // here would silently discard that evidence (#7716 review).
+                self.connections.put(key, state);
+                continue;
+            };
+            let mut assembly = assembly;
+            if let Some((response, end_timestamp_ns)) =
+                assembly.finish_partial(self.max_body_bytes, self.max_headers)
+            {
+                // Side tables are only dropped once the connection is known
+                // completed; a put-back arm (unusable headers) must keep them
+                // so the evidence path stays intact (#7716 review).
+                self.sse_continuation_buffers.pop(&key);
+                self.sse_read_state.pop(&key);
+                self.last_activity.pop(&key);
+                self.idle_snapshotted.pop(&key);
+                log::debug!(
+                    "[HttpAggregator] completed partial response on clean exit: \
+                     pid={} ssl_ptr={:#x}",
+                    key.pid,
+                    key.ssl_ptr,
+                );
+                let mut aggregated = AggregatedResponse::from_parsed(response);
+                aggregated.completion_timestamp_ns = Some(end_timestamp_ns);
+                completed.push(match request {
+                    Some(request) => AggregatedResult::HttpComplete(HttpPair {
+                        connection_id: key,
+                        request,
+                        response: aggregated,
+                    }),
+                    None => AggregatedResult::ResponseOnly {
+                        connection_id: key,
+                        response: aggregated,
+                    },
+                });
+            } else {
+                // Unusable headers: keep the entry (with its side tables) on
+                // the request-evidence path (crash/exit persistence).
+                self.connections
+                    .put(key, ConnectionState::ResponsePending { request, assembly });
+            }
+        }
+        completed
+    }
 }
 
 #[cfg(test)]

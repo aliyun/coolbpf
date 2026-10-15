@@ -143,6 +143,47 @@ impl PendingResponse {
             response.source_event = Rc::new(source);
         }
     }
+    /// Finish an in-flight response on the clean-exit path with whatever
+    /// bytes arrived, yielding a completable pair when at least the final
+    /// response headers are present (issue #7553: an application that never
+    /// reads the declared body leaves the connection `ResponsePending`
+    /// forever; the clean-exit sweep must surface the call instead of
+    /// stranding it as a pending row that the stale scan later flips to
+    /// `interrupted`). Returns the response plus its provenance timestamp.
+    ///
+    /// Returns `None` when even the header block is unusable (truncated or
+    /// unparsable), leaving the entry to the request-evidence path. The
+    /// dead-PID drain (vanished PIDs without an exit event) intentionally
+    /// keeps the interrupted-evidence semantics.
+    pub(super) fn finish_partial(
+        &mut self,
+        limit: usize,
+        max_headers: usize,
+    ) -> Option<(ParsedResponse, u64)> {
+        // The provenance timestamp of the buffered response bytes: the header
+        // event for a headers-only assembly, the retained fragment timestamp
+        // for one with body bytes.
+        let end_timestamp_ns = match self {
+            Self::Headers(event) => event.timestamp_ns,
+            Self::Body {
+                end_timestamp_ns, ..
+            } => *end_timestamp_ns,
+        };
+        let response = match self {
+            Self::Headers(_) => self.parsed_headers(max_headers).ok().flatten()?,
+            Self::Body { response, .. } => {
+                // Framing never completed: accept the buffered bytes as the
+                // final (partial) body rather than dropping the response.
+                let mut response = response.clone();
+                response.body_len = response.body_len.min(limit);
+                response
+            }
+        };
+        if is_informational(response.status_code) {
+            return None;
+        }
+        Some((response, end_timestamp_ns))
+    }
 
     /// SSL direction that owns the response.
     pub(super) fn direction(&self) -> i32 {

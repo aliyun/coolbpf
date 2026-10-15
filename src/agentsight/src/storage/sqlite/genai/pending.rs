@@ -82,6 +82,9 @@ pub enum PendingOrigin {
     DeadPidDrain,
     /// In-flight stream was snapshotted after an idle timeout while the PID lived.
     IdleDrain,
+    /// Response headers were captured on a clean exit but the declared body
+    /// never arrived; the row was completed from the partial capture (#7553).
+    CleanExitPartial,
 }
 
 impl PendingOrigin {
@@ -91,6 +94,7 @@ impl PendingOrigin {
             Self::RequestCapture => "request_capture",
             Self::DeadPidDrain => "dead_pid_drain",
             Self::IdleDrain => "idle_drain",
+            Self::CleanExitPartial => "clean_exit_partial",
         }
     }
 }
