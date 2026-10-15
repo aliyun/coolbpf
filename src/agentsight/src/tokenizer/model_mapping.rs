@@ -298,16 +298,24 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 /// assert_eq!(map_to_hf_model_id("meta-llama/Llama-2-7b"), "meta-llama/Llama-2-7b");
 /// ```
 pub fn map_to_hf_model_id(model_name: &str) -> &str {
-    // First, try exact match in mapping table
-    if let Some(&hf_id) = MODEL_MAPPING.get(model_name) {
+    if let Some(hf_id) = lookup_mapping(model_name) {
         return hf_id;
     }
 
-    // Try case-insensitive match
-    let lower_name = model_name.to_lowercase();
-    for (key, value) in MODEL_MAPPING.iter() {
-        if key.to_lowercase() == lower_name {
-            return value;
+    // Gateways such as OpenRouter and LiteLLM name an API model with its
+    // vendor in front (`openai/gpt-4o`, `anthropic/claude-3.5-sonnet`). Those
+    // vendors publish no tokenizer repos for their API models, so the prefixed
+    // name is not a Hub ID: resolve the bare name through the table. A name
+    // the table does not know (`openai/gpt-oss-20b`) is a real repo and still
+    // passes through below.
+    if let Some((vendor, bare)) = model_name.split_once('/') {
+        if API_VENDOR_PREFIXES
+            .iter()
+            .any(|prefix| prefix.eq_ignore_ascii_case(vendor))
+        {
+            if let Some(hf_id) = lookup_mapping(bare) {
+                return hf_id;
+            }
         }
     }
 
@@ -321,6 +329,22 @@ pub fn map_to_hf_model_id(model_name: &str) -> &str {
     // the approximation is wrong for unrelated families, so production models
     // must be added to MODEL_MAPPING explicitly rather than fixed here.
     FALLBACK_HF_MODEL_ID
+}
+
+/// Vendors whose API models a gateway names as `<vendor>/<model>`, with no
+/// tokenizer repo of that name on the Hub.
+const API_VENDOR_PREFIXES: [&str; 2] = ["openai", "anthropic"];
+
+/// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`].
+fn lookup_mapping(model_name: &str) -> Option<&'static str> {
+    if let Some(&hf_id) = MODEL_MAPPING.get(model_name) {
+        return Some(hf_id);
+    }
+    let lower_name = model_name.to_lowercase();
+    MODEL_MAPPING
+        .iter()
+        .find(|(key, _)| key.to_lowercase() == lower_name)
+        .map(|(_, value)| *value)
 }
 
 /// Check if a model name has a known mapping to HuggingFace.
@@ -491,6 +515,32 @@ mod tests {
             map_to_hf_model_id("meta-llama/Llama-2-7b"),
             "meta-llama/Llama-2-7b"
         );
+    }
+
+    /// OpenRouter and LiteLLM name API models `<vendor>/<model>`. OpenAI and
+    /// Anthropic publish no tokenizer repos for those models, so passing the
+    /// prefixed name through made `register_from_hf` fail on every call,
+    /// while the bare name resolves through the table. A prefixed name the
+    /// table does not know is a real Hub repo and still passes through.
+    #[test]
+    fn test_vendor_prefixed_api_models_resolve_through_the_table() {
+        assert_eq!(map_to_hf_model_id("openai/gpt-4o"), "Xenova/gpt-4o");
+        assert_eq!(map_to_hf_model_id("openai/gpt-4"), "Xenova/gpt-4");
+        assert_eq!(
+            map_to_hf_model_id("anthropic/claude-3.5-sonnet"),
+            "Xenova/claude-tokenizer"
+        );
+        assert_eq!(
+            map_to_hf_model_id("Anthropic/Claude-3-Opus"),
+            "Xenova/claude-tokenizer"
+        );
+        // Real repos under the same organisations are left alone.
+        assert_eq!(
+            map_to_hf_model_id("openai/gpt-oss-20b"),
+            "openai/gpt-oss-20b"
+        );
+        // Other organisations are Hub namespaces, not gateway prefixes.
+        assert_eq!(map_to_hf_model_id("Xenova/gpt-4o"), "Xenova/gpt-4o");
     }
 
     /// Models observed in production traffic must resolve through the
