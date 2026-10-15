@@ -64,8 +64,9 @@ impl GenAISqliteStore {
     ///
     /// With `include_auxiliary=false` (the default for /api/sessions), recap
     /// calls may still *form* a session (recap-only sessions surface with zero
-    /// tokens, #7271) but do not contribute tokens, conversation counts, or
-    /// query previews; web_search-only sessions stay hidden.
+    /// tokens, #7271) but do not contribute tokens, conversation counts, query
+    /// previews, or the last_seen/model/agent aggregates; analyzer-only
+    /// (cosh-ng background, #2750) and web_search-only sessions stay hidden.
     pub fn list_sessions(
         &self,
         start_ns: i64,
@@ -77,8 +78,10 @@ impl GenAISqliteStore {
         // session (#7271): a qwen CLI headless call whose main LLM call was
         // missed by the capture path leaves only its follow-up managed-memory
         // recap row; excluding recap entirely made such a user session
-        // permanently invisible in /api/sessions. web_search-only sessions
-        // stay hidden.
+        // permanently invisible in /api/sessions. The cosh-ng background
+        // analyzer is classified as its own 'analyzer' kind (#2750, #7271) so
+        // analyzer-only background sessions stay hidden; web_search-only
+        // sessions stay hidden too.
         let call_kind_filter = if include_auxiliary {
             ""
         } else {
@@ -93,6 +96,16 @@ impl GenAISqliteStore {
             "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN "
         };
         let aux_guard_close = if include_auxiliary { "" } else { " ELSE 0 END" };
+        // Text aggregates guard with a NULL else (MAX skips NULLs); recap-only
+        // sessions fall back to their recap rows via COALESCE so the required
+        // last_seen_ns stays non-NULL. With include_auxiliary the guard is
+        // empty and COALESCE(x, x) is a no-op.
+        let text_aux_guard = if include_auxiliary {
+            ""
+        } else {
+            "CASE WHEN (call_kind = 'main' OR call_kind IS NULL) THEN "
+        };
+        let text_aux_end = if include_auxiliary { "" } else { " END" };
         let conv_count_expr = if include_auxiliary {
             "conversation_id".to_string()
         } else {
@@ -109,14 +122,15 @@ impl GenAISqliteStore {
             concat!(
                 "SELECT session_id,
                     COUNT(DISTINCT {conv_count_expr}) AS conversation_count,
-                    MIN(start_timestamp_ns)  AS first_seen_ns,
-                    MAX(start_timestamp_ns)  AS last_seen_ns,
+                    COALESCE(MIN({text_aux_guard}start_timestamp_ns{text_aux_end}), MIN(start_timestamp_ns)) AS first_seen_ns,
+                    COALESCE(MAX({text_aux_guard}start_timestamp_ns{text_aux_end}), MAX(start_timestamp_ns)) AS last_seen_ns,
                     COALESCE(SUM({aux_guard}",
                 billed_input_col!(),
                 "{aux_close}), 0)  AS total_input,
                     COALESCE(SUM({aux_guard}output_tokens{aux_close}), 0) AS total_output,
-                    MAX(model)               AS model,
-                    COALESCE(MAX(agent_name),
+                    COALESCE(MAX({text_aux_guard}model{text_aux_end}), MAX(model)) AS model,
+                    COALESCE(MAX({text_aux_guard}agent_name{text_aux_end}),
+                             MAX(agent_name),
                              MAX(process_name)) AS agent_name,
                     (SELECT substr(g2.user_query, 1, 200) FROM genai_events g2
                       WHERE g2.session_id = g1.session_id
@@ -141,6 +155,8 @@ impl GenAISqliteStore {
             call_kind_filter = call_kind_filter,
             aux_guard = aux_guard,
             aux_close = aux_guard_close,
+            text_aux_guard = text_aux_guard,
+            text_aux_end = text_aux_end,
             conv_count_expr = conv_count_expr
         );
         let mut stmt = conn.prepare(&sql)?;

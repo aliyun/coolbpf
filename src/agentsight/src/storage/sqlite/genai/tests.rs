@@ -3213,6 +3213,66 @@ fn test_list_sessions_web_search_only_hidden() {
 }
 
 #[test]
+fn test_list_sessions_analyzer_only_hidden() {
+    // #2750 / #7271 review: the cosh-ng personal analyzer is classified as
+    // its own 'analyzer' kind; its standalone background session must stay
+    // hidden exactly as before the recap-only relaxation.
+    let store = make_store_with_pending(&[("c1", "sess-bg", "conv-1", "analyzer", 1000)]);
+    assert!(store.list_sessions(0, 10000, false).unwrap().is_empty());
+    assert_eq!(store.list_sessions(0, 10000, true).unwrap().len(), 1);
+}
+
+#[test]
+fn test_list_sessions_recap_does_not_move_last_seen_or_model() {
+    // #7271 review point 4: a recap row a few seconds after main must not
+    // move a mixed session's last_seen_ns (the ORDER BY key) or flip
+    // MAX(model)/MAX(agent_name) relative to the pre-#7271 behavior.
+    let path = std::env::temp_dir().join(format!(
+        "test_recap_last_seen_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, event_json) \
+             VALUES ('c1','llm_call',1000,2000,1000,'gpt-4','sess-m','t','conv-1','agent-a',1,'complete','main','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, event_json) \
+             VALUES ('c2','llm_call',9000,9100,100,'zeta-model','sess-m','t','conv-2','agent-z',1,'complete','recap','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].last_seen_ns, 1000,
+        "recap at 9000 must not move last_seen_ns"
+    );
+    assert_eq!(
+        sessions[0].model.as_deref(),
+        Some("gpt-4"),
+        "recap must not flip model"
+    );
+    assert_eq!(sessions[0].agent_name.as_deref(), Some("agent-a"));
+    // A recap-only session still gets a usable last_seen via fallback.
+    let only = make_store_with_pending(&[("c1", "sess-r", "conv-1", "recap", 1000)]);
+    let sessions = only.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions[0].last_seen_ns, 1000);
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_list_sessions_recap_does_not_inflate_main_session_numbers() {
     // An existing session with both main and recap keeps its token totals and
     // conversation counts identical to the pre-#7271 behavior.
