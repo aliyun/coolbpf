@@ -41,7 +41,7 @@ normalize_arch() {
 
 validate_target() {
     case "$TARGET_OS-$TARGET_ARCH" in
-        linux-x86_64 | macos-aarch64) ;;
+        linux-x86_64 | linux-aarch64 | macos-aarch64) ;;
         *) die "unsupported AgentSight raw target: $TARGET_OS-$TARGET_ARCH" ;;
     esac
 }

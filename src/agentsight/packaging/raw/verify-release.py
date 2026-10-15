@@ -29,6 +29,8 @@ TARGET_SOURCES = {
     },
 }
 
+TARGET_SOURCES[("linux", "aarch64")] = TARGET_SOURCES[("linux", "x86_64")]
+
 
 def read_toml(path: Path) -> dict[str, object]:
     """Read one TOML document with path-aware errors."""

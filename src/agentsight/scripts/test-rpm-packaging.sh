@@ -124,6 +124,7 @@ args = sys.argv
 root = pathlib.Path.cwd()
 target = pathlib.Path(args[args.index("--target-dir") + 1])
 host = args[args.index("--target") + 1]
+assert host == os.environ.get("EXPECTED_TARGET", "x86_64-unknown-linux-gnu")
 assert str(target) == os.environ["CARGO_TARGET_DIR"]
 assert target.is_absolute() and target.parent.name.startswith("enforcer.")
 assert target != root / "target"
@@ -180,6 +181,21 @@ for failure in CARGO_BUILD_TARGET=other-target FIXTURE_BAD_OBJECT=1; do
     fi
     [[ ! -s "$tmp_dir/failed-path" ]]
 done
+
+# Cross builds preserve the same private-output and receipt contract.
+arm_bin="$("${fixture_env[@]}" EXPECTED_TARGET=aarch64-unknown-linux-gnu \
+    "$fixture_root/scripts/build-enforcer.sh" --target aarch64-unknown-linux-gnu \
+    2>>"$tmp_dir/build.err")"
+[[ -x "$arm_bin" && -f "$arm_bin.sha256" && "$arm_bin" != "$first_bin" ]]
+python3 "$repo_root/src/agentsight/scripts/copy-enforcer.py" "$arm_bin" "$tmp_dir/arm-enforcer"
+cmp "$arm_bin" "$tmp_dir/arm-enforcer"
+if "${fixture_env[@]}" "$fixture_root/scripts/build-enforcer.sh" --target aarch64-apple-darwin \
+    >"$tmp_dir/unsupported-path" 2>"$tmp_dir/unsupported.err"; then
+    echo 'unsupported enforcer target was accepted' >&2
+    exit 1
+fi
+[[ ! -s "$tmp_dir/unsupported-path" ]]
+grep -Fq 'unsupported enforcer target' "$tmp_dir/unsupported.err"
 
 # Make install must hand off the captured path in the same recipe shell.
 "${fixture_env[@]}" make --no-print-directory -C "$fixture_root" \
