@@ -180,11 +180,15 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("yi-lightning", "01-ai/Yi-1.5-34B-Chat");
 
     // ============== GLM Models (Zhipu AI) ==============
-    m.insert("glm-4-9b-chat", "THUDM/glm-4-9b-chat");
-    m.insert("glm-4", "THUDM/glm-4-9b-chat");
-    m.insert("chatglm3-6b", "THUDM/chatglm3-6b");
-    m.insert("chatglm-turbo", "THUDM/glm-4-9b-chat");
-    m.insert("chatglm_pro", "THUDM/glm-4-9b-chat");
+    // THUDM/glm-4-9b-chat ships its tokenizer as remote code plus a tiktoken
+    // `tokenizer.model` and no tokenizer.json; the `-hf` release of the same
+    // model publishes tokenizer.json. ChatGLM3 only has the sentencepiece
+    // `tokenizer.model`, so it takes the unknown-model fallback explicitly.
+    m.insert("glm-4-9b-chat", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4", "THUDM/glm-4-9b-chat-hf");
+    m.insert("chatglm3-6b", FALLBACK_HF_MODEL_ID);
+    m.insert("chatglm-turbo", "THUDM/glm-4-9b-chat-hf");
+    m.insert("chatglm_pro", "THUDM/glm-4-9b-chat-hf");
 
     // ============== Baichuan Models ==============
     // The Baichuan repos ship only a sentencepiece tokenizer.model, which
@@ -614,6 +618,18 @@ mod tests {
         for name in ["baichuan2-7b-chat", "baichuan2-13b-chat", "baichuan-7b"] {
             assert_eq!(map_to_hf_model_id(name), "Qwen/Qwen3.5-397B-A17B", "{name}");
         }
+    }
+
+    /// THUDM/glm-4-9b-chat and THUDM/chatglm3-6b publish no `tokenizer.json`
+    /// (remote-code tokenizers over a `tokenizer.model`), so mapping to them
+    /// failed `register_from_hf` on every call; the GLM-4 names take the
+    /// `-hf` release that ships one, and ChatGLM3 the fallback that loads.
+    #[test]
+    fn test_glm_names_take_a_loadable_tokenizer() {
+        for name in ["glm-4-9b-chat", "glm-4", "chatglm-turbo", "chatglm_pro"] {
+            assert_eq!(map_to_hf_model_id(name), "THUDM/glm-4-9b-chat-hf", "{name}");
+        }
+        assert_eq!(map_to_hf_model_id("chatglm3-6b"), "Qwen/Qwen3.5-397B-A17B");
     }
 
     /// The InternLM repos publish no `tokenizer.json` (only a sentencepiece
