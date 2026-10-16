@@ -631,3 +631,61 @@ fn query_commands_reject_a_db_path_that_is_missing_or_not_a_file() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn summary_tokenless_db_reads_the_given_store() {
+    // `--db` moves the AgentSight databases, but the tokenless store lives in
+    // the caller's home directory, so a report over a copy still read the
+    // reading host's own stats.db. `--tokenless-db` points it at the copy: an
+    // empty file is a present store with no records, which the live path
+    // (absent in a fresh environment) cannot report.
+    let dir = fixture_dir("summary_tokenless");
+    let copy = dir.join("stats.db");
+    std::fs::write(&copy, b"").expect("create an empty stats.db copy");
+
+    let out = agentsight()
+        .args([
+            "summary",
+            "--last",
+            "24",
+            "--json",
+            "--tokenless-db",
+            copy.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run agentsight");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must emit valid JSON");
+    assert_eq!(v["tokenless"]["available"], serde_json::json!(true), "{v}");
+    assert_eq!(v["tokenless"]["records"], serde_json::json!(0), "{v}");
+
+    // A missing copy answers "not available", the state a missing live store
+    // reports too.
+    let missing = dir.join("absent_stats.db");
+    let out = agentsight()
+        .args([
+            "summary",
+            "--last",
+            "24",
+            "--json",
+            "--tokenless-db",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run agentsight");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json must emit valid JSON");
+    assert_eq!(v["tokenless"]["available"], serde_json::json!(false), "{v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
