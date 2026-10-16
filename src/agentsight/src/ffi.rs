@@ -1348,6 +1348,7 @@ pub extern "C" fn agentsight_version() -> *const c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn agentsight_get_eventfd(h: *mut AgentsightHandle) -> c_int {
     if h.is_null() {
+        set_last_error("NULL handle");
         return -1;
     }
     unsafe { (*h).eventfd }
@@ -2553,6 +2554,21 @@ mod tests {
         assert!(
             reason.is_some(),
             "a closed channel must leave a reason readable, not just -1"
+        );
+    }
+
+    #[test]
+    fn a_failed_eventfd_lookup_names_its_reason() {
+        // The return value alone cannot separate the two failures this entry
+        // point reports: the documented meaning of <0 is "eventfd is not
+        // supported", which is exactly what a NULL handle would look like to
+        // a caller that reads only the number.
+        let (code, reason) =
+            failure_on_a_clean_thread(|| unsafe { agentsight_get_eventfd(ptr::null_mut()) });
+        assert_eq!(code, -1);
+        assert!(
+            reason.is_some(),
+            "a NULL handle must leave a reason readable, not just -1"
         );
     }
 }
