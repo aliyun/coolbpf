@@ -337,7 +337,24 @@ pub fn map_to_hf_model_id(model_name: &str) -> &str {
 
 /// Vendors whose API models a gateway names as `<vendor>/<model>`, with no
 /// tokenizer repo of that name on the Hub.
-const API_VENDOR_PREFIXES: [&str; 2] = ["openai", "anthropic"];
+///
+/// Besides the two vendors, LiteLLM routes by provider (`deepseek/`,
+/// `gemini/`, `mistral/`, `moonshot/`, `dashscope/`) and OpenRouter names
+/// Gemini under `google/`. The provider namespaces hold no models on the Hub;
+/// under `google/` every bare name the table knows is a Gemini API model or a
+/// Gemma name the table resolves to a published Gemma repo. `qwen/` (OpenRouter)
+/// stays out: the table maps `qwq-32b` to the Preview repo, so a real
+/// `Qwen/QwQ-32B` would be redirected to a different tokenizer.
+const API_VENDOR_PREFIXES: [&str; 8] = [
+    "openai",
+    "anthropic",
+    "deepseek",
+    "gemini",
+    "mistral",
+    "moonshot",
+    "dashscope",
+    "google",
+];
 
 /// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`].
 fn lookup_mapping(model_name: &str) -> Option<&'static str> {
@@ -545,6 +562,44 @@ mod tests {
         );
         // Other organisations are Hub namespaces, not gateway prefixes.
         assert_eq!(map_to_hf_model_id("Xenova/gpt-4o"), "Xenova/gpt-4o");
+    }
+
+    /// LiteLLM routes by provider (`deepseek/deepseek-chat`,
+    /// `dashscope/qwen-plus`, `moonshot/moonshot-v1-8k`, `gemini/...`,
+    /// `mistral/...`) and OpenRouter names Gemini `google/gemini-...`. None of
+    /// those is a Hub repo, so passing them through failed `register_from_hf`
+    /// for every request; the bare names resolve through the table, while a
+    /// real repo under `google/` and every name the table does not know still
+    /// pass through.
+    #[test]
+    fn test_gateway_provider_prefixes_resolve_through_the_table() {
+        for (name, repo) in [
+            ("deepseek/deepseek-chat", "deepseek-ai/DeepSeek-V3"),
+            ("deepseek/deepseek-r1", "deepseek-ai/DeepSeek-R1"),
+            ("dashscope/qwen-plus", "Qwen/Qwen2.5-14B-Instruct"),
+            ("moonshot/moonshot-v1-8k", "Qwen/Qwen2.5-7B-Instruct"),
+            ("gemini/gemini-1.5-pro", "google/gemma-2-9b-it"),
+            (
+                "mistral/mistral-large",
+                "mistralai/Mistral-Large-Instruct-2407",
+            ),
+            ("google/gemini-2.0-flash", "google/gemma-2-9b-it"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
+        assert_eq!(
+            map_to_hf_model_id("google/gemma-2-27b-it"),
+            "google/gemma-2-27b-it"
+        );
+        assert_eq!(
+            map_to_hf_model_id("google/gemma-3-27b-it"),
+            "google/gemma-3-27b-it"
+        );
+        assert_eq!(
+            map_to_hf_model_id("deepseek/deepseek-reasoner"),
+            "deepseek/deepseek-reasoner"
+        );
+        assert_eq!(map_to_hf_model_id("Qwen/QwQ-32B"), "Qwen/QwQ-32B");
     }
 
     /// Models observed in production traffic must resolve through the
