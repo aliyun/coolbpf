@@ -72,10 +72,19 @@ fn read_workspace_path(pid: u32) -> Option<String> {
 /// procfs, mirroring [`read_ppid_from`]. Reading `cwd` through the configured
 /// root keeps `workspace_path` pointing at the agent's actual working
 /// directory when the observer reads a bind-mounted host procfs.
+///
+/// The target is decoded lossily: a directory name may hold non-UTF-8 bytes
+/// (the kernel does not require names to be UTF-8), and `to_str` returned
+/// `None` for exactly those, so `workspace_path` — the documented default
+/// protection scope — went missing for an agent working in such a directory.
+/// Every other procfs symlink read in this crate decodes the same way
+/// (`discovery::scanner` for `exe`, `genai::helpers` for `exe`,
+/// `health::port_detector` for the fd links), and [`read_ppid_from`] in this
+/// file already tolerates the same class of non-UTF-8 procfs content.
 fn read_workspace_path_from(root: &Path, pid: u32) -> Option<String> {
     fs::read_link(root.join(pid.to_string()).join("cwd"))
         .ok()
-        .and_then(|path| path.to_str().map(str::to_owned))
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Background health checker that periodically probes discovered agents
@@ -1114,6 +1123,34 @@ mod tests {
         assert_eq!(
             read_workspace_path_from(&root, pid).as_deref(),
             workspace.to_str()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A working directory whose name holds non-UTF-8 bytes is legal on Linux
+    /// (an executable's name, a tree unpacked under a mismatched locale), and
+    /// `workspace_path` is the documented default protection scope: the
+    /// dashboard seeds its protection dialog from it and the enforcement API
+    /// answers `workspace_unavailable` without it. `to_str` rejected exactly
+    /// those targets, so the field went missing while `read_ppid_from` in this
+    /// same file already tolerated the same class of non-UTF-8 procfs content.
+    #[test]
+    fn read_workspace_path_from_survives_a_non_utf8_cwd() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = unique_tmp_dir("workspace-non-utf8");
+        let pid = 2_000_000_003;
+        let workspace = root.join(OsStr::from_bytes(b"project-\xff"));
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+        let pid_dir = root.join(pid.to_string());
+        std::fs::create_dir_all(&pid_dir).expect("create pid dir");
+        std::os::unix::fs::symlink(&workspace, pid_dir.join("cwd")).expect("symlink cwd");
+
+        assert_eq!(
+            read_workspace_path_from(&root, pid).as_deref(),
+            Some(workspace.to_string_lossy().as_ref())
         );
 
         let _ = std::fs::remove_dir_all(&root);
