@@ -356,8 +356,14 @@ const API_VENDOR_PREFIXES: [&str; 8] = [
     "google",
 ];
 
-/// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`].
+/// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`], then the same
+/// lookup for the name without its snapshot date.
 fn lookup_mapping(model_name: &str) -> Option<&'static str> {
+    lookup_exact(model_name).or_else(|| without_snapshot_date(model_name).and_then(lookup_exact))
+}
+
+/// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`].
+fn lookup_exact(model_name: &str) -> Option<&'static str> {
     if let Some(&hf_id) = MODEL_MAPPING.get(model_name) {
         return Some(hf_id);
     }
@@ -366,6 +372,22 @@ fn lookup_mapping(model_name: &str) -> Option<&'static str> {
         .iter()
         .find(|(key, _)| key.to_lowercase() == lower_name)
         .map(|(_, value)| *value)
+}
+
+/// The model name without a trailing snapshot date: `-YYYYMMDD` (Anthropic,
+/// `claude-3-7-sonnet-20250219`) or `-YYYY-MM-DD` (OpenAI,
+/// `gpt-4o-2024-08-06`). The APIs accept and echo these pinned IDs, so a
+/// client that pins a snapshot sends the dated name while the table keys the
+/// model by its alias. `None` when the name carries no such suffix.
+fn without_snapshot_date(model_name: &str) -> Option<&str> {
+    let digits = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_digit());
+    let (stem, last) = model_name.rsplit_once('-')?;
+    if digits(last, 8) {
+        return Some(stem);
+    }
+    let (stem, month) = stem.rsplit_once('-')?;
+    let (stem, year) = stem.rsplit_once('-')?;
+    (digits(year, 4) && digits(month, 2) && digits(last, 2)).then_some(stem)
 }
 
 /// Check if a model name has a known mapping to HuggingFace.
@@ -642,6 +664,35 @@ mod tests {
             map_to_hf_model_id("some-unknown-model"),
             "Qwen/Qwen3.5-397B-A17B"
         );
+    }
+
+    /// The APIs accept and echo pinned snapshot IDs, so a client that pins
+    /// one sends the dated name (Claude Code sends `claude-...-YYYYMMDD`) while
+    /// the table keys the model by its alias. Those names missed the table and
+    /// took the unrelated Qwen fallback; they resolve like their alias, and a
+    /// dated key the table holds itself still wins.
+    #[test]
+    fn test_snapshot_dates_resolve_like_the_alias() {
+        for (name, repo) in [
+            ("gpt-4o-2024-08-06", "Xenova/gpt-4o"),
+            ("gpt-4o-mini-2024-07-18", "Xenova/gpt-4o"),
+            ("gpt-4-turbo-2024-04-09", "Xenova/gpt-4"),
+            ("claude-3-7-sonnet-20250219", "Xenova/claude-tokenizer"),
+            ("claude-3-5-sonnet-20241022", "Xenova/claude-tokenizer"),
+            ("claude-3-5-haiku-20241022", "Xenova/claude-tokenizer"),
+            (
+                "anthropic/claude-3-7-sonnet-20250219",
+                "Xenova/claude-tokenizer",
+            ),
+            ("claude-3-opus-20240229", "Xenova/claude-tokenizer"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
+        // Only a whole date is a snapshot suffix.
+        assert_eq!(without_snapshot_date("gpt-4o-0806"), None);
+        assert_eq!(without_snapshot_date("model-2024-8-06"), None);
+        assert_eq!(without_snapshot_date("gpt-4o"), None);
+        assert_eq!(without_snapshot_date("20250219"), None);
     }
 
     #[test]
