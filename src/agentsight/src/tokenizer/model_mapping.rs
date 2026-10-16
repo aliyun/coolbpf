@@ -228,18 +228,26 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-v1-128k", "Qwen/Qwen2.5-7B-Instruct");
 
     // ============== Google Gemini Models ==============
-    m.insert("gemini-pro", "google/gemma-2-9b-it");
-    m.insert("gemini-1.5-pro", "google/gemma-2-9b-it");
-    m.insert("gemini-1.5-flash", "google/gemma-2-9b-it");
-    m.insert("gemini-2.0-flash", "google/gemma-2-9b-it");
+    // `google/gemma-*` repos are gated: an anonymous download answers 401,
+    // so an entry pointing there failed `register_from_hf` on every call.
+    // The mirrors below are public and publish the identical tokenizer.json
+    // (same blob id as the gated repo), so the approximation is unchanged.
+    m.insert("gemini-pro", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-1.5-pro", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-1.5-flash", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.0-flash", "unsloth/gemma-2-9b-it");
 
     // ============== Gemma Models (Google) ==============
+    // `google/gemma-2b-it` and `google/gemma-7b-it` keep their gated repos:
+    // no public copy of either tokenizer.json was found. The Gemma 2/3 repos
+    // are gated the same way, and these mirrors share their vocabulary file
+    // byte for byte.
     m.insert("gemma-2b-it", "google/gemma-2b-it");
     m.insert("gemma-7b-it", "google/gemma-7b-it");
-    m.insert("gemma-2-9b-it", "google/gemma-2-9b-it");
-    m.insert("gemma-2-27b-it", "google/gemma-2-27b-it");
-    m.insert("gemma-3", "google/gemma-3-4b-it");
-    m.insert("gemma-3-4b-it", "google/gemma-3-4b-it");
+    m.insert("gemma-2-9b-it", "unsloth/gemma-2-9b-it");
+    m.insert("gemma-2-27b-it", "unsloth/gemma-2-27b-it");
+    m.insert("gemma-3", "unsloth/gemma-3-4b-it");
+    m.insert("gemma-3-4b-it", "unsloth/gemma-3-4b-it");
 
     // ============== Phi Models (Microsoft) ==============
     m.insert("phi-2", "microsoft/phi-2");
@@ -618,18 +626,21 @@ mod tests {
             ("deepseek/deepseek-r1", "deepseek-ai/DeepSeek-R1"),
             ("dashscope/qwen-plus", "Qwen/Qwen2.5-14B-Instruct"),
             ("moonshot/moonshot-v1-8k", "Qwen/Qwen2.5-7B-Instruct"),
-            ("gemini/gemini-1.5-pro", "google/gemma-2-9b-it"),
+            ("gemini/gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
             (
                 "mistral/mistral-large",
                 "mistralai/Mistral-Large-Instruct-2407",
             ),
-            ("google/gemini-2.0-flash", "google/gemma-2-9b-it"),
+            ("google/gemini-2.0-flash", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
+        // The bare name is in the table, so the prefixed form resolves
+        // through it; the gated repo's tokenizer.json is byte-identical to
+        // the mirror's, so the redirect changes no token count.
         assert_eq!(
             map_to_hf_model_id("google/gemma-2-27b-it"),
-            "google/gemma-2-27b-it"
+            "unsloth/gemma-2-27b-it"
         );
         assert_eq!(
             map_to_hf_model_id("google/gemma-3-27b-it"),
@@ -640,6 +651,27 @@ mod tests {
             "deepseek/deepseek-reasoner"
         );
         assert_eq!(map_to_hf_model_id("Qwen/QwQ-32B"), "Qwen/QwQ-32B");
+    }
+
+    /// `google/gemma-*` repos are gated — an anonymous download of their
+    /// `tokenizer.json` answers 401 — so every entry pointing there failed
+    /// `register_from_hf` on every call. The Gemma 2/3 names take public
+    /// mirrors whose `tokenizer.json` carries the same blob id as the gated
+    /// repo's, i.e. the identical file; the PR body lists the ids.
+    #[test]
+    fn test_gemma_names_take_a_loadable_tokenizer() {
+        for (name, repo) in [
+            ("gemma-2-9b-it", "unsloth/gemma-2-9b-it"),
+            ("gemma-2-27b-it", "unsloth/gemma-2-27b-it"),
+            ("gemma-3", "unsloth/gemma-3-4b-it"),
+            ("gemma-3-4b-it", "unsloth/gemma-3-4b-it"),
+            ("gemini-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini-1.5-flash", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.0-flash", "unsloth/gemma-2-9b-it"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
     }
 
     /// Models observed in production traffic must resolve through the
