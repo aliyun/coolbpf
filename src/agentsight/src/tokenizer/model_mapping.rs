@@ -133,36 +133,48 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     );
 
     // ============== Llama Models (Meta) ==============
-    m.insert("llama-2-7b-chat", "meta-llama/Llama-2-7b-chat-hf");
-    m.insert("llama-2-13b-chat", "meta-llama/Llama-2-13b-chat-hf");
-    m.insert("llama-2-70b-chat", "meta-llama/Llama-2-70b-chat-hf");
-    m.insert("llama-3-8b-instruct", "meta-llama/Meta-Llama-3-8B-Instruct");
+    // The `meta-llama/*` repos are gated: an anonymous download of their
+    // tokenizer answers 401, so an entry pointing there failed
+    // `register_from_hf` on every call. The mirrors below are public and
+    // publish the same `tokenizer.json` (same blob id as the gated repo),
+    // so the token counts are unchanged. Every Llama 3.1 size — and every
+    // Llama 2 chat size — ships one shared `tokenizer.json`, so a mirror
+    // of another size in the same release carries the identical file.
+    m.insert("llama-2-7b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer");
+    m.insert("llama-2-13b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer");
+    m.insert("llama-2-70b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer");
+    m.insert(
+        "llama-3-8b-instruct",
+        "NousResearch/Meta-Llama-3-8B-Instruct",
+    );
     m.insert(
         "llama-3-70b-instruct",
-        "meta-llama/Meta-Llama-3-70B-Instruct",
+        "NousResearch/Meta-Llama-3-70B-Instruct",
     );
     m.insert(
         "llama-3.1-8b-instruct",
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "NousResearch/Meta-Llama-3.1-8B-Instruct",
     );
     m.insert(
         "llama-3.1-70b-instruct",
-        "meta-llama/Meta-Llama-3.1-70B-Instruct",
+        "NousResearch/Meta-Llama-3.1-70B-Instruct",
     );
     m.insert(
         "llama-3.1-405b-instruct",
-        "meta-llama/Meta-Llama-3.1-405B-Instruct",
+        "SillyTilly/Meta-Llama-3.1-405B-Instruct",
     );
-    m.insert("llama-3.2-1b-instruct", "meta-llama/Llama-3.2-1B-Instruct");
-    m.insert("llama-3.2-3b-instruct", "meta-llama/Llama-3.2-3B-Instruct");
-    m.insert(
-        "llama-3.3-70b-instruct",
-        "meta-llama/Llama-3.3-70B-Instruct",
-    );
+    m.insert("llama-3.2-1b-instruct", "alpindale/Llama-3.2-1B-Instruct");
+    m.insert("llama-3.2-3b-instruct", "alpindale/Llama-3.2-3B-Instruct");
+    m.insert("llama-3.3-70b-instruct", "RedHatAI/Llama-3.3-70B-Instruct");
 
     // ============== Mistral Models ==============
     m.insert("mistral-7b-instruct", "mistralai/Mistral-7B-Instruct-v0.3");
-    m.insert("mistral-large", "mistralai/Mistral-Large-Instruct-2407");
+    // Gated like the Meta repos above; the mirror carries the identical
+    // `tokenizer.json` and `tokenizer_config.json`.
+    m.insert(
+        "mistral-large",
+        "Sicarius-Prototyping/Mistral-Large-Instruct-2407",
+    );
     m.insert(
         "mixtral-8x7b-instruct",
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -565,11 +577,60 @@ mod tests {
     fn test_llama_mapping() {
         assert_eq!(
             map_to_hf_model_id("llama-3-8b-instruct"),
-            "meta-llama/Meta-Llama-3-8B-Instruct"
+            "NousResearch/Meta-Llama-3-8B-Instruct"
         );
         assert_eq!(
             map_to_hf_model_id("llama-3.1-70b-instruct"),
-            "meta-llama/Meta-Llama-3.1-70B-Instruct"
+            "NousResearch/Meta-Llama-3.1-70B-Instruct"
+        );
+    }
+
+    /// The `meta-llama/*` repos are gated — an anonymous download of their
+    /// `tokenizer.json` answers 401 — so every entry pointing there failed
+    /// `register_from_hf` on every call. The names take public mirrors whose
+    /// `tokenizer.json` carries the same blob id as the gated repo's, i.e.
+    /// the identical file; the PR body lists the ids.
+    #[test]
+    fn test_llama_names_take_a_loadable_tokenizer() {
+        for (name, repo) in [
+            ("llama-2-7b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer"),
+            ("llama-2-13b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer"),
+            ("llama-2-70b-chat", "DeepInfra/Llama-2-70b-chat-tokenizer"),
+            (
+                "llama-3-8b-instruct",
+                "NousResearch/Meta-Llama-3-8B-Instruct",
+            ),
+            (
+                "llama-3-70b-instruct",
+                "NousResearch/Meta-Llama-3-70B-Instruct",
+            ),
+            (
+                "llama-3.1-8b-instruct",
+                "NousResearch/Meta-Llama-3.1-8B-Instruct",
+            ),
+            (
+                "llama-3.1-70b-instruct",
+                "NousResearch/Meta-Llama-3.1-70B-Instruct",
+            ),
+            (
+                "llama-3.1-405b-instruct",
+                "SillyTilly/Meta-Llama-3.1-405B-Instruct",
+            ),
+            ("llama-3.2-1b-instruct", "alpindale/Llama-3.2-1B-Instruct"),
+            ("llama-3.2-3b-instruct", "alpindale/Llama-3.2-3B-Instruct"),
+            ("llama-3.3-70b-instruct", "RedHatAI/Llama-3.3-70B-Instruct"),
+        ] {
+            assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
+    }
+
+    /// `mistralai/Mistral-Large-Instruct-2407` is gated the same way, so the
+    /// name takes a public mirror with the same `tokenizer.json` blob id.
+    #[test]
+    fn test_mistral_large_takes_a_loadable_tokenizer() {
+        assert_eq!(
+            map_to_hf_model_id("mistral-large"),
+            "Sicarius-Prototyping/Mistral-Large-Instruct-2407"
         );
     }
 
@@ -629,7 +690,7 @@ mod tests {
             ("gemini/gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
             (
                 "mistral/mistral-large",
-                "mistralai/Mistral-Large-Instruct-2407",
+                "Sicarius-Prototyping/Mistral-Large-Instruct-2407",
             ),
             ("google/gemini-2.0-flash", "unsloth/gemma-2-9b-it"),
         ] {
