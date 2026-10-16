@@ -563,6 +563,52 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_response_empty_usage_object() {
+        // A non-streaming /v1/messages response may carry `"usage": {}`.
+        // The fields must default to 0 instead of failing deserialization —
+        // a parse failure used to drop the real response_id and strand the
+        // completion path (issue #7553).
+        let json = serde_json::json!({
+            "id": "msg_empty_usage",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "model": "claude-3-opus-20240229",
+            "usage": {}
+        });
+
+        let response = AnthropicParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let response = response.unwrap();
+        assert_eq!(response.id, "msg_empty_usage");
+        assert_eq!(response.usage.input_tokens, 0);
+        assert_eq!(response.usage.output_tokens, 0);
+    }
+
+    /// A response that omits `usage` entirely (as likely as `"usage": {}`
+    /// when the body is incomplete) must still parse and keep the response
+    /// id rather than failing deserialization (issue #7553 review).
+    #[test]
+    fn test_parse_response_without_usage_key() {
+        let json = serde_json::json!({
+            "id": "msg_no_usage",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "model": "claude-3-opus-20240229"
+        });
+
+        let response = AnthropicParser::parse_response(&json);
+        assert!(response.is_some());
+
+        let response = response.unwrap();
+        assert_eq!(response.id, "msg_no_usage");
+        assert_eq!(response.usage.input_tokens, 0);
+        assert_eq!(response.usage.output_tokens, 0);
+    }
+
+    #[test]
     fn test_parse_response_with_unmodeled_block_keeps_the_text() {
         // Extended-thinking redaction adds a block type this build does not
         // model (`redacted_thinking`); the server-tool blocks do the same.

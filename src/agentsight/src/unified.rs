@@ -36,7 +36,7 @@ use std::time::Duration;
 use agentsight_sqlite_lifecycle::LifecycleError;
 use agentsight_trajectory_collector::TrajectoryStore;
 
-use crate::aggregator::Aggregator;
+use crate::aggregator::{AggregatedResult, Aggregator};
 use crate::analyzer::Analyzer;
 use crate::config::AgentsightConfig;
 use crate::database::{
@@ -1763,7 +1763,19 @@ impl AgentSight {
             }
         }
 
-        // 1. Drain in-flight connections for this PID from the aggregator
+        // 1. Drain in-flight connections for this PID from the aggregator.
+        // Before that: on a clean exit, complete the pid's in-flight
+        // responses whose headers were captured but whose declared body never
+        // arrived (#7553 — e.g. an HTTP client that inspects only the status
+        // and never reads the body). Routing them through the normal build
+        // path lands usable `complete` rows; a crashed process skips this and
+        // keeps the interrupted-evidence drain below untouched.
+        if ProcessExitStatus::decode(raw_exit_code).is_clean() {
+            for pair in self.aggregator.complete_pid_partial_responses(pid) {
+                self.complete_drained_pair(&pair);
+            }
+        }
+
         let drained = self.aggregator.drain_connections_for_pid(pid);
 
         // 2. Persist drained connections as pending calls
@@ -2196,6 +2208,34 @@ impl AgentSight {
         for events in self.pending_genai.flush_all() {
             self.complete_and_export_deferred_genai(events);
         }
+    }
+
+    /// Build and persist a completed aggregation from the dead-pid / clean-exit
+    /// paths (#7553).
+    ///
+    /// Mirrors the immediate-completion branch of the event loop, but never
+    /// re-enters the deferral queue: the owning pid is gone, so the FileWrite
+    /// that could resolve a deferred session mapping can never arrive. The
+    /// session_id falls back to the response_id-derived id, exactly like the
+    /// deferred-timeout flush.
+    fn complete_drained_pair(&mut self, agg_result: &AggregatedResult) {
+        let analysis_results = self.analyzer.analyze_aggregated(agg_result);
+        let (output, mut pending_info) = self.genai_builder.build_with_pending(
+            &analysis_results,
+            &self.response_mapper,
+            &self.pid_agent_name_cache,
+        );
+        if output.events.is_empty() {
+            return;
+        }
+        persist_drained_genai_events(
+            pending_info.as_mut(),
+            &output.events,
+            self.genai_sqlite_store.as_deref(),
+            &self.genai_exporters,
+            self.ffi_sender.as_ref(),
+        );
+        self.detect_and_store_interruptions(&output.events);
     }
 
     /// Immediately flush deferred GenAI events belonging to an exited process.
@@ -2696,6 +2736,63 @@ fn detail_error_key(ie: &crate::interruption::InterruptionEvent) -> Option<Strin
         .get("error")
         .and_then(|error| error.as_str())
         .map(str::to_owned)
+}
+
+/// Persist and export one drained pair's built events (#7553).
+///
+/// Extracted from `complete_drained_pair` so the clean-exit completion path
+/// is unit-testable without constructing a full `AgentSight`.
+fn persist_drained_genai_events(
+    mut info: Option<&mut crate::storage::sqlite::PendingCallInfo>,
+    events: &[GenAISemanticEvent],
+    store: Option<&GenAISqliteStore>,
+    exporters: &[Box<dyn GenAIExporter>],
+    ffi_sender: Option<&FfiEventSender>,
+) {
+    // Stamp the provenance so dashboards can tell "fully captured" apart from
+    // "partial body completed at process exit" (#7716 review). This is the
+    // only path that persists a #7553 drained pair.
+    if let Some(info) = info.as_deref_mut() {
+        info.pending_origin = crate::storage::sqlite::PendingOrigin::CleanExitPartial;
+    }
+    match (info, store) {
+        (Some(info), Some(store)) => {
+            if let Err(e) = store.insert_pending(info) {
+                log::warn!(
+                    "Failed to insert drained pending call {}: {}",
+                    info.call_id,
+                    e
+                );
+            }
+            for event in events {
+                if let Err(e) = store.complete_pending(event) {
+                    log::warn!("Failed to complete drained pending call: {e}");
+                }
+            }
+            // SQLite already has the events; only the other exporters need them.
+            for exporter in exporters {
+                if exporter.name() != "sqlite" {
+                    exporter.export(events);
+                }
+            }
+            if let Some(sender) = ffi_sender {
+                for event in events {
+                    if let GenAISemanticEvent::LLMCall(call) = event {
+                        sender.send_llm(call.clone());
+                    }
+                }
+            }
+        }
+        // No SQLite store (or no pending info): fall back to plain export,
+        // which suppresses exporters under FFI mode exactly like the live path.
+        _ => {
+            if ffi_sender.is_none() {
+                for exporter in exporters {
+                    exporter.export(events);
+                }
+            }
+        }
+    }
 }
 
 /// Store one detected interruption: message-matched dedup, the insert, the

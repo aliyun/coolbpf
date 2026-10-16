@@ -3174,7 +3174,7 @@ fn test_list_sessions_excludes_auxiliary() {
 }
 
 #[test]
-fn test_list_sessions_only_auxiliary_hidden() {
+fn test_list_sessions_recap_only_zero_token_contract() {
     let store = make_store_with_pending(&[
         ("c1", "sess-recap", "conv-1", "recap", 1000),
         ("c2", "sess-recap", "conv-2", "web_search", 2000),
@@ -3363,6 +3363,171 @@ fn test_list_traces_by_session_excludes_auxiliary() {
         .list_traces_by_session("sess-x", None, None, true)
         .unwrap();
     assert_eq!(traces_all.len(), 2);
+}
+
+#[test]
+fn test_list_traces_recap_only_session_is_inspectable() {
+    // #7271 review P1: a recap-only session now appears in /api/sessions, so
+    // its drill-down must show the recap trace too — otherwise the list, the
+    // trace view, and the ATIF event view tell three different stories.
+    let store = make_store_with_pending(&[("c1", "sess-r", "conv-recap", "recap", 1000)]);
+    let traces = store
+        .list_traces_by_session("sess-r", None, None, false)
+        .unwrap();
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].conversation_id, "conv-recap");
+    assert_eq!(traces[0].call_count, 1);
+}
+
+#[test]
+fn test_list_sessions_recap_only_preview_is_inspectable() {
+    // #7271 review P1: with no main rows, the recap row carries the session
+    // preview; mixed sessions keep main-only previews.
+    let store = make_store_with_pending(&[
+        ("c1", "sess-mixed", "conv-1", "main", 1000),
+        ("c2", "sess-mixed", "conv-2", "recap", 2000),
+        ("c3", "sess-ro", "conv-3", "recap", 3000),
+    ]);
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'recap query' WHERE call_id = 'c2'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE genai_events SET user_query = 'recap-only query' WHERE call_id = 'c3'",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    let mixed = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-mixed")
+        .unwrap();
+    assert_eq!(
+        mixed.first_user_query, None,
+        "mixed session keeps main-only preview"
+    );
+    let ro = sessions.iter().find(|s| s.session_id == "sess-ro").unwrap();
+    assert_eq!(
+        ro.first_user_query.as_deref(),
+        Some("recap-only query"),
+        "recap-only session preview falls back to the recap row"
+    );
+}
+
+#[test]
+fn test_list_sessions_text_fallback_only_without_main_rows() {
+    // #7271 review P2: model/agent fallbacks must trigger only when the
+    // session has zero main rows; main rows with NULL model/agent_name must
+    // not be papered over by recap-row values.
+    let path = std::env::temp_dir().join(format!(
+        "test_text_fallback_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        // Mixed session: main rows with NULL model, recap row with a model.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, process_name, pid, status, call_kind, event_json) \
+             VALUES ('m1','llm_call',1000,1100,100,NULL,'sess-a','t','c1',NULL,'proc-a',1,'complete','main','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, process_name, pid, status, call_kind, event_json) \
+             VALUES ('m2','llm_call',2000,2100,100,'recap-model','sess-a','t','c2','recap-agent','proc-a',1,'complete','recap','{}')",
+            [],
+        )
+        .unwrap();
+        // Recap-only session: fallback must supply model/agent from the recap row.
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, model, session_id, trace_id, conversation_id, agent_name, process_name, pid, status, call_kind, event_json) \
+             VALUES ('m3','llm_call',3000,3100,100,'ro-model','sess-ro','t','c3','ro-agent','proc-b',1,'complete','recap','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    let mixed = sessions.iter().find(|s| s.session_id == "sess-a").unwrap();
+    assert_eq!(mixed.model, None, "NULL-model main rows must stay NULL");
+    assert_eq!(
+        mixed.agent_name.as_deref(),
+        Some("proc-a"),
+        "falls back to process_name over main rows, not recap agent_name"
+    );
+    let ro = sessions.iter().find(|s| s.session_id == "sess-ro").unwrap();
+    assert_eq!(ro.model.as_deref(), Some("ro-model"));
+    assert_eq!(ro.agent_name.as_deref(), Some("ro-agent"));
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_migration_reclassifies_legacy_analyzer_recap_rows() {
+    // #7271 review P1: rows persisted as 'recap' by pre-split builds must be
+    // reclassified to 'analyzer' on reopen, otherwise #2750's noise sessions
+    // resurface on hosts with existing data.
+    let path = std::env::temp_dir().join(format!(
+        "test_analyzer_backfill_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    cleanup_db(&path);
+    let store =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, user_query, event_json) \
+             VALUES ('a1','llm_call',1000,1100,100,'sess-legacy','t','c1','cosh',1,'complete','recap','Summarize only grounded work into the supplied JSON schema. List every business entity mentioned by a summary or prompt in that item''s entities field.','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns, session_id, trace_id, conversation_id, agent_name, pid, status, call_kind, user_query, event_json) \
+             VALUES ('a2','llm_call',2000,2100,100,'sess-qwen','t','c2','QwenCode',1,'complete','recap','Managed memory has TWO directories. Choose which one to write each memory into.','{}')",
+            [],
+        )
+        .unwrap();
+    }
+    drop(store);
+    // Reopen: the v11 backfill runs during schema setup.
+    let reopened =
+        GenAISqliteStore::new_with_path(&path, crate::config::PeriodicStoragePolicy::default())
+            .unwrap();
+    let kinds: Vec<(String, String)> = {
+        let conn = reopened.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT call_id, call_kind FROM genai_events ORDER BY call_id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    assert_eq!(
+        kinds,
+        vec![
+            ("a1".to_string(), "analyzer".to_string()),
+            ("a2".to_string(), "recap".to_string()),
+        ],
+        "only the analyzer-prompt row is reclassified; qwen recap stays recap"
+    );
+    cleanup_db(&path);
 }
 
 #[test]

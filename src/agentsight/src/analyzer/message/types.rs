@@ -417,6 +417,7 @@ pub struct AnthropicResponse {
     pub stop_sequence: Option<String>,
 
     /// Token usage statistics
+    #[serde(default)]
     pub usage: AnthropicUsage,
 }
 
@@ -539,12 +540,14 @@ pub struct AnthropicImageSource {
 }
 
 /// Anthropic token usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicUsage {
     /// Number of input tokens
+    #[serde(default)]
     pub input_tokens: u64,
 
     /// Number of output tokens
+    #[serde(default)]
     pub output_tokens: u64,
 
     /// Input tokens used to create cache entries
@@ -683,6 +686,7 @@ pub struct AnthropicSseMessageStart {
     /// Model used
     pub model: String,
     /// Initial usage statistics
+    #[serde(default)]
     pub usage: AnthropicUsage,
     /// Content blocks (empty at start)
     #[serde(default)]
