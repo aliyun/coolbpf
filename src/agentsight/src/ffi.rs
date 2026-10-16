@@ -1003,6 +1003,7 @@ pub unsafe extern "C" fn agentsight_config_load_config(
     json_str: *const c_char,
 ) -> c_int {
     if cfg.is_null() || json_str.is_null() {
+        set_last_error("NULL config or JSON string");
         return -1;
     }
     let c = unsafe { &mut *cfg };
@@ -2395,5 +2396,48 @@ mod tests {
             crate::config::HttpTarget::Domain(d) => assert_eq!(d, "*.internal.com"),
             _ => panic!("expected Domain"),
         }
+    }
+
+    /// Run `call` on its own thread and report both the code it returned and
+    /// the reason it left readable for the caller.
+    ///
+    /// `LAST_ERROR` is thread-local and sticky, so only a fresh thread shows
+    /// the initial state a real caller starts from — the state the C API
+    /// documents ("NULL when there is no error"). On a reused thread a message
+    /// from an earlier failure would answer the probe even when the call under
+    /// test reported nothing.
+    fn failure_on_a_clean_thread(
+        call: impl FnOnce() -> c_int + Send + 'static,
+    ) -> (c_int, Option<String>) {
+        std::thread::spawn(move || {
+            let code = call();
+            let reason = unsafe {
+                let ptr = agentsight_last_error();
+                (!ptr.is_null()).then(|| CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            };
+            (code, reason)
+        })
+        .join()
+        .expect("the probe thread must not panic")
+    }
+
+    #[test]
+    fn a_failed_config_load_names_its_reason() {
+        // A NULL argument is documented as handled ("or null (which is handled
+        // gracefully)"), and the C prototype in docs/design-docs/c-ffi-api.md
+        // sends the caller to agentsight_last_error() for the reason — a bare
+        // -1 leaves a stale message from an earlier call on this thread.
+        let (code, reason) = failure_on_a_clean_thread(|| unsafe {
+            let cfg = agentsight_config_new();
+            let code = agentsight_config_load_config(cfg, ptr::null());
+            agentsight_config_free(cfg);
+            code
+        });
+
+        assert_eq!(code, -1);
+        assert!(
+            reason.is_some(),
+            "a failed load must leave a reason readable, not just -1"
+        );
     }
 }
