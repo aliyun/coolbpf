@@ -91,6 +91,17 @@ pub fn extract_response_content(
                     }
                 }
 
+                // A refusal answer arrives in `refusal` while `content` stays
+                // null (`delta.refusal` on a stream, `message.refusal` in a
+                // whole body), so without this arm a refused call counted no
+                // output tokens in the manual counters and the drain estimate.
+                if let Some(r) = msg.get("refusal").and_then(|r| r.as_str()) {
+                    if !r.is_empty() {
+                        content.push_str(r);
+                        has_data = true;
+                    }
+                }
+
                 // Extract reasoning_content
                 if let Some(r) = msg.get("reasoning_content").and_then(|r| r.as_str()) {
                     if !r.is_empty() {
@@ -229,6 +240,25 @@ pub fn extract_response_content(
                     }
                 }
             }
+            // A refusal is the model's answer for that call: it arrives in
+            // `delta` while `content` stays empty, and the closing event
+            // repeats it in `refusal` (the same shape the message parser
+            // reads). Without these arms a refused Responses call counted no
+            // output tokens in the manual counters and the drain estimate.
+            "response.refusal.delta" => {
+                if let Some(d) = resp.get("delta").and_then(|d| d.as_str()) {
+                    if !d.is_empty() {
+                        return Some((d.to_string(), None, Vec::new()));
+                    }
+                }
+            }
+            "response.refusal.done" => {
+                if let Some(r) = resp.get("refusal").and_then(|r| r.as_str()) {
+                    if !r.is_empty() {
+                        return Some((r.to_string(), None, Vec::new()));
+                    }
+                }
+            }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                 if let Some(d) = resp.get("delta").and_then(|d| d.as_str()) {
                     if !d.is_empty() {
@@ -354,9 +384,14 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
     // while the deltas had already counted it as reasoning.
     let saw_reasoning_delta = saw_delta("response.reasoning_text.delta")
         || saw_delta("response.reasoning_summary_text.delta");
+    // A refusal is the call's answer too, and it repeats the same way: the
+    // `response.refusal.done` event closes the deltas, so it is read only
+    // when no refusal delta was captured.
+    let saw_refusal_delta = saw_delta("response.refusal.delta");
     let repeats_delivered_text = |chunk: &Value| -> bool {
         match chunk.get("type").and_then(|t| t.as_str()) {
             Some("response.output_text.done") => saw_text_delta,
+            Some("response.refusal.done") => saw_refusal_delta,
             Some("response.output_item.done") => {
                 if chunk.get("item").is_some_and(is_reasoning_item) {
                     saw_reasoning_delta
@@ -1087,6 +1122,85 @@ mod tests {
         let (content, reasoning, _) = merge_response_output_text(&with_answer);
         assert_eq!(content, "42");
         assert_eq!(reasoning, "Think");
+    }
+
+    /// A refusal is the model's answer for that call: the Responses protocol
+    /// streams it as `response.refusal.delta` and closes it with
+    /// `response.refusal.done`, whose `refusal` field carries the finalized
+    /// text (the shape the message parser reads). The extractor knew only the
+    /// `output_text` events, so a refused call counted no output tokens.
+    #[test]
+    fn test_responses_api_refusal_events_yield_content() {
+        let delta = serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"});
+        let (content, reasoning, _) =
+            extract_response_content(Some(&delta)).expect("the refusal delta must extract");
+        assert_eq!(content, "I can't help");
+        assert!(reasoning.is_none());
+
+        let done = serde_json::json!({"type": "response.refusal.done", "refusal": "I can't help with that."});
+        let (content, _, _) =
+            extract_response_content(Some(&done)).expect("the closing refusal must extract");
+        assert_eq!(content, "I can't help with that.");
+
+        // The empty shapes keep yielding nothing.
+        for chunk in [
+            serde_json::json!({"type": "response.refusal.delta", "delta": ""}),
+            serde_json::json!({"type": "response.refusal.done", "refusal": ""}),
+            serde_json::json!({"type": "response.refusal.done"}),
+        ] {
+            assert!(
+                extract_response_content(Some(&chunk)).is_none(),
+                "{chunk} must stay unextracted"
+            );
+        }
+    }
+
+    /// The closing refusal repeats what the deltas delivered, so the merge
+    /// must count it once; a late-joined capture (only the closing event)
+    /// must still read it.
+    #[test]
+    fn test_merge_response_output_text_counts_a_refusal_once() {
+        let complete = vec![
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            serde_json::json!({"type": "response.refusal.done",
+                "refusal": "I can't help with that."}),
+        ];
+        let (content, reasoning, tool_calls) = merge_response_output_text(&complete);
+        assert_eq!(content, "I can't help with that.");
+        assert!(reasoning.is_empty());
+        assert!(tool_calls.is_empty());
+
+        let closing_only = vec![serde_json::json!({"type": "response.refusal.done",
+            "refusal": "I can't help with that."})];
+        assert_eq!(
+            merge_response_output_text(&closing_only).0,
+            "I can't help with that."
+        );
+    }
+
+    /// The Chat Completions protocols spell the same answer `refusal` next to
+    /// a null `content`: `choices[].delta.refusal` on a stream and
+    /// `choices[].message.refusal` in a whole body/snapshot.
+    #[test]
+    fn test_chat_refusal_is_read_as_content() {
+        let response = serde_json::json!({
+            "model": "gpt-4o",
+            "choices": [{"message": {"role": "assistant", "content": null,
+                                     "refusal": "I can't help with that."}}],
+        });
+        let (content, _, _) =
+            extract_response_content(Some(&response)).expect("a refused body must extract");
+        assert_eq!(content, "I can't help with that.");
+
+        let chunks = vec![
+            serde_json::json!({"choices": [{"delta": {"content": null, "refusal": "I can't"}}]}),
+            serde_json::json!({"choices": [{"delta": {"content": null, "refusal": " help"}}]}),
+            serde_json::json!({"choices": [{"message": {"content": null,
+                                                       "refusal": "I can't help"}}]}),
+        ];
+        let (content, _, _) = merge_response_output_text(&chunks);
+        assert_eq!(content, "I can't help");
     }
 
     #[test]
