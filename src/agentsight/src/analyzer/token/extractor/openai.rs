@@ -237,19 +237,14 @@ pub fn extract_response_content(
                 }
             }
             "response.output_item.done" => {
-                if let Some(item_content) = resp
-                    .get("item")
-                    .and_then(|i| i.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    let mut text = String::new();
-                    for part in item_content {
-                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                            text.push_str(t);
-                        }
-                    }
-                    if !text.is_empty() {
-                        return Some((text, None, Vec::new()));
+                if let Some(item) = resp.get("item") {
+                    let (answer, thinking) = read_output_item(item);
+                    if !answer.is_empty() || !thinking.is_empty() {
+                        return Some((
+                            answer,
+                            (!thinking.is_empty()).then_some(thinking),
+                            Vec::new(),
+                        ));
                     }
                 }
             }
@@ -336,23 +331,41 @@ pub fn extract_response_content(
 /// `response.output_text.done` and `response.output_item.done` events in
 /// addition to every `response.output_text.delta`, so a plain fold over a
 /// complete capture counts the answer two or three times. Deltas are always
-/// counted; a closing event is read only when no delta carried text, which
-/// keeps late-joined captures (only the closing events present) working.
+/// counted; a closing event is read only when the deltas for the buffer it
+/// repeats are missing, which keeps late-joined captures (only the closing
+/// events present) working.
 pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, Vec<String>) {
     // An empty delta carries no text, so it must not suppress the closing
     // event's full-text fallback.
-    let saw_text_delta = chunks.iter().any(|chunk| {
-        chunk.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta")
-            && chunk
-                .get("delta")
-                .and_then(|d| d.as_str())
-                .is_some_and(|delta| !delta.is_empty())
-    });
-    let repeats_full_text = |chunk: &Value| {
-        matches!(
-            chunk.get("type").and_then(|t| t.as_str()),
-            Some("response.output_text.done") | Some("response.output_item.done")
-        )
+    let saw_delta = |kind: &str| {
+        chunks.iter().any(|chunk| {
+            chunk.get("type").and_then(|t| t.as_str()) == Some(kind)
+                && chunk
+                    .get("delta")
+                    .and_then(|d| d.as_str())
+                    .is_some_and(|delta| !delta.is_empty())
+        })
+    };
+    let saw_text_delta = saw_delta("response.output_text.delta");
+    // A reasoning item repeats the thinking, not the answer, and the two
+    // deltas are separate events: a capture cut after the reasoning item but
+    // before the first answer delta has a reasoning delta and no text delta,
+    // so the text rule alone let the item's thinking land in the answer buffer
+    // while the deltas had already counted it as reasoning.
+    let saw_reasoning_delta = saw_delta("response.reasoning_text.delta")
+        || saw_delta("response.reasoning_summary_text.delta");
+    let repeats_delivered_text = |chunk: &Value| -> bool {
+        match chunk.get("type").and_then(|t| t.as_str()) {
+            Some("response.output_text.done") => saw_text_delta,
+            Some("response.output_item.done") => {
+                if chunk.get("item").is_some_and(is_reasoning_item) {
+                    saw_reasoning_delta
+                } else {
+                    saw_text_delta
+                }
+            }
+            _ => false,
+        }
     };
 
     let mut content = String::new();
@@ -364,7 +377,7 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
     // events follow.
     let mut snapshot_tool_calls: Vec<String> = Vec::new();
     for chunk in chunks {
-        if saw_text_delta && repeats_full_text(chunk) {
+        if repeats_delivered_text(chunk) {
             continue;
         }
         // A choice carrying `message` instead of `delta` speaks in cumulative
@@ -410,6 +423,39 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
     }
 
     (content, reasoning, tool_calls)
+}
+
+/// Read a finished output item as `(answer text, thinking text)`.
+///
+/// A `message` item carries the answer in its `content[]` parts, while a
+/// `reasoning` item carries its thinking there (parts typed `reasoning_text`)
+/// and, for the summary-only shape, in `summary[]`. The live message parser
+/// keeps the two buffers apart; reading every part as answer text made a
+/// drained capture count the thinking as answer text and, once the closing
+/// item repeated the deltas, twice over.
+fn read_output_item(item: &Value) -> (String, String) {
+    let text_of = |field: &str| -> String {
+        item.get(field)
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+    };
+    if is_reasoning_item(item) {
+        // Content first, then the summary, matching the message parser.
+        (String::new(), text_of("content") + &text_of("summary"))
+    } else {
+        (text_of("content"), String::new())
+    }
+}
+
+/// Whether an `output_item` payload is a reasoning item.
+fn is_reasoning_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("reasoning")
 }
 
 /// A choice that carries `message` instead of `delta` speaks in cumulative
@@ -969,6 +1015,78 @@ mod tests {
         assert_eq!(content, "answer");
         assert_eq!(reasoning, "think again");
         assert_eq!(tool_calls, vec!["{\"path\":", "\"/tmp/a\"}"]);
+    }
+
+    /// A reasoning item repeats the thinking, not the answer: it carries its
+    /// text in `content[]` parts typed `reasoning_text` and, for the
+    /// summary-only shape, in `summary[]` (the item shape the live message
+    /// parser normalizes, `analyzer::message::openai`). Reading every part as
+    /// answer text put the thinking in the answer buffer and, because the
+    /// closing-event rule is keyed on the answer deltas, did not suppress it.
+    #[test]
+    fn test_responses_api_reasoning_item_done_is_reasoning() {
+        let chunk = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "reasoning",
+                "id": "rs_101",
+                "summary": [{"type": "summary_text", "text": " pondered"}],
+                "content": [{"type": "reasoning_text", "text": "Think"}],
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&chunk)).expect("the item must extract");
+        assert!(content.is_empty(), "a reasoning item is not answer text");
+        assert_eq!(reasoning.as_deref(), Some("Think pondered"));
+        assert!(tool_calls.is_empty());
+    }
+
+    /// A capture cut after the reasoning item and before the first answer
+    /// delta — the case the drained and manual estimates exist for — has
+    /// reasoning deltas plus the closing item and no answer delta. The item
+    /// repeats what the deltas delivered, so it must be skipped rather than
+    /// counted again; a late-joined capture has only the item and must still
+    /// read it.
+    #[test]
+    fn test_merge_response_output_text_counts_a_reasoning_closing_item_once() {
+        let cut = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Think "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "step by step"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_1",
+                         "content": [{"type": "reasoning_text", "text": "Think step by step"}]}}),
+        ];
+        let (content, reasoning, _) = merge_response_output_text(&cut);
+        assert!(content.is_empty(), "the thinking is not answer text");
+        assert_eq!(reasoning, "Think step by step", "the thinking counts once");
+
+        let closing_only = vec![serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "reasoning", "id": "rs_2",
+                     "content": [{"type": "reasoning_text", "text": "Think"}]}})];
+        assert_eq!(merge_response_output_text(&closing_only).1, "Think");
+
+        // The summary-only shape repeats its `summary[]` and its deltas are
+        // the summary spelling.
+        let summary_cut = vec![
+            serde_json::json!({"type": "response.reasoning_summary_text.delta", "delta": "concise"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_4",
+                         "summary": [{"type": "summary_text", "text": "concise"}]}}),
+        ];
+        let (content, reasoning, _) = merge_response_output_text(&summary_cut);
+        assert!(content.is_empty());
+        assert_eq!(reasoning, "concise");
+
+        // Answer deltas do not suppress the reasoning item's thinking.
+        let with_answer = vec![
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_3",
+                         "content": [{"type": "reasoning_text", "text": "Think"}]}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "42"}),
+        ];
+        let (content, reasoning, _) = merge_response_output_text(&with_answer);
+        assert_eq!(content, "42");
+        assert_eq!(reasoning, "Think");
     }
 
     #[test]
