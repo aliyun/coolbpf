@@ -14,6 +14,10 @@ use std::collections::HashMap;
 /// when its own repo publishes no `tokenizer.json`.
 const FALLBACK_HF_MODEL_ID: &str = "Qwen/Qwen3.5-397B-A17B";
 
+/// The tokenizer Anthropic published for its earlier Claude models, which
+/// every Claude name resolves to (see the Anthropic entries below).
+const CLAUDE_HF_MODEL_ID: &str = "Xenova/claude-tokenizer";
+
 /// Global model name mapping table
 static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
@@ -357,9 +361,23 @@ const API_VENDOR_PREFIXES: [&str; 8] = [
 ];
 
 /// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`], then the same
-/// lookup for the name without its snapshot date.
+/// lookup for the name without its snapshot date, then the Claude family.
 fn lookup_mapping(model_name: &str) -> Option<&'static str> {
-    lookup_exact(model_name).or_else(|| without_snapshot_date(model_name).and_then(lookup_exact))
+    lookup_exact(model_name)
+        .or_else(|| without_snapshot_date(model_name).and_then(lookup_exact))
+        .or_else(|| claude_family(model_name))
+}
+
+/// The tokenizer every Claude entry in [`MODEL_MAPPING`] uses, for a Claude
+/// name the table does not list (`claude-sonnet-4-5`, `claude-opus-4-1`).
+/// Anthropic publishes no tokenizer for any Claude model, so the table's
+/// entries are all the same approximation and a newer model has no better
+/// one; without this, every Claude 4 name took the unrelated Qwen fallback.
+fn claude_family(model_name: &str) -> Option<&'static str> {
+    model_name
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+        .then_some(CLAUDE_HF_MODEL_ID)
 }
 
 /// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`].
@@ -693,6 +711,29 @@ mod tests {
         assert_eq!(without_snapshot_date("model-2024-8-06"), None);
         assert_eq!(without_snapshot_date("gpt-4o"), None);
         assert_eq!(without_snapshot_date("20250219"), None);
+    }
+
+    /// Claude Code and the API name the Claude 4 models `claude-sonnet-4-5`,
+    /// `claude-opus-4-1-20250805` and the like, which the table does not
+    /// list, so they took the unrelated Qwen fallback while every listed
+    /// Claude name maps to the Claude tokenizer. Any `claude-` name now does.
+    #[test]
+    fn test_unlisted_claude_names_take_the_claude_tokenizer() {
+        for name in [
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-1-20250805",
+            "claude-haiku-4-5",
+            "Claude-Opus-4",
+            "anthropic/claude-sonnet-4",
+        ] {
+            assert_eq!(
+                map_to_hf_model_id(name),
+                "Xenova/claude-tokenizer",
+                "{name}"
+            );
+        }
+        assert_eq!(map_to_hf_model_id("claude"), "Qwen/Qwen3.5-397B-A17B");
     }
 
     #[test]
