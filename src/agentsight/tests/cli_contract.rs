@@ -245,6 +245,41 @@ fn skill_metrics_json_on_empty_db_is_the_report_shape() {
 }
 
 #[test]
+fn skill_metrics_db_path_is_checked_before_the_open() {
+    // Every sibling query command checks the database it was pointed at before
+    // opening it — `audit --db`, `interruption --db` and `metrics --db` always,
+    // `token --data-file` when one is given — and answers with the shared
+    // message. This command went straight to the open.
+    let missing = tmp("skill_metrics_missing.db");
+    let _ = std::fs::remove_file(&missing);
+    let out = agentsight()
+        .args(["skill-metrics", "all", "--db", missing.to_str().unwrap()])
+        .output()
+        .expect("run agentsight");
+    assert!(
+        !out.status.success(),
+        "a missing --db must fail, not silently return zeros"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Database not found"), "stderr: {err}");
+
+    // A directory is the plausible typo (`--db` takes the file, not the data
+    // directory `serve` accepts). The open answered "SQLite database does not
+    // exist" for a path that exists — the shared check names the real problem.
+    let dir = tmp("skill_metrics_dir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the data directory");
+    let out = agentsight()
+        .args(["skill-metrics", "all", "--db", dir.to_str().unwrap()])
+        .output()
+        .expect("run agentsight");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success(), "a directory --db must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not a file"), "stderr: {err}");
+}
+
+#[test]
 fn token_missing_data_file_exits_nonzero_with_message() {
     let missing = tmp("missing.db");
     let _ = std::fs::remove_file(&missing);
