@@ -91,6 +91,19 @@ const FAILURE_SIGNATURES: &[&str] = &[
     "file has not been read yet",
     "only edit on /",
     "no such file or directory",
+    // An operating-system refusal is this call's own failure, the reading the
+    // other two scanners of the same tool results already give it: the
+    // interruption detector and the grader both read the prose spelling and
+    // the `EACCES` / `EPERM` errno spellings, and keep them among the signals
+    // that carry an outcome. Without them a denied write matched no rule and
+    // classified as a certain success, so its result stayed in the evidence
+    // pool and could ground the very paths the call failed to reach. A user's
+    // own refusal is not this: R2 above matches the interception wordings and
+    // decides those payloads first, and a provider-declared success
+    // short-circuits in R1.
+    "permission denied",
+    "eacces",
+    "eperm",
     "upstream server not found",
     "tool execution failed:",
     "error during web fetch for",
@@ -469,7 +482,7 @@ fn is_probe(call: &ToolCall) -> bool {
     let Some(command) = command_of(call) else {
         return false;
     };
-    let segments = command_segments(command);
+    let segments = command_segments(&command);
     !segments.is_empty()
         && segments.iter().all(|segment| {
             segment
@@ -525,11 +538,39 @@ fn command_segments(command: &str) -> Vec<&str> {
 }
 
 /// Shell command carried by a call, when it has one.
-fn command_of(call: &ToolCall) -> Option<&str> {
-    call.arguments
+///
+/// Two argument shapes carry the same command. The shell-tool calls the
+/// trajectory formats in this tree produce write it as a string
+/// (`{"command": "ls -l"}`), while a Codex `local_shell_call` keeps its
+/// `action` object verbatim, so the command arrives as an argv array
+/// (`{"type": "exec", "command": ["ls", "-l"]}`) — the shape
+/// `agentsight-trajectory-collector` maps and asserts
+/// (`codex.rs::test_tool_call_variants`). Reading the key as a string only
+/// made the argv form look like a call that runs no command at all: a probe
+/// whose non-zero exit *is* the answer was graded a certain failure and its
+/// result left the evidence pool, and the echo guard never ran on it, so the
+/// agent's own command line stayed in the pool to ground the very path it
+/// then claimed.
+///
+/// The array is joined with single spaces, the spelling the echo guard
+/// compares against: a shell echoes the invocation it was given, and the
+/// element boundaries are all the quoting the trajectory keeps.
+pub(super) fn command_of(call: &ToolCall) -> Option<String> {
+    let raw = call
+        .arguments
         .get("command")
-        .or_else(|| call.arguments.get("cmd"))
-        .and_then(|v| v.as_str())
+        .or_else(|| call.arguments.get("cmd"))?;
+    match raw {
+        serde_json::Value::String(command) => Some(command.clone()),
+        serde_json::Value::Array(argv) => {
+            let parts = argv
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        _ => None,
+    }
 }
 
 fn is_placeholder_or_empty(text: &str) -> bool {

@@ -171,10 +171,19 @@ fn is_unauthorized_error_text(text: &str) -> bool {
 /// Deliberately excludes generic words like "exception" or "failed" that
 /// commonly appear in normal, non-error tool output (e.g. "handled the
 /// exception gracefully"), which would otherwise cause false positives.
+///
+/// The `error:` prefix is kept: it is how the language runtimes announce a
+/// command's own failure (`error: could not compile`, `Error: ECONNREFUSED`),
+/// and it is the one signal the sibling scans of these same stored payloads
+/// both read — the grader's `text_has_error_signal` and the grounding
+/// classifier's `WEAK_ERROR_TOKENS`. Reading it only there meant one payload
+/// was a `tool_failure` finding for the grader and no ToolFailure for the
+/// detector.
 fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || lower.contains("error:")
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
@@ -2146,6 +2155,96 @@ mod tests {
                 "a non-zero exit status must keep the failure signal: {payload}"
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// A tool that reports its own failure with the `error:` prefix the
+    /// language runtimes print (`error: could not compile`, `Error: ...`) is a
+    /// `ToolFailure` for the detector. The grader's twin scan
+    /// (`text_has_error_signal`) and the grounding classifier's
+    /// `WEAK_ERROR_TOKENS` both read that spelling; this scan did not, so the
+    /// same stored payload got a `tool_failure` finding from the grader and
+    /// scored `tool_use` 0.45 while no ToolFailure interruption was recorded.
+    #[test]
+    fn an_error_prefixed_tool_output_signals_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.request.messages = vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-cargo".to_string()),
+                response: serde_json::json!(
+                    "cargo build --offline\nerror: could not compile `agentsight`"
+                ),
+            }],
+            name: None,
+        }];
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "checking the build".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        let events = detector.detect(&call);
+        assert_eq!(events.len(), 1, "unexpected events: {events:?}");
+        assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+
+        // The same spelling at the start of the payload, and the capitalised
+        // `Error:` the runtimes also print, must read the same way.
+        for payload in [
+            "error: unknown argument '--frobnicate'",
+            "Error: connect ECONNREFUSED 127.0.0.1:6443",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-cargo".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "unexpected events for {payload}: {events:?}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// The `error:` arm must not turn a passing run's own summary into a
+    /// failure: it reports how many checks failed, which is not an outcome of
+    /// this call.
+    #[test]
+    fn a_passing_run_summary_is_not_a_tool_failure() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "noted".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "test result: ok. 30 passed; 0 failed",
+            "60 passing, 2 pending",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-notes".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events.is_empty(),
+                "ordinary output is not a tool failure ({payload}): {events:?}"
+            );
         }
     }
 
