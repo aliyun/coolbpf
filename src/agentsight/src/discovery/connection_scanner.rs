@@ -131,7 +131,13 @@ fn resolve_domains(domain_patterns: &[String]) -> IpDomainCache {
             Ok(addrs) => {
                 for addr in addrs {
                     log::debug!("Connection scan: resolved {} → {}", pattern, addr.ip());
-                    cache.insert(addr.ip(), pattern.clone());
+                    // Key a v4-mapped literal (`::ffff:a.b.c.d`) by its IPv4
+                    // address: a plain AF_INET connection to that peer is
+                    // listed only in /proc/net/tcp under the IPv4 form, so the
+                    // IPv6 key would never match it. The scan already looks a
+                    // dual-stack peer up in canonical form, so both directions
+                    // meet on the same key.
+                    cache.insert(addr.ip().to_canonical(), pattern.clone());
                 }
             }
             Err(e) => {
@@ -268,6 +274,16 @@ mod tests {
         let cache = resolve_domains(&patterns);
         // All patterns are wildcards, so cache should be empty
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn resolve_domains_keys_a_v4_mapped_literal_by_its_ipv4_address() {
+        // A plain AF_INET connection to 127.0.0.1 is listed only in
+        // /proc/net/tcp under its IPv4 address, so a rule written in the
+        // v4-mapped form must be keyed by that address to ever match.
+        let cache = resolve_domains(&["::ffff:127.0.0.1".to_string()]);
+        let v4: IpAddr = "127.0.0.1".parse().expect("ipv4 literal");
+        assert_eq!(cache.get(&v4).map(String::as_str), Some("::ffff:127.0.0.1"));
     }
 
     #[test]
