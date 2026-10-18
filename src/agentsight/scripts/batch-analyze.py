@@ -97,7 +97,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
     entries = []
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, "r", encoding="utf-8-sig", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
