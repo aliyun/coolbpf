@@ -396,7 +396,8 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
                 if chunk.get("item").is_some_and(is_reasoning_item) {
                     saw_reasoning_delta
                 } else {
-                    saw_text_delta
+                    // A message item repeats its refusal part too.
+                    saw_text_delta || saw_refusal_delta
                 }
             }
             _ => false,
@@ -462,9 +463,10 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
 
 /// Read a finished output item as `(answer text, thinking text)`.
 ///
-/// A `message` item carries the answer in its `content[]` parts, while a
-/// `reasoning` item carries its thinking there (parts typed `reasoning_text`)
-/// and, for the summary-only shape, in `summary[]`. The live message parser
+/// A `message` item carries the answer in its `content[]` parts (a refusal
+/// part keeps it in `refusal`), while a `reasoning` item carries its thinking
+/// there (parts typed `reasoning_text`) and, for the summary-only shape, in
+/// `summary[]`. The live message parser
 /// keeps the two buffers apart; reading every part as answer text made a
 /// drained capture count the thinking as answer text and, once the closing
 /// item repeated the deltas, twice over.
@@ -475,7 +477,12 @@ fn read_output_item(item: &Value) -> (String, String) {
             .map(|parts| {
                 parts
                     .iter()
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    // A refusal part keeps the answer in `refusal`, not `text`.
+                    .filter_map(|part| {
+                        part.get("text")
+                            .or_else(|| part.get("refusal"))
+                            .and_then(Value::as_str)
+                    })
                     .collect::<String>()
             })
             .unwrap_or_default()
@@ -1175,6 +1182,36 @@ mod tests {
             "refusal": "I can't help with that."})];
         assert_eq!(
             merge_response_output_text(&closing_only).0,
+            "I can't help with that."
+        );
+    }
+
+    /// A capture that joined after `response.refusal.done` still sees the
+    /// closing message item, whose content part is typed `refusal` and keeps
+    /// the answer in `refusal` rather than `text`; reading only `text` counted
+    /// that call as no output. When the deltas were captured, the item repeats
+    /// them and must not count again.
+    #[test]
+    fn test_output_item_done_reads_a_refusal_part() {
+        let item_done = serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "role": "assistant", "content": [
+                {"type": "refusal", "refusal": "I can't help with that."}]}});
+
+        let (content, _, _) = extract_response_content(Some(&item_done))
+            .expect("the closing refusal item must extract");
+        assert_eq!(content, "I can't help with that.");
+        assert_eq!(
+            merge_response_output_text(std::slice::from_ref(&item_done)).0,
+            "I can't help with that."
+        );
+
+        let complete = vec![
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            item_done,
+        ];
+        assert_eq!(
+            merge_response_output_text(&complete).0,
             "I can't help with that."
         );
     }
