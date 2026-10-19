@@ -18,6 +18,8 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections import abc, deque
+from io import StringIO
 from pathlib import Path
 from typing import List, Optional
 
@@ -388,6 +390,89 @@ def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
+def analyze_file(
+    filepath: Path, min_steps: int, command: list[str], dim: str
+) -> tuple[str, Optional[dict], str]:
+    """Own one invocation and buffer diagnostics so workers cannot mix output."""
+    diagnostics = StringIO()
+    atif = jsonl_to_atif(filepath)
+    if atif is None:
+        return "skipped", None, "  SKIP: cannot parse or empty\n"
+    n_steps = len(atif["steps"])
+    if n_steps < min_steps:
+        return "skipped", None, f"  SKIP: only {n_steps} steps (< {min_steps})\n"
+    print(
+        f"  Session: {atif['session_id']} | Agent: {atif['agent']['name']} | Steps: {n_steps}",
+        file=diagnostics,
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
+    ) as tmp:
+        json.dump(atif, tmp, ensure_ascii=False)
+        temporary = tmp.name
+    output = None
+    status = "failed"
+    try:
+        try:
+            result = subprocess.run(
+                command + [temporary, "--dim", dim],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+        except OSError as error:
+            print(f"  FAIL: cannot run analyzer: {error}", file=diagnostics)
+            return status, None, diagnostics.getvalue()
+        if result.returncode != 0:
+            print(f"  FAIL: {result.stderr.strip()[:200]}", file=diagnostics)
+        else:
+            decoded = json.loads(result.stdout)
+            if not isinstance(decoded, dict):
+                print("  FAIL: expected a JSON object from analyzer", file=diagnostics)
+            else:
+                output = decoded
+                output.update(
+                    _source_file=str(filepath), _session_id=atif["session_id"], _steps=n_steps
+                )
+                print(f"  OK ({dim})", file=diagnostics)
+                status = "analyzed"
+    except subprocess.TimeoutExpired:
+        print("  TIMEOUT (300s)", file=diagnostics)
+    except json.JSONDecodeError:
+        print("  FAIL: invalid JSON output", file=diagnostics)
+    finally:
+        os.unlink(temporary)
+    return status, output, diagnostics.getvalue()
+
+
+def analyze_ordered(
+    files: List[Path], jobs: int, min_steps: int, command: list[str], dim: str
+) -> abc.Iterator[tuple[str, Optional[dict], str]]:
+    """Bound outstanding work as well as running processes, retaining file order."""
+    if jobs == 1:
+        for filepath in files:
+            yield analyze_file(filepath, min_steps, command, dim)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    remaining = iter(files)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        pending = deque()
+        for _ in range(jobs):
+            filepath = next(remaining, None)
+            if filepath is None:
+                break
+            pending.append(executor.submit(analyze_file, filepath, min_steps, command, dim))
+        while pending:
+            yield pending.popleft().result()
+            filepath = next(remaining, None)
+            if filepath is not None:
+                pending.append(executor.submit(analyze_file, filepath, min_steps, command, dim))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Batch analyze agent trajectories from ~/.claude and ~/.qoder"
@@ -411,6 +496,14 @@ def main():
     parser.add_argument(
         "--file",
         help="Analyze a single JSONL file directly",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        choices=range(1, 9),
+        default=1,
+        metavar="N",
+        help="Concurrent analyzer invocations (1-8; default: 1). May issue simultaneous LLM requests.",
     )
     parser.add_argument(
         "--limit",
@@ -452,84 +545,23 @@ def main():
         files = find_conversation_files(dirs)
         print(f"Found {len(files)} conversation files", file=sys.stderr)
 
-    # Analyze each file
-    analyzed = 0
-    skipped = 0
-    failed = 0
-
-    for filepath in files[: args.limit]:
+    # Only the coordinator writes stdout/stderr; emit in discovery order.
+    selected = files[: args.limit]
+    counts = {"analyzed": 0, "skipped": 0, "failed": 0}
+    results = analyze_ordered(selected, args.jobs, args.min_steps, analyze_cmd, args.dim)
+    for filepath in selected:
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"File: {filepath}", file=sys.stderr)
-
-        # Convert to ATIF
-        atif = jsonl_to_atif(filepath)
-        if atif is None:
-            print(f"  SKIP: cannot parse or empty", file=sys.stderr)
-            skipped += 1
-            continue
-
-        n_steps = len(atif["steps"])
-        if n_steps < args.min_steps:
-            print(f"  SKIP: only {n_steps} steps (< {args.min_steps})", file=sys.stderr)
-            skipped += 1
-            continue
-
-        print(
-            f"  Session: {atif['session_id']} | Agent: {atif['agent']['name']} | Steps: {n_steps}",
-            file=sys.stderr,
-        )
-
-        # Write ATIF to temp file and run analyze
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
-        ) as tmp:
-            json.dump(atif, tmp, ensure_ascii=False)
-            tmp_path = tmp.name
-
-        try:
-            try:
-                result = subprocess.run(
-                    analyze_cmd + [tmp_path, "--dim", args.dim],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=300,
-                )
-            except OSError as error:
-                print(f"  FAIL: cannot run analyzer: {error}", file=sys.stderr)
-                failed += 1
-                continue
-            if result.returncode == 0:
-                # Output result with file attribution
-                output = json.loads(result.stdout)
-                if not isinstance(output, dict):
-                    print("  FAIL: expected a JSON object from analyzer", file=sys.stderr)
-                    failed += 1
-                    continue
-                output["_source_file"] = str(filepath)
-                output["_session_id"] = atif["session_id"]
-                output["_steps"] = n_steps
-                print(json.dumps(output, ensure_ascii=False, indent=2))
-                print(f"  OK ({args.dim})", file=sys.stderr)
-                analyzed += 1
-            else:
-                print(f"  FAIL: {result.stderr.strip()[:200]}", file=sys.stderr)
-                failed += 1
-        except subprocess.TimeoutExpired:
-            print(f"  TIMEOUT (300s)", file=sys.stderr)
-            failed += 1
-        except json.JSONDecodeError:
-            print(f"  FAIL: invalid JSON output", file=sys.stderr)
-            failed += 1
-        finally:
-            os.unlink(tmp_path)
+        status, output, diagnostics = next(results)
+        if output is not None:
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        print(diagnostics, end="", file=sys.stderr)
+        counts[status] += 1
 
     # Summary
     print(f"\n{'='*60}", file=sys.stderr)
     print(
-        f"Done: {analyzed} analyzed, {skipped} skipped, {failed} failed",
+        f"Done: {counts['analyzed']} analyzed, {counts['skipped']} skipped, {counts['failed']} failed",
         file=sys.stderr,
     )
 
