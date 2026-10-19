@@ -27,6 +27,8 @@ DEFAULT_DIRS = [
     Path.home() / ".qoder" / "projects",
 ]
 
+_ASCII_ID_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
 # ─── JSONL → ATIF conversion ─────────────────────────────────────────────────
 
 
@@ -75,10 +77,13 @@ def extract_tool_results(content) -> list:
                 result_content = " ".join(
                     b.get("text", "") for b in result_content if isinstance(b, dict)
                 )
-            results.append({
+            result = {
                 "source_call_id": block.get("tool_use_id"),
                 "content": str(result_content)[:2000],  # truncate
-            })
+            }
+            if isinstance(block.get("is_error"), bool):
+                result["extra"] = {"is_error": block["is_error"]}
+            results.append(result)
     return results
 
 
@@ -91,6 +96,14 @@ def extract_thinking(content) -> Optional[str]:
         if isinstance(block, dict) and block.get("type") == "thinking":
             parts.append(block.get("thinking", ""))
     return "\n".join(parts) if parts else None
+
+
+def _call_id_keys(identifier: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Index the shared agentsight_atif::same_call_id echo contract."""
+    case_key = ("case", identifier.translate(_ASCII_ID_LOWER))
+    kind = "separated" if "_" in identifier or "-" in identifier else "plain"
+    normalized = "".join(char.lower() for char in identifier if char not in "_-")
+    return case_key, (kind, normalized)
 
 
 def jsonl_to_atif(filepath: Path) -> Optional[dict]:
@@ -121,6 +134,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
 
     steps = []
     tool_call_steps = {}
+    tool_call_aliases = {}
     step_id = 0
 
     for entry in entries:
@@ -154,6 +168,15 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             for result in tool_results:
                 call_id = result.get("source_call_id")
                 owner = tool_call_steps.get(call_id) if isinstance(call_id, str) else None
+                if owner is None and isinstance(call_id, str):
+                    case_key, (kind, normalized) = _call_id_keys(call_id)
+                    other_kind = "plain" if kind == "separated" else "separated"
+                    matches = tool_call_aliases.get(case_key, set()) | tool_call_aliases.get(
+                        (other_kind, normalized), set()
+                    )
+                    # An exact ID wins; an ambiguous echo must not steal a sibling's result.
+                    if len(matches) == 1:
+                        owner = tool_call_steps[next(iter(matches))]
                 if owner is not None:
                     owner.setdefault("observation", {"results": []})["results"].append(result)
                 else:
@@ -179,7 +202,10 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             tool_calls = extract_tool_calls(content)
             thinking = extract_thinking(content)
 
-            if not text.strip() and not tool_calls:
+            # Thinking is part of the turn even when the record carries no
+            # text or tool call: Claude Code can stream it in its own record,
+            # and dropping the step also dropped the reasoning_content.
+            if not text.strip() and not tool_calls and not thinking:
                 continue
 
             step_id += 1
@@ -196,6 +222,8 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
                     call_id = call.get("tool_call_id")
                     if isinstance(call_id, str) and call_id:
                         tool_call_steps[call_id] = step
+                        for key in _call_id_keys(call_id):
+                            tool_call_aliases.setdefault(key, set()).add(call_id)
             if thinking:
                 step["reasoning_content"] = thinking[:3000]
 
@@ -352,27 +380,36 @@ def main():
 
         # Write ATIF to temp file and run analyze
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="atif-", delete=False
+            mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
         ) as tmp:
             json.dump(atif, tmp, ensure_ascii=False)
             tmp_path = tmp.name
 
         try:
-            result = subprocess.run(
-                analyze_cmd + [tmp_path, "--dim", args.dim],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=300,
-            )
+            try:
+                result = subprocess.run(
+                    analyze_cmd + [tmp_path, "--dim", args.dim],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    timeout=300,
+                )
+            except OSError as error:
+                print(f"  FAIL: cannot run analyzer: {error}", file=sys.stderr)
+                failed += 1
+                continue
             if result.returncode == 0:
-                print(f"  OK ({args.dim})", file=sys.stderr)
                 # Output result with file attribution
                 output = json.loads(result.stdout)
+                if not isinstance(output, dict):
+                    print("  FAIL: expected a JSON object from analyzer", file=sys.stderr)
+                    failed += 1
+                    continue
                 output["_source_file"] = str(filepath)
                 output["_session_id"] = atif["session_id"]
                 output["_steps"] = n_steps
                 print(json.dumps(output, ensure_ascii=False, indent=2))
+                print(f"  OK ({args.dim})", file=sys.stderr)
                 analyzed += 1
             else:
                 print(f"  FAIL: {result.stderr.strip()[:200]}", file=sys.stderr)

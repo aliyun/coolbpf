@@ -715,19 +715,39 @@ fn collect_tool_responses(
                 // report an `error` status instead. Keep the flag as structured
                 // data so consumers never have to re-derive failure from the
                 // flattened text — the interruption detector and the grader
-                // read the same three spellings and this was the only reader
-                // that knew just the first.
-                let is_error = response
+                // read the same spellings and this was the only reader that
+                // knew just the first two.
+                //
+                // The third spelling is the opposite polarity: some tools
+                // report `success` instead of a flag, and it is read the same
+                // way `declared_failure` reads it — `success: false` is a
+                // failure, and the error status still overrides either
+                // polarity.
+                //
+                // An `error` status is read before the boolean rather than
+                // after it: a payload that says `is_error: false` and
+                // `status: error` contradicts itself, and both of those
+                // readers resolve the contradiction towards the failure. A
+                // plain `or_else` chain never reached the status arm once the
+                // boolean answered, so the certain failure arrived at the
+                // classifier carrying an explicit success flag.
+                let status_is_error = response
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|status| status.eq_ignore_ascii_case("error"));
+                let declared = response
                     .get(EXTRA_IS_ERROR)
                     .or_else(|| response.get("isError"))
                     .and_then(|v| v.as_bool())
                     .or_else(|| {
                         response
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .filter(|status| status.eq_ignore_ascii_case("error"))
-                            .map(|_| true)
+                            .get("success")
+                            .and_then(|v| v.as_bool())
+                            .map(|success| !success)
                     });
+                let is_error = declared
+                    .map(|is_error| is_error || status_is_error)
+                    .or_else(|| status_is_error.then_some(true));
                 let extra = is_error.map(|flag| {
                     HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(flag))])
                 });
@@ -1373,6 +1393,150 @@ pub(crate) mod tests {
                 "{response}"
             );
             let index = build_index(&doc, 0..doc.steps.len());
+            assert_eq!(
+                index.call_verdicts[0].verdict.status, expected,
+                "{response}"
+            );
+        }
+    }
+
+    /// An `error` status contradicts the explicit flag of the same payload.
+    ///
+    /// A provider that answers `{"content": "done", "is_error": false,
+    /// "status": "error"}` says two opposite things; the interruption
+    /// detector and the grader both let the error status win, and the
+    /// converter did not: the boolean settled `is_error` first, so the status
+    /// arm never ran and a certain failure reached the grounding classifier
+    /// with an explicit success flag, which labels it `Ok` at high confidence
+    /// and keeps its body in the evidence pool.
+    #[test]
+    fn an_error_status_outranks_an_explicit_success_flag() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        for (response, flag) in [
+            (
+                serde_json::json!({"content": "done", "is_error": false, "status": "error"}),
+                true,
+            ),
+            (
+                serde_json::json!({"content": "done", "isError": false, "status": "ERROR"}),
+                true,
+            ),
+            (
+                serde_json::json!({"content": "done", "is_error": false, "status": "complete"}),
+                false,
+            ),
+        ] {
+            let output = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("tc-status".into()),
+                    name: "Bash".into(),
+                    arguments: Some(serde_json::json!({"command": "true"})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let input = vec![InputMessage {
+                role: "user".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tc-status".into()),
+                    response: response.clone(),
+                }],
+                name: None,
+            }];
+            let doc = convert_trace_to_atif(
+                "synthetic-status-override",
+                vec![
+                    call_event(1, 1_000_000_000, Some(output), None, Some("run it")),
+                    call_event(2, 3_000_000_000, None, Some(input), None),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                doc.steps[2].observation.as_ref().unwrap().results[0].is_error(),
+                Some(flag),
+                "{response}"
+            );
+            let index = build_index(&doc, 0..doc.steps.len());
+            let expected = if flag {
+                CallStatus::Failed
+            } else {
+                CallStatus::Ok
+            };
+            assert_eq!(
+                index.call_verdicts[0].verdict.status, expected,
+                "{response}"
+            );
+        }
+    }
+
+    /// A payload may spell its outcome `success` instead of a flag.
+    ///
+    /// Some tools answer `{"content": "done", "success": false}` (or with the
+    /// error status beside a `success: true`). The interruption detector and
+    /// the grader both read that spelling; the converter did not, so the
+    /// failure reached the classifier with no flag at all and a clean body was
+    /// read as a success and stayed in the evidence pool.
+    #[test]
+    fn a_success_flag_reaches_the_classifier() {
+        use crate::grounding::{evidence::build_index, outcome::CallStatus};
+
+        for (response, flag) in [
+            (
+                serde_json::json!({"content": "done", "success": false}),
+                true,
+            ),
+            (
+                serde_json::json!({"content": "done", "success": false, "status": "ok"}),
+                true,
+            ),
+            (
+                serde_json::json!({"content": "done", "success": true}),
+                false,
+            ),
+            (
+                serde_json::json!({"content": "done", "success": true, "status": "error"}),
+                true,
+            ),
+        ] {
+            let output = vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: Some("tc-success".into()),
+                    name: "Bash".into(),
+                    arguments: Some(serde_json::json!({"command": "true"})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }];
+            let input = vec![InputMessage {
+                role: "user".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tc-success".into()),
+                    response: response.clone(),
+                }],
+                name: None,
+            }];
+            let doc = convert_trace_to_atif(
+                "synthetic-success-spelling",
+                vec![
+                    call_event(1, 1_000_000_000, Some(output), None, Some("run it")),
+                    call_event(2, 3_000_000_000, None, Some(input), None),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                doc.steps[2].observation.as_ref().unwrap().results[0].is_error(),
+                Some(flag),
+                "{response}"
+            );
+            let index = build_index(&doc, 0..doc.steps.len());
+            let expected = if flag {
+                CallStatus::Failed
+            } else {
+                CallStatus::Ok
+            };
             assert_eq!(
                 index.call_verdicts[0].verdict.status, expected,
                 "{response}"

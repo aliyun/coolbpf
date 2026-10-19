@@ -82,8 +82,14 @@ impl QueryClient {
         if !path.try_exists()? {
             return Ok(None);
         }
-        let config: Value =
-            serde_json::from_slice(&std::fs::read(path)?).map_err(|_| QueryError::Invalid)?;
+        // The same one-leading-BOM rule the other JSON config boundaries
+        // apply (see [`crate::config::strip_leading_bom`]): a config saved
+        // as UTF-8-with-BOM must parse exactly like its unmarked twin here
+        // too, or the server crash-loops on a file the rest of the process
+        // loads happily.
+        let raw = String::from_utf8(std::fs::read(path)?).map_err(|_| QueryError::Invalid)?;
+        let config: Value = serde_json::from_str(crate::config::strip_leading_bom(&raw))
+            .map_err(|_| QueryError::Invalid)?;
         let Some(config) = config.get("tokenless_api").filter(|value| !value.is_null()) else {
             return Ok(None);
         };
