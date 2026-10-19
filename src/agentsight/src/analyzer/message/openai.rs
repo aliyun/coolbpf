@@ -693,6 +693,28 @@ impl OpenAIParser {
         (!text.is_empty()).then_some(text)
     }
 
+    /// Refusal text of a finished `message` output item, or `None`.
+    ///
+    /// The answer a model declines to give is its own content part, typed
+    /// `refusal` and carrying the text in `refusal` rather than `text` — the
+    /// shape the non-streaming normalizer and the token extractor read. A
+    /// capture that attached after the refusal deltas has this part as its
+    /// only copy of the answer, so it is read here as well; the deltas win
+    /// over it in `aggregate_responses_sse_chunks`, as they do for text.
+    fn closing_message_item_refusal(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let refusal: String = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(|t| t.as_str()) == Some("refusal"))
+            .filter_map(|part| part.get("refusal").and_then(|r| r.as_str()))
+            .collect();
+        (!refusal.is_empty()).then_some(refusal)
+    }
+
     /// Thinking text of a finished `reasoning` output item, or `None`.
     ///
     /// The closing item carries the thinking in its `content[]` parts
@@ -725,6 +747,10 @@ impl OpenAIParser {
         let mut closing_reasoning_text: Option<String> = None;
         let mut saw_reasoning_delta = false;
         let mut reasoning_buf = String::new();
+        let mut saw_refusal_delta = false;
+        // The refusal carried by the closing message item, kept aside on the
+        // same delta-wins rule as the text above: the deltas repeat it.
+        let mut closing_refusal: Option<String> = None;
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut model = String::new();
@@ -773,6 +799,11 @@ impl OpenAIParser {
                             closing_reasoning_text = Some(text);
                         }
                     }
+                    if !saw_refusal_delta {
+                        if let Some(refusal) = Self::closing_message_item_refusal(chunk) {
+                            closing_refusal = Some(refusal);
+                        }
+                    }
                 }
                 // Reasoning models stream their thinking as text deltas on
                 // the same event channel (qwen3-coder via dashscope sends
@@ -789,6 +820,9 @@ impl OpenAIParser {
                 }
                 "response.refusal.delta" => {
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_refusal_delta = true;
+                        }
                         refusal_buf.push_str(delta);
                     }
                 }
@@ -880,6 +914,11 @@ impl OpenAIParser {
         if reasoning_buf.is_empty() {
             if let Some(text) = closing_reasoning_text {
                 reasoning_buf = text;
+            }
+        }
+        if refusal_buf.is_empty() {
+            if let Some(refusal) = closing_refusal {
+                refusal_buf = refusal;
             }
         }
 
@@ -1929,6 +1968,51 @@ mod tests {
         assert_eq!(
             resp.choices[0].message.refusal.as_deref(),
             Some("I can't help with that.")
+        );
+    }
+
+    /// A capture that attached after the refusal deltas carries the whole
+    /// refusal only in the closing `response.output_item.done` for the message
+    /// item, whose part is typed `refusal` and keeps the text in `refusal`.
+    /// `closing_message_item_text` read only `text`, so the message view had
+    /// no answer at all while the token extractor counted the refusal.
+    #[test]
+    fn test_aggregate_responses_sse_chunks_refusal_from_item_done() {
+        let item_done = serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "role": "assistant", "content": [
+                {"type": "refusal", "refusal": "I can't help with that."}]}});
+
+        let closing_only = serde_json::Value::Array(vec![
+            serde_json::json!({"type": "response.created",
+                "response": {"id": "resp_r3", "model": "gpt-5"}}),
+            item_done.clone(),
+            serde_json::json!({"type": "response.completed",
+                "response": {"id": "resp_r3", "model": "gpt-5", "status": "completed"}}),
+        ]);
+        let resp = OpenAIParser::parse_response(&closing_only)
+            .expect("the closing refusal must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that."),
+            "the closing message item is the only copy of the refusal"
+        );
+        assert!(
+            resp.choices[0].message.content.is_none(),
+            "a refusal is not answer text"
+        );
+
+        // The deltas plus the closing item repeat the same text: it must be
+        // counted once, as the text path already does.
+        let complete = serde_json::Value::Array(vec![
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            item_done,
+        ]);
+        let resp = OpenAIParser::parse_response(&complete).expect("the refusal must aggregate");
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that."),
+            "the closing item must not append the deltas a second time"
         );
     }
 
