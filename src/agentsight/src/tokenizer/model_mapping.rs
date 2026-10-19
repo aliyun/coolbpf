@@ -60,11 +60,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // lists `gpt-5`, `gpt-4.1-`, `gpt-4.5-` and `chatgpt-4o-` beside the
     // reasoning prefixes, and `Xenova/gpt-4o` is the repo that carries that
     // encoding — the same rule the block above follows. Without the entries
-    // each of these names took the unrelated Qwen fallback. `gpt-4-` and
-    // `gpt-3.5-turbo-` are `cl100k_base` and keep their own entries above.
+    // each of these names took the unrelated Qwen fallback. The `-mini`,
+    // `-nano` and `-chat-latest` aliases sit under those same prefixes, so
+    // they resolve the same way. `gpt-4-` and `gpt-3.5-turbo-` are
+    // `cl100k_base` and keep their own entries above.
     m.insert("gpt-5", "Xenova/gpt-4o");
+    m.insert("gpt-5-mini", "Xenova/gpt-4o");
+    m.insert("gpt-5-nano", "Xenova/gpt-4o");
+    m.insert("gpt-5-chat-latest", "Xenova/gpt-4o");
     m.insert("gpt-4.1", "Xenova/gpt-4o");
     m.insert("gpt-4.1-mini", "Xenova/gpt-4o");
+    m.insert("gpt-4.1-nano", "Xenova/gpt-4o");
     m.insert("gpt-4.5", "Xenova/gpt-4o");
     m.insert("gpt-4.5-preview", "Xenova/gpt-4o");
     m.insert("chatgpt-4o", "Xenova/gpt-4o");
@@ -576,6 +582,36 @@ mod tests {
             "chatgpt-4o",
             "chatgpt-4o-latest",
             "openai/gpt-5",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
+    }
+
+    /// The smaller members of the same chat families.
+    ///
+    /// tiktoken's prefix table keys these by family, not by size: `gpt-5`
+    /// covers `gpt-5-mini`, `gpt-5-nano` and `gpt-5-chat-latest`, and
+    /// `gpt-4.1-` covers `gpt-4.1-nano` beside `gpt-4.1-mini`. The block above
+    /// pinned only some of the family members, so a client that named a mini
+    /// or nano variant still took the unrelated Qwen fallback.
+    #[test]
+    fn test_o200k_mini_and_chat_aliases_take_the_o200k_tokenizer() {
+        let names = [
+            "gpt-5-mini",
+            "gpt-5-mini-2025-08-07",
+            "gpt-5-nano",
+            "gpt-5-nano-2025-08-07",
+            "gpt-5-chat-latest",
+            "gpt-4.1-nano",
+            "gpt-4.1-nano-2025-04-14",
+            "openai/gpt-5-mini",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
