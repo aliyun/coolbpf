@@ -56,6 +56,20 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o3-pro", "Xenova/gpt-4o");
     m.insert("o4-mini", "Xenova/gpt-4o");
 
+    // The chat families tiktoken also maps to o200k_base. Its prefix table
+    // lists `gpt-5`, `gpt-4.1-`, `gpt-4.5-` and `chatgpt-4o-` beside the
+    // reasoning prefixes, and `Xenova/gpt-4o` is the repo that carries that
+    // encoding — the same rule the block above follows. Without the entries
+    // each of these names took the unrelated Qwen fallback. `gpt-4-` and
+    // `gpt-3.5-turbo-` are `cl100k_base` and keep their own entries above.
+    m.insert("gpt-5", "Xenova/gpt-4o");
+    m.insert("gpt-4.1", "Xenova/gpt-4o");
+    m.insert("gpt-4.1-mini", "Xenova/gpt-4o");
+    m.insert("gpt-4.5", "Xenova/gpt-4o");
+    m.insert("gpt-4.5-preview", "Xenova/gpt-4o");
+    m.insert("chatgpt-4o", "Xenova/gpt-4o");
+    m.insert("chatgpt-4o-latest", "Xenova/gpt-4o");
+
     // ============== Anthropic Models ==============
     // No Claude model has a repo on the Hub, so `anthropic/<model>` never
     // resolved. Anthropic has not published the Claude 3 tokenizer; the one
@@ -539,6 +553,39 @@ mod tests {
         for name in ["o3-pro", "o3-pro-2025-06-10", "O3-PRO", "openai/o3-pro"] {
             assert_eq!(map_to_hf_model_id(name), "Xenova/gpt-4o", "{name}");
         }
+    }
+
+    /// The chat families that tokenize with `o200k_base` too.
+    ///
+    /// tiktoken's prefix table maps `gpt-5`, `gpt-4.1-`, `gpt-4.5-` and
+    /// `chatgpt-4o-` to `o200k_base`, beside the reasoning prefixes, but none
+    /// of them was in this table: each name took the unrelated Qwen fallback
+    /// instead of the repo that carries that encoding. The snapshot forms are
+    /// pinned too because the API echoes them.
+    #[test]
+    fn test_o200k_chat_families_take_the_o200k_tokenizer() {
+        // Collect every name before asserting so one run reports all of them.
+        let names = [
+            "gpt-5",
+            "gpt-5-2025-08-07",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-2025-04-14",
+            "gpt-4.5",
+            "gpt-4.5-preview",
+            "chatgpt-4o",
+            "chatgpt-4o-latest",
+            "openai/gpt-5",
+        ];
+        let resolved: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
     }
 
     #[test]
