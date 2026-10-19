@@ -171,10 +171,15 @@ pub enum InterruptionAction {
     ///
     /// Example:
     ///   agentsight interruption stats --last 168
+    ///   agentsight interruption stats --last 168 --agent qoder
     Stats {
         /// Query last N hours (default: 24)
         #[structopt(long, default_value = "24")]
         last: u64,
+
+        /// Filter by agent name (exact match)
+        #[structopt(long)]
+        agent: Option<String>,
 
         /// Output as JSON
         #[structopt(long)]
@@ -359,11 +364,9 @@ impl InterruptionCommand {
                 }
             },
 
-            InterruptionAction::Stats { last, json } => {
+            InterruptionAction::Stats { last, agent, json } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
-                // `None`: the CLI reports what happened in the window,
-                // resolved or not, unlike the dashboard's unresolved-only card.
-                match store.stats(start_ns, end_ns, None, None) {
+                match interruption_stats(&store, start_ns, end_ns, agent.as_deref()) {
                     Ok(stats) => {
                         if *json {
                             print_json(&stats);
@@ -502,6 +505,19 @@ impl InterruptionCommand {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Per-(type, severity) counts for a window, optionally scoped to one agent.
+///
+/// `resolved` stays `None`: the CLI reports what happened in the window,
+/// resolved or not, unlike the dashboard's unresolved-only card.
+fn interruption_stats(
+    store: &InterruptionStore,
+    start_ns: i64,
+    end_ns: i64,
+    agent: Option<&str>,
+) -> Result<Vec<agentsight::storage::sqlite::InterruptionTypeStat>, Box<dyn std::error::Error>> {
+    store.stats(start_ns, end_ns, None, agent)
+}
 
 /// Upper bound for `--limit`, mirroring `AuditStore::list_events`' documented
 /// `1..=1000` range. The store itself accepts any positive LIMIT (the `count`

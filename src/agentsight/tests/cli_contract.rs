@@ -419,6 +419,36 @@ fn interruption_fixture(dir: &std::path::Path) -> (PathBuf, String) {
     (db, id)
 }
 
+/// Insert one interruption per (agent, type) in `dir/interruption_events.db`.
+///
+/// The events are distinguishable by both dimensions, so a filter that reaches
+/// the query changes the reported rows instead of only the header.
+fn interruption_agent_fixture(
+    dir: &std::path::Path,
+    events: &[(&str, agentsight::interruption::InterruptionType)],
+) -> PathBuf {
+    let db = dir.join("interruption_events.db");
+    let store = agentsight::storage::sqlite::InterruptionStore::new_with_path(&db)
+        .expect("create interruption store");
+    for (agent, itype) in events {
+        store
+            .insert(&agentsight::interruption::InterruptionEvent::new(
+                itype.clone(),
+                Some(format!("fixture-{agent}")),
+                None,
+                None,
+                None,
+                None,
+                Some((*agent).to_string()),
+                now_ns(),
+                None,
+            ))
+            .expect("insert interruption event");
+    }
+    drop(store);
+    db
+}
+
 /// A genai_events.db holding one LLM call by agent `DbFlagProbe`.
 fn genai_fixture(dir: &std::path::Path) -> PathBuf {
     let db = dir.join("genai_events.db");
@@ -686,6 +716,70 @@ fn summary_tokenless_db_reads_the_given_store() {
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("--json must emit valid JSON");
     assert_eq!(v["tokenless"]["available"], serde_json::json!(false), "{v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn interruption_stats_scopes_to_the_requested_agent() {
+    // `list` filters by `--agent`, and the store's `stats` already accepts the
+    // same filter (the dashboard passes it), but the CLI hard-coded `None`: a
+    // per-agent breakdown was a usage error and the table always mixed every
+    // agent on the host. Reverting the wiring (passing `None` again) makes the
+    // scoped assertions below fail.
+    use agentsight::interruption::InterruptionType;
+
+    let dir = fixture_dir("interruption_stats_agent");
+    let db = interruption_agent_fixture(
+        &dir,
+        &[
+            ("ProbeA", InterruptionType::LlmError),
+            ("ProbeA", InterruptionType::LlmError),
+            ("ProbeB", InterruptionType::TokenLimit),
+        ],
+    );
+
+    let stats = |agent: Option<&str>| -> serde_json::Value {
+        let mut args = vec![
+            "interruption".to_string(),
+            "--db".to_string(),
+            db.to_str().unwrap().to_string(),
+            "stats".to_string(),
+            "--last".to_string(),
+            "24".to_string(),
+            "--json".to_string(),
+        ];
+        if let Some(agent) = agent {
+            args.push("--agent".to_string());
+            args.push(agent.to_string());
+        }
+        let out = agentsight().args(&args).output().expect("run agentsight");
+        assert!(
+            out.status.success(),
+            "--agent must be accepted; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("stats --json must emit valid JSON")
+    };
+
+    let scoped = stats(Some("ProbeA"));
+    let rows = scoped.as_array().expect("stats --json must emit an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the rows of the requested agent must be reported: {scoped}"
+    );
+    assert_eq!(rows[0]["interruption_type"], serde_json::json!("llm_error"));
+    assert_eq!(rows[0]["count"], serde_json::json!(2));
+
+    // The name match ignores case, like `list --agent` and the store's query.
+    let lower = stats(Some("probea"));
+    assert_eq!(lower, scoped, "the agent match must be case-insensitive");
+
+    // Without the flag the window still covers every agent.
+    let all = stats(None);
+    let rows = all.as_array().expect("stats --json must emit an array");
+    assert_eq!(rows.len(), 2, "the unfiltered view is unchanged: {all}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
