@@ -171,10 +171,15 @@ pub enum InterruptionAction {
     ///
     /// Example:
     ///   agentsight interruption stats --last 168
+    ///   agentsight interruption stats --last 168 --agent qoder
     Stats {
         /// Query last N hours (default: 24)
         #[structopt(long, default_value = "24")]
         last: u64,
+
+        /// Filter by agent name (exact match)
+        #[structopt(long)]
+        agent: Option<String>,
 
         /// Output as JSON
         #[structopt(long)]
@@ -187,10 +192,15 @@ pub enum InterruptionAction {
     ///
     /// Example:
     ///   agentsight interruption count --last 24
+    ///   agentsight interruption count --last 24 --agent qoder
     Count {
         /// Query last N hours (default: 24)
         #[structopt(long, default_value = "24")]
         last: u64,
+
+        /// Filter by agent name (exact match)
+        #[structopt(long)]
+        agent: Option<String>,
 
         /// Output as JSON
         #[structopt(long)]
@@ -359,11 +369,9 @@ impl InterruptionCommand {
                 }
             },
 
-            InterruptionAction::Stats { last, json } => {
+            InterruptionAction::Stats { last, agent, json } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
-                // `None`: the CLI reports what happened in the window,
-                // resolved or not, unlike the dashboard's unresolved-only card.
-                match store.stats(start_ns, end_ns, None, None) {
+                match interruption_stats(&store, start_ns, end_ns, agent.as_deref()) {
                     Ok(stats) => {
                         if *json {
                             print_json(&stats);
@@ -389,51 +397,41 @@ impl InterruptionCommand {
                 }
             }
 
-            InterruptionAction::Count { last, json } => {
+            InterruptionAction::Count { last, agent, json } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
-                // Use the detailed session-level query to compute total by severity
-                match store.list(start_ns, end_ns, None, None, None, Some(false), i64::MAX) {
-                    Ok(rows) => {
-                        let mut critical = 0i64;
-                        let mut high = 0i64;
-                        let mut medium = 0i64;
-                        let mut low = 0i64;
-                        for r in &rows {
-                            match r.severity.as_str() {
-                                "critical" => critical += 1,
-                                "high" => high += 1,
-                                "medium" => medium += 1,
-                                "low" => low += 1,
-                                _ => {}
-                            }
-                        }
-                        let total = critical + high + medium + low;
-
-                        if *json {
-                            let output = serde_json::json!({
-                                "total": total,
-                                "by_severity": {
-                                    "critical": critical,
-                                    "high": high,
-                                    "medium": medium,
-                                    "low": low,
-                                }
-                            });
-                            println!("{}", serde_json::to_string_pretty(&output).unwrap());
-                        } else {
-                            println!("Unresolved interruptions (last {last} hour(s)):");
-                            println!();
-                            println!("  Total:    {total}");
-                            println!("  Critical: {critical}");
-                            println!("  High:     {high}");
-                            println!("  Medium:   {medium}");
-                            println!("  Low:      {low}");
-                        }
-                    }
+                let (critical, high, medium, low) = match interruption_severity_counts(
+                    &store,
+                    start_ns,
+                    end_ns,
+                    agent.as_deref(),
+                ) {
+                    Ok(counts) => counts,
                     Err(e) => {
                         eprintln!("Query error: {e}");
                         std::process::exit(1);
                     }
+                };
+                let total = critical + high + medium + low;
+
+                if *json {
+                    let output = serde_json::json!({
+                        "total": total,
+                        "by_severity": {
+                            "critical": critical,
+                            "high": high,
+                            "medium": medium,
+                            "low": low,
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    println!("Unresolved interruptions (last {last} hour(s)):");
+                    println!();
+                    println!("  Total:    {total}");
+                    println!("  Critical: {critical}");
+                    println!("  High:     {high}");
+                    println!("  Medium:   {medium}");
+                    println!("  Low:      {low}");
                 }
             }
 
@@ -502,6 +500,46 @@ impl InterruptionCommand {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Per-(type, severity) counts for a window, optionally scoped to one agent.
+///
+/// `resolved` stays `None`: the CLI reports what happened in the window,
+/// resolved or not, unlike the dashboard's unresolved-only card.
+fn interruption_stats(
+    store: &InterruptionStore,
+    start_ns: i64,
+    end_ns: i64,
+    agent: Option<&str>,
+) -> Result<Vec<agentsight::storage::sqlite::InterruptionTypeStat>, Box<dyn std::error::Error>> {
+    store.stats(start_ns, end_ns, None, agent)
+}
+
+/// Unresolved per-severity counts for a window, optionally scoped to one agent.
+///
+/// `Some(false)` keeps the documented unresolved-only view; the agent filter
+/// is the one `list --agent` already applies.
+fn interruption_severity_counts(
+    store: &InterruptionStore,
+    start_ns: i64,
+    end_ns: i64,
+    agent: Option<&str>,
+) -> Result<(i64, i64, i64, i64), Box<dyn std::error::Error>> {
+    let rows = store.list(start_ns, end_ns, agent, None, None, Some(false), i64::MAX)?;
+    let mut critical = 0i64;
+    let mut high = 0i64;
+    let mut medium = 0i64;
+    let mut low = 0i64;
+    for r in &rows {
+        match r.severity.as_str() {
+            "critical" => critical += 1,
+            "high" => high += 1,
+            "medium" => medium += 1,
+            "low" => low += 1,
+            _ => {}
+        }
+    }
+    Ok((critical, high, medium, low))
+}
 
 /// Upper bound for `--limit`, mirroring `AuditStore::list_events`' documented
 /// `1..=1000` range. The store itself accepts any positive LIMIT (the `count`
