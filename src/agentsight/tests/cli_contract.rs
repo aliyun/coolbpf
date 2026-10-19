@@ -574,6 +574,36 @@ fn metrics_db_reads_the_given_database() {
 }
 
 #[test]
+fn metrics_json_reports_the_same_rows_as_the_prometheus_lines() {
+    // `metrics` was the only sight query subcommand without `--json`, so a
+    // script had to parse the Prometheus exposition format to get the numbers.
+    // Reverting the output branch below (always printing the text format)
+    // makes the JSON parse fail.
+    let dir = fixture_dir("metrics_json");
+    let db = genai_fixture(&dir);
+
+    let out = agentsight()
+        .args(["metrics", "--db", db.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run agentsight");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "--json must be accepted; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("metrics --json must emit valid JSON");
+    let rows = v.as_array().expect("metrics --json must emit an array");
+    assert_eq!(rows.len(), 1, "the fixture holds one agent, got {v}");
+    assert_eq!(rows[0]["agent_name"], serde_json::json!("DbFlagProbe"));
+    assert_eq!(rows[0]["input_tokens"], serde_json::json!(120));
+    assert_eq!(rows[0]["output_tokens"], serde_json::json!(60));
+    assert_eq!(rows[0]["total_tokens"], serde_json::json!(180));
+    assert_eq!(rows[0]["request_count"], serde_json::json!(1));
+}
+
+#[test]
 fn summary_db_reads_the_given_databases() {
     let dir = fixture_dir("summary");
     let db = genai_fixture(&dir);
