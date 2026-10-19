@@ -1,7 +1,9 @@
 """Helpers shared by the subprocess output encoding regressions.
 
-Each helper runs a child process whose text output is decoded by the caller
-under a forced C locale, where Python falls back to an ASCII codec.
+Each regression runs a child process whose textual output is decoded by the
+caller under a forced C locale, where Python falls back to an ASCII codec. The
+helpers here keep paths and bytes independent of the parent's codec so the
+fixture itself keeps working when the locale cannot represent a path.
 """
 
 import base64
@@ -20,7 +22,14 @@ sys.path.insert(0, str(BENCHMARK_DIR / "single_run"))
 
 def encode(value: str) -> str:
     """Pass a path through argv without depending on the parent's codec."""
-    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
+    return base64.urlsafe_b64encode(os.fsencode(value)).decode("ascii")
+
+
+def non_ascii_directory(root: Path) -> Path:
+    """Create a non-ASCII directory under ``root`` using raw bytes."""
+    target = os.fsdecode(os.fsencode(root) + b"/" + NON_ASCII.encode("utf-8"))
+    os.mkdir(target)
+    return Path(target)
 
 
 def c_locale_env(**extra: str) -> dict:
