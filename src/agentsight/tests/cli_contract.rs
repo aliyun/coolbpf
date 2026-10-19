@@ -721,6 +721,89 @@ fn summary_tokenless_db_reads_the_given_store() {
 }
 
 #[test]
+fn interruption_count_scopes_to_the_requested_agent() {
+    // `count` had only `--last`/`--json` and always counted every unresolved
+    // event on the host; the store's `list` already takes an agent filter, so
+    // the per-agent total was a usage error. Reverting the wiring (passing
+    // `None` for the agent) makes the scoped assertions fail.
+    use agentsight::interruption::InterruptionType;
+
+    let dir = fixture_dir("interruption_count_agent");
+    let db = interruption_agent_fixture(
+        &dir,
+        &[
+            ("ProbeA", InterruptionType::LlmError),
+            ("ProbeA", InterruptionType::AgentCrash),
+            ("ProbeB", InterruptionType::TokenLimit),
+        ],
+    );
+
+    let count = |agent: Option<&str>| -> serde_json::Value {
+        let mut args = vec![
+            "interruption".to_string(),
+            "--db".to_string(),
+            db.to_str().unwrap().to_string(),
+            "count".to_string(),
+            "--last".to_string(),
+            "24".to_string(),
+            "--json".to_string(),
+        ];
+        if let Some(agent) = agent {
+            args.push("--agent".to_string());
+            args.push(agent.to_string());
+        }
+        let out = agentsight().args(&args).output().expect("run agentsight");
+        assert!(
+            out.status.success(),
+            "--agent must be accepted; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("count --json must emit valid JSON")
+    };
+
+    let scoped = count(Some("ProbeA"));
+    assert_eq!(
+        scoped["total"],
+        serde_json::json!(2),
+        "only the requested agent's events must be counted: {scoped}"
+    );
+    assert_eq!(
+        scoped["by_severity"]["high"],
+        serde_json::json!(1),
+        "{scoped}"
+    );
+    assert_eq!(
+        scoped["by_severity"]["critical"],
+        serde_json::json!(1),
+        "{scoped}"
+    );
+    assert_eq!(
+        scoped["by_severity"]["medium"],
+        serde_json::json!(0),
+        "{scoped}"
+    );
+
+    // The name match ignores case, like `list --agent` and the store's query.
+    assert_eq!(count(Some("probea")), scoped, "the match must ignore case");
+
+    // Without the flag every agent is still counted.
+    assert_eq!(
+        count(None)["total"],
+        serde_json::json!(3),
+        "the unfiltered view is unchanged"
+    );
+
+    // An agent with no events is an empty breakdown, not every agent's total.
+    assert_eq!(
+        count(Some("ProbeC"))["total"],
+        serde_json::json!(0),
+        "a name with no events must not fall back to the whole window"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn interruption_stats_scopes_to_the_requested_agent() {
     // `list` filters by `--agent`, and the store's `stats` already accepts the
     // same filter (the dashboard passes it), but the CLI hard-coded `None`: a
