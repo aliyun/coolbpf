@@ -113,9 +113,9 @@ pub struct SysomToolCall {
 /// missing field must not fail the frame that carries the call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SysomFunction {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub name: String,
-    #[serde(default, deserialize_with = "null_as_empty_string")]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub arguments: String,
 }
 
@@ -135,17 +135,17 @@ pub struct SysomToolUseItem {
     /// fallback, and a later frame may repeat only the calls that changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub id: String,
     /// Item kind. Providers may leave it out and nothing here reads it; the
     /// call is identified by its function, so an absent kind must not fail the
     /// frame.
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "null_as_default")]
     pub item_type: String,
     /// Function the call names. A frame may omit the whole object while the
     /// call is being streamed — the frame that opens the call is the one that
     /// names it — so an absent function must not fail the frame either.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub function: SysomFunction,
 }
 
@@ -155,24 +155,27 @@ pub struct SysomResponseChoice {
     pub message: SysomResponseMessage,
 }
 
-/// Read a string field the provider may send as an explicit `null`.
+/// Read a field the provider may send as an explicit `null`.
 ///
 /// Absent, `null` and empty all mean "this frame carries no snapshot" in the
 /// cumulative SysOM frames: the provider stops repeating the text once the
-/// answer switches to tool calls. A `null` must not fail the frame that
-/// carries the call, the way it does not fail the SysOM client's own reader.
-fn null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+/// answer switches to tool calls, and a later frame of an open call need not
+/// repeat its identity. A `null` must not fail the frame that carries the
+/// call, the way it does not fail the SysOM client's own reader
+/// (`identity_field` reads a `null` id or name as "not reported").
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
 {
-    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// The message part of a SysOM response choice
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponseMessage {
     /// Text content of the response
-    #[serde(default, deserialize_with = "null_as_empty_string")]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub content: String,
 
     /// Tool calls in the response (`tool_use` array, NOT `tool_calls`)
@@ -733,5 +736,39 @@ mod tests {
             tool_use[1].function.arguments, "{\"path\":\"b\",\"line\":2}",
             "the newest snapshot of call_b wins"
         );
+    }
+
+    /// A later frame of an open call may send its identity as an explicit
+    /// `null`, which the SysOM client's reader treats like an absent field.
+    /// Only `arguments` accepted a `null`, so such a frame failed to parse
+    /// whole and its newer snapshot and content were lost with it.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_a_frame_with_a_null_identity() {
+        let chunks = serde_json::json!([
+            {"choices": [{"message": {"content": "Let me check.", "tool_use": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": "{\"path\":"}
+            }]}}]},
+            {"choices": [{"message": {"content": "Let me check the file.", "tool_use": [{
+                "index": 0,
+                "id": null,
+                "type": null,
+                "function": {"name": null, "arguments": "{\"path\":\"/tmp/a.txt\"}"}
+            }]}}]},
+            {"choices": [{"message": {"tool_use": [{"index": 0, "function": null}]}}]}
+        ]);
+
+        let resp = SysomParser::parse_response(&chunks).expect("should aggregate");
+        let tool_use = resp.choices[0]
+            .message
+            .tool_use
+            .as_ref()
+            .expect("the call must be kept");
+        assert_eq!(tool_use[0].id, "call_1");
+        assert_eq!(tool_use[0].function.name, "read_file");
+        assert_eq!(tool_use[0].function.arguments, "{\"path\":\"/tmp/a.txt\"}");
+        assert_eq!(resp.choices[0].message.content, "Let me check the file.");
     }
 }

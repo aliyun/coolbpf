@@ -46,6 +46,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o1", "Xenova/gpt-4o");
     m.insert("o1-mini", "Xenova/gpt-4o");
     m.insert("o1-preview", "Xenova/gpt-4o");
+    // The rest of the reasoning family. OpenAI publishes no tokenizer repo
+    // for any of these names either, and tiktoken maps the whole family to
+    // o200k_base — the encoding `Xenova/gpt-4o` carries — so they take that
+    // repo instead of the unrelated Qwen fallback.
+    m.insert("o1-pro", "Xenova/gpt-4o");
+    m.insert("o3", "Xenova/gpt-4o");
+    m.insert("o3-mini", "Xenova/gpt-4o");
+    m.insert("o4-mini", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
     // No Claude model has a repo on the Hub, so `anthropic/<model>` never
@@ -127,6 +135,10 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("deepseek-v2.5", "deepseek-ai/DeepSeek-V2.5");
     m.insert("deepseek-v3", "deepseek-ai/DeepSeek-V3");
     m.insert("deepseek-r1", "deepseek-ai/DeepSeek-R1");
+    // The DeepSeek API calls the same R1 model `deepseek-reasoner`; without
+    // this entry the bare alias took the Qwen fallback and every reasoner
+    // request was counted with an unrelated vocabulary.
+    m.insert("deepseek-reasoner", "deepseek-ai/DeepSeek-R1");
     m.insert(
         "deepseek-r1-distill-qwen",
         "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -307,9 +319,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 /// Map a model name to its HuggingFace model ID.
 ///
 /// This function attempts to:
-/// 1. Look up the model name in the predefined mapping table
-/// 2. If not found, check if the name already looks like a HF ID (contains '/')
-/// 3. If not, return the original name (let HF download fail naturally)
+/// 1. Look up the model name in the predefined mapping table, including the
+///    bare name behind a gateway's vendor prefix (`deepseek/deepseek-r1`)
+/// 2. If not found, return the name as-is when it already looks like a HF ID
+///    (contains '/')
+/// 3. Otherwise return `FALLBACK_HF_MODEL_ID`, the shared Qwen tokenizer,
+///    because an API model with no Hub repo of its own has no tokenizer to
+///    download; DrainCheck still needs a count. That vocabulary is unrelated
+///    to the model, so a production name must be added to the table instead.
 ///
 /// # Arguments
 /// * `model_name` - The model name from API request (e.g., "gpt-4", "qwen-turbo")
@@ -486,6 +503,30 @@ mod tests {
         }
     }
 
+    /// The o-series names after `o1-preview`. OpenAI publishes no tokenizer
+    /// repo for any of them, so an unmapped name took the unrelated Qwen
+    /// fallback. tiktoken maps `o1-`, `o3-` and `o4-mini-` to `o200k_base`,
+    /// the encoding `Xenova/gpt-4o` carries, so each one takes that repo.
+    /// The bare `o4` is not a model — the mini variant is the only o4 name.
+    #[test]
+    fn test_o_series_names_take_the_o200k_tokenizer() {
+        // Collect every name before asserting so one run reports all four,
+        // not just the first one that still falls through.
+        let resolved: Vec<(&str, &str)> = ["o1-pro", "o3", "o3-mini", "o4-mini"]
+            .into_iter()
+            .map(|name| (name, map_to_hf_model_id(name)))
+            .collect();
+        assert_eq!(
+            resolved,
+            [
+                ("o1-pro", "Xenova/gpt-4o"),
+                ("o3", "Xenova/gpt-4o"),
+                ("o3-mini", "Xenova/gpt-4o"),
+                ("o4-mini", "Xenova/gpt-4o"),
+            ]
+        );
+    }
+
     #[test]
     fn test_anthropic_mapping() {
         assert_eq!(
@@ -571,6 +612,28 @@ mod tests {
             "deepseek-ai/DeepSeek-V3"
         );
         assert_eq!(map_to_hf_model_id("deepseek-r1"), "deepseek-ai/DeepSeek-R1");
+    }
+
+    /// `deepseek-reasoner` is the alias the DeepSeek API uses for R1. It was
+    /// absent from the table, so the bare name fell through to the shared Qwen
+    /// tokenizer and `register_from_hf` counted every reasoner request with an
+    /// unrelated vocabulary.
+    #[test]
+    fn test_deepseek_reasoner_maps_to_the_r1_tokenizer() {
+        assert_eq!(
+            map_to_hf_model_id("deepseek-reasoner"),
+            "deepseek-ai/DeepSeek-R1"
+        );
+        // The gateway-prefixed spelling resolves through the table too.
+        assert_eq!(
+            map_to_hf_model_id("deepseek/deepseek-reasoner"),
+            "deepseek-ai/DeepSeek-R1"
+        );
+        // A name that already is a repo ID still passes through untouched.
+        assert_eq!(
+            map_to_hf_model_id("deepseek-ai/DeepSeek-R1"),
+            "deepseek-ai/DeepSeek-R1"
+        );
     }
 
     #[test]
@@ -685,6 +748,7 @@ mod tests {
         for (name, repo) in [
             ("deepseek/deepseek-chat", "deepseek-ai/DeepSeek-V3"),
             ("deepseek/deepseek-r1", "deepseek-ai/DeepSeek-R1"),
+            ("deepseek/deepseek-reasoner", "deepseek-ai/DeepSeek-R1"),
             ("dashscope/qwen-plus", "Qwen/Qwen2.5-14B-Instruct"),
             ("moonshot/moonshot-v1-8k", "Qwen/Qwen2.5-7B-Instruct"),
             ("gemini/gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
@@ -707,9 +771,11 @@ mod tests {
             map_to_hf_model_id("google/gemma-3-27b-it"),
             "google/gemma-3-27b-it"
         );
+        // A prefixed name the table does not know is a real Hub repo and
+        // still passes through unredirected.
         assert_eq!(
-            map_to_hf_model_id("deepseek/deepseek-reasoner"),
-            "deepseek/deepseek-reasoner"
+            map_to_hf_model_id("deepseek/deepseek-unknown"),
+            "deepseek/deepseek-unknown"
         );
         assert_eq!(map_to_hf_model_id("Qwen/QwQ-32B"), "Qwen/QwQ-32B");
     }

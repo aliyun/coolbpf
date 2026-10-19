@@ -74,10 +74,14 @@ fn structured_stream_error_text(raw_body: &str) -> Option<String> {
             event_data.clear();
             continue;
         }
-        let payload = trimmed
-            .strip_prefix("data:")
-            .map(str::trim)
-            .unwrap_or(trimmed);
+        let payload = match trimmed.strip_prefix("data:") {
+            Some(data) => data.trim(),
+            // A comment line and the event's other fields (`id:`, `retry:`)
+            // are not data: folding them in broke the payload they sit
+            // next to.
+            None if is_sse_non_data_line(trimmed) => continue,
+            None => trimmed,
+        };
         if payload.is_empty() || payload == "[DONE]" || payload.starts_with("event:") {
             continue;
         }
@@ -90,6 +94,12 @@ fn structured_stream_error_text(raw_body: &str) -> Option<String> {
         event_data.push_str(payload);
     }
     structured_error_json_text(&event_data)
+}
+
+/// Whether an SSE line without a `data:` prefix is a comment (`:` first) or
+/// one of the event's `id:` / `retry:` fields rather than a bare payload.
+fn is_sse_non_data_line(line: &str) -> bool {
+    line.starts_with(':') || line.starts_with("id:") || line.starts_with("retry:")
 }
 
 fn structured_error_json_text(candidate: &str) -> Option<String> {
@@ -1561,6 +1571,36 @@ mod tests {
         call.duration_ns = 100_000_000;
         call.response.raw_body = Some(
             "event: error\n\
+             data: {\n\
+             data:   \"error\": {\n\
+             data:     \"message\": \"upstream failed before completion\",\n\
+             data:     \"type\": \"server_error\"\n\
+             data:   }\n\
+             data: }\n\n"
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
+    }
+
+    /// An event may also carry `id:` and `retry:` fields and comment lines
+    /// (`:` first), none of which are data. Folding them into the payload
+    /// broke the split error object again, so the call read as a success.
+    #[test]
+    fn test_detects_a_split_sse_error_among_non_data_lines() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 100_000_000;
+        call.response.raw_body = Some(
+            ": keep-alive\n\
+             event: error\n\
+             id: 7\n\
+             retry: 3000\n\
              data: {\n\
              data:   \"error\": {\n\
              data:     \"message\": \"upstream failed before completion\",\n\

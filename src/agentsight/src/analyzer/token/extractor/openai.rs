@@ -331,7 +331,14 @@ pub fn extract_response_content(
             // delivered them, and counting both would double the call.
             "response.output_item.added" => {
                 if let Some(item) = resp.get("item") {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    // A custom (freeform) tool is announced the same way as a
+                    // function call; only the kind differs. The message parser
+                    // and the chatml reader both accept it, so a captured
+                    // turn that called one must count its name here too.
+                    if matches!(
+                        item.get("type").and_then(|t| t.as_str()),
+                        Some("function_call" | "custom_tool_call")
+                    ) {
                         if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                             if !name.is_empty() {
                                 return Some((String::new(), None, vec![format!("{name}: ")]));
@@ -340,7 +347,11 @@ pub fn extract_response_content(
                     }
                 }
             }
-            "response.function_call_arguments.delta" => {
+            // The two protocols stream a call's body under different event
+            // names: `arguments` fragments for a function call, `input`
+            // fragments for a custom one. Reading only the first meant a
+            // truncated custom call kept its name and lost its body.
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 if let Some(delta) = resp.get("delta").and_then(|d| d.as_str()) {
                     if !delta.is_empty() {
                         return Some((String::new(), None, vec![delta.to_string()]));
@@ -396,7 +407,8 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
                 if chunk.get("item").is_some_and(is_reasoning_item) {
                     saw_reasoning_delta
                 } else {
-                    saw_text_delta
+                    // A message item repeats its refusal part too.
+                    saw_text_delta || saw_refusal_delta
                 }
             }
             _ => false,
@@ -423,11 +435,18 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
         // N times; accumulate it the way the SSE merger does — replace when
         // the snapshot extends what we have.
         let snapshot = carries_message_snapshot(chunk);
+        // A closing event replays the complete answer, and `output_text.done`
+        // and the message in `output_item.done` repeat each other when no
+        // delta was captured. Treat it as a replacement rather than another
+        // fragment so the same answer is not appended twice.
+        let closing = is_closing_response_event(chunk);
         if let Some((chunk_content, chunk_reasoning, chunk_tool_calls)) =
             extract_response_content(Some(chunk))
         {
             if !chunk_content.is_empty() {
-                if snapshot {
+                if closing {
+                    content = chunk_content;
+                } else if snapshot {
                     accumulate_text(&mut content, &chunk_content);
                 } else {
                     content.push_str(&chunk_content);
@@ -435,7 +454,9 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
             }
             if let Some(reasoning_chunk) = chunk_reasoning {
                 if !reasoning_chunk.is_empty() {
-                    if snapshot {
+                    if closing {
+                        reasoning = reasoning_chunk;
+                    } else if snapshot {
                         accumulate_text(&mut reasoning, &reasoning_chunk);
                     } else {
                         reasoning.push_str(&reasoning_chunk);
@@ -462,9 +483,10 @@ pub(crate) fn merge_response_output_text(chunks: &[Value]) -> (String, String, V
 
 /// Read a finished output item as `(answer text, thinking text)`.
 ///
-/// A `message` item carries the answer in its `content[]` parts, while a
-/// `reasoning` item carries its thinking there (parts typed `reasoning_text`)
-/// and, for the summary-only shape, in `summary[]`. The live message parser
+/// A `message` item carries the answer in its `content[]` parts (a refusal
+/// part keeps it in `refusal`), while a `reasoning` item carries its thinking
+/// there (parts typed `reasoning_text`) and, for the summary-only shape, in
+/// `summary[]`. The live message parser
 /// keeps the two buffers apart; reading every part as answer text made a
 /// drained capture count the thinking as answer text and, once the closing
 /// item repeated the deltas, twice over.
@@ -475,7 +497,12 @@ fn read_output_item(item: &Value) -> (String, String) {
             .map(|parts| {
                 parts
                     .iter()
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    // A refusal part keeps the answer in `refusal`, not `text`.
+                    .filter_map(|part| {
+                        part.get("text")
+                            .or_else(|| part.get("refusal"))
+                            .and_then(Value::as_str)
+                    })
                     .collect::<String>()
             })
             .unwrap_or_default()
@@ -491,6 +518,15 @@ fn read_output_item(item: &Value) -> (String, String) {
 /// Whether an `output_item` payload is a reasoning item.
 fn is_reasoning_item(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("reasoning")
+}
+
+/// Whether a chunk is a Responses closing event that carries the complete
+/// answer rather than an incremental delta.
+fn is_closing_response_event(chunk: &Value) -> bool {
+    matches!(
+        chunk.get("type").and_then(Value::as_str),
+        Some("response.output_text.done" | "response.refusal.done" | "response.output_item.done")
+    )
 }
 
 /// A choice that carries `message` instead of `delta` speaks in cumulative
@@ -972,6 +1008,21 @@ mod tests {
         assert_eq!(merge_response_output_text(&empty_delta).0, "hello there");
     }
 
+    /// A late-join capture can hold both closing events and no delta at all:
+    /// `response.output_text.done` and the message inside
+    /// `response.output_item.done` each replay the whole answer. Both passed
+    /// the "no delta" gate independently, so the merge appended the answer
+    /// twice and doubled the estimated output tokens.
+    #[test]
+    fn test_merge_response_output_text_two_closing_events_count_once() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_text.done", "text": "hello there"}),
+            serde_json::json!({"type": "response.output_item.done",
+                "item": {"type": "message", "content": [{"text": "hello there"}]}}),
+        ];
+        assert_eq!(merge_response_output_text(&chunks).0, "hello there");
+    }
+
     /// A `choices[].message` snapshot repeats the answer so far (SysOM's
     /// Copilot stream sends nothing else), so the fold must count the answer
     /// once, not once per captured chunk.
@@ -1179,6 +1230,36 @@ mod tests {
         );
     }
 
+    /// A capture that joined after `response.refusal.done` still sees the
+    /// closing message item, whose content part is typed `refusal` and keeps
+    /// the answer in `refusal` rather than `text`; reading only `text` counted
+    /// that call as no output. When the deltas were captured, the item repeats
+    /// them and must not count again.
+    #[test]
+    fn test_output_item_done_reads_a_refusal_part() {
+        let item_done = serde_json::json!({"type": "response.output_item.done",
+            "item": {"type": "message", "role": "assistant", "content": [
+                {"type": "refusal", "refusal": "I can't help with that."}]}});
+
+        let (content, _, _) = extract_response_content(Some(&item_done))
+            .expect("the closing refusal item must extract");
+        assert_eq!(content, "I can't help with that.");
+        assert_eq!(
+            merge_response_output_text(std::slice::from_ref(&item_done)).0,
+            "I can't help with that."
+        );
+
+        let complete = vec![
+            serde_json::json!({"type": "response.refusal.delta", "delta": "I can't help"}),
+            serde_json::json!({"type": "response.refusal.delta", "delta": " with that."}),
+            item_done,
+        ];
+        assert_eq!(
+            merge_response_output_text(&complete).0,
+            "I can't help with that."
+        );
+    }
+
     /// The Chat Completions protocols spell the same answer `refusal` next to
     /// a null `content`: `choices[].delta.refusal` on a stream and
     /// `choices[].message.refusal` in a whole body/snapshot.
@@ -1261,6 +1342,40 @@ mod tests {
         // exact string they expect.
         let joined = "read_file: ".to_string() + "{\"path\":" + "\"/tmp/a.md\"}";
         assert_eq!(joined, "read_file: {\"path\":\"/tmp/a.md\"}");
+    }
+
+    /// A custom (freeform) tool call is announced and streamed exactly like a
+    /// function call, under `custom_tool_call` and
+    /// `response.custom_tool_call_input.delta`. The arm only claimed
+    /// `function_call`, so a truncated capture that caught the call counted
+    /// nothing for it and the drained turn's output tokens came up short.
+    #[test]
+    fn test_responses_api_custom_tool_call_events_yield_tool_call_fragments() {
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "custom_tool_call",
+                "id": "ctc_1",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+            },
+        });
+        let (content, reasoning, tool_calls) =
+            extract_response_content(Some(&added)).expect("the call's name must be extracted");
+        assert_eq!(content, "");
+        assert!(reasoning.is_none());
+        assert_eq!(tool_calls, vec!["apply_patch: ".to_string()]);
+
+        let delta = serde_json::json!({
+            "type": "response.custom_tool_call_input.delta",
+            "item_id": "ctc_1",
+            "output_index": 0,
+            "delta": "*** Begin Patch\n",
+        });
+        let (_, _, tool_calls) =
+            extract_response_content(Some(&delta)).expect("input fragments must be extracted");
+        assert_eq!(tool_calls, vec!["*** Begin Patch\n".to_string()]);
     }
 
     /// A message item that arrives after the call is announced must keep

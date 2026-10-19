@@ -97,7 +97,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
     entries = []
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with open(filepath, "r", encoding="utf-8-sig", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -195,14 +195,22 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
 
             # Extract usage metrics if present
             usage = msg.get("usage", {})
-            if usage:
+            if isinstance(usage, dict):
                 metrics = {}
-                if usage.get("input_tokens"):
-                    metrics["prompt_tokens"] = usage["input_tokens"]
-                if usage.get("output_tokens"):
-                    metrics["completion_tokens"] = usage["output_tokens"]
-                if usage.get("cache_read_input_tokens"):
-                    metrics["cached_tokens"] = usage["cache_read_input_tokens"]
+                counters = {
+                    key: value for key, value in usage.items() if type(value) is int and value >= 0
+                }
+                for source, target in (
+                    ("input_tokens", "prompt_tokens"),
+                    ("output_tokens", "completion_tokens"),
+                    ("cache_read_input_tokens", "cached_tokens"),
+                ):
+                    if source in counters:
+                        metrics[target] = counters[source]
+                if "prompt_tokens" in metrics:
+                    # Anthropic reports uncached, read, and created input separately.
+                    metrics["prompt_tokens"] += counters.get("cache_read_input_tokens", 0)
+                    metrics["prompt_tokens"] += counters.get("cache_creation_input_tokens", 0)
                 if metrics:
                     step["metrics"] = metrics
 

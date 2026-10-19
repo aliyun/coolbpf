@@ -146,15 +146,27 @@ impl AnalyzeChatmlCommand {
                     }
                 }
                 "http.response" => {
-                    // Extract response data from SSE events
+                    // The writer stores a stream under `sse_events` and a
+                    // non-streaming answer under `body`. Both are the same
+                    // provider payload the extractor aggregates, so a body is
+                    // offered as the single frame of a synthetic stream.
                     if let Some(ref args) = event.args {
-                        if let Some(sse_events) = args.get("sse_events").and_then(|v| v.as_array())
-                        {
-                            let response = Self::extract_response_from_sse(sse_events);
-                            Some(classify_document(&[], Some(response)))
-                        } else {
-                            None
-                        }
+                        let response = args
+                            .get("sse_events")
+                            .and_then(|v| v.as_array())
+                            .map(|events| Self::extract_response_from_sse(events))
+                            .or_else(|| {
+                                args.get("body").map(|body| {
+                                    let payload = match body {
+                                        serde_json::Value::String(text) => text.clone(),
+                                        other => other.to_string(),
+                                    };
+                                    Self::extract_response_from_sse(&[serde_json::json!({
+                                        "data": payload
+                                    })])
+                                })
+                            });
+                        response.map(|response| classify_document(&[], Some(response)))
                     } else {
                         None
                     }
@@ -313,6 +325,11 @@ impl AnalyzeChatmlCommand {
         // first fragment) and the arguments stream as string fragments that
         // must be concatenated per index before rendering "name: arguments".
         let mut tool_calls: Vec<(usize, String, String)> = Vec::new();
+        // Slot each choice's latest tool-call fragment landed in, so an
+        // index-less continuation can extend the call that choice is holding
+        // instead of folding it into slot 0.
+        let mut current_tool_call_slot: std::collections::BTreeMap<u64, usize> =
+            std::collections::BTreeMap::new();
         // Anthropic tool_use blocks, keyed by content-block index: the id and
         // name arrive in `content_block_start`, the arguments stream as
         // `input_json_delta` fragments.
@@ -508,10 +525,14 @@ impl AnalyzeChatmlCommand {
                         // mid-stream or a custom_tool_call whose input only
                         // appears there). Routing only `added` left the call
                         // rendered with whatever partial deltas were caught.
+                        // A custom tool call streams its input on its own
+                        // event pair, so those names belong here too.
                         Some("response.output_item.added")
                         | Some("response.output_item.done")
                         | Some("response.function_call_arguments.delta")
-                        | Some("response.function_call_arguments.done") => {
+                        | Some("response.function_call_arguments.done")
+                        | Some("response.custom_tool_call_input.delta")
+                        | Some("response.custom_tool_call_input.done") => {
                             responses_tool_calls.observe(&data_json);
                         }
                         _ => {}
@@ -525,7 +546,11 @@ impl AnalyzeChatmlCommand {
                     // so far, so it accumulates replace-or-extend into a single
                     // buffer instead of being appended as another fragment.
                     if let Some(choices) = data_json.get("choices").and_then(|v| v.as_array()) {
-                        for choice in choices {
+                        for (choice_pos, choice) in choices.iter().enumerate() {
+                            let choice_index = choice
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(choice_pos as u64);
                             let (payload, cumulative) =
                                 match (choice.get("delta"), choice.get("message")) {
                                     (Some(delta), _) => (delta, false),
@@ -561,10 +586,7 @@ impl AnalyzeChatmlCommand {
                             if let Some(calls) =
                                 payload.get("tool_calls").and_then(|t| t.as_array())
                             {
-                                for call in calls {
-                                    let index =
-                                        call.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                            as usize;
+                                for (call_pos, call) in calls.iter().enumerate() {
                                     let function = call.get("function");
                                     let name = function
                                         .and_then(|f| f.get("name"))
@@ -574,6 +596,31 @@ impl AnalyzeChatmlCommand {
                                         .and_then(|f| f.get("arguments"))
                                         .and_then(|a| a.as_str())
                                         .unwrap_or("");
+                                    // `index` is optional on the wire. A
+                                    // cumulative snapshot repeats the whole
+                                    // list, so the position names the call; in
+                                    // a delta stream a non-empty name starts a
+                                    // new call and an unnamed fragment extends
+                                    // the one this choice is holding.
+                                    let index = match call.get("index").and_then(|i| i.as_u64()) {
+                                        Some(index) => index as usize,
+                                        None if cumulative => call_pos,
+                                        None => {
+                                            if name.is_empty() {
+                                                current_tool_call_slot
+                                                    .get(&choice_index)
+                                                    .copied()
+                                                    .unwrap_or(0)
+                                            } else {
+                                                tool_calls
+                                                    .iter()
+                                                    .map(|(index, _, _)| *index)
+                                                    .max()
+                                                    .map_or(0, |slot| slot.saturating_add(1))
+                                            }
+                                        }
+                                    };
+                                    current_tool_call_slot.insert(choice_index, index);
                                     match tool_calls.iter_mut().find(|(i, _, _)| *i == index) {
                                         Some((_, slot_name, slot_arguments)) => {
                                             if !name.is_empty() {
@@ -1087,6 +1134,41 @@ mod tests {
         );
     }
 
+    fn response_event(body: serde_json::Value, ts: u64) -> ChromeTraceEvent {
+        let mut event = ChromeTraceEvent::instant("200 OK", "http.response", 1, 1, ts);
+        event.args = Some(json!({ "body": body }));
+        event
+    }
+
+    /// The trace writer stores a non-streaming response under `body`, but the
+    /// analyzer only read `sse_events`. A `stream: false` call therefore
+    /// contributed no output side at all: with a request event present the
+    /// response silently vanished, and a response-only trace failed with
+    /// "No valid http.request or http.response events found".
+    #[test]
+    fn a_non_sse_response_body_is_counted() {
+        let tokenizer = fixture_tokenizer();
+        let events = vec![response_event(
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello there"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            1,
+        )];
+
+        let breakdowns = AnalyzeChatmlCommand::process_events(&events, &tokenizer, "test-model")
+            .expect("a non-SSE response must still break down");
+        assert_eq!(breakdowns.len(), 1);
+        assert!(
+            breakdowns[0].total_tokens > 0,
+            "the answer must be counted, got {:?}",
+            breakdowns[0]
+        );
+    }
+
     fn sse(payload: &str) -> serde_json::Value {
         json!({ "data": payload })
     }
@@ -1140,6 +1222,32 @@ mod tests {
         assert_eq!(
             resp.tool_calls,
             vec!["first_tool: {}".to_string(), "second_tool: {}".to_string()]
+        );
+    }
+
+    #[test]
+    fn sse_unindexed_sequential_tool_calls_stay_separate() {
+        // OpenAI's `index` is optional. A compatible gateway streams calls
+        // without one, marking each new call by its non-empty function name;
+        // an unnamed fragment continues the current call. Keying every
+        // index-less fragment to slot 0 folded the second call into the first
+        // and concatenated unrelated argument strings.
+        let events = vec![
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","function":{"name":"first_tool","arguments":"{\"a\":1}"}}]}}]}"#,
+            ),
+            sse(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_2","function":{"name":"second_tool","arguments":"{\"b\":2}"}}]}}]}"#,
+            ),
+            sse("[DONE]"),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec![
+                r#"first_tool: {"a":1}"#.to_string(),
+                r#"second_tool: {"b":2}"#.to_string()
+            ]
         );
     }
 
@@ -1395,6 +1503,52 @@ mod tests {
         )];
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_done);
         assert_eq!(resp.tool_calls, vec![r#"tool_b: {"b":2}"#.to_string()]);
+    }
+
+    /// A custom tool call streams its input on
+    /// `response.custom_tool_call_input.delta`/`.done`; the CLI allow-list
+    /// routed only the function-call events into the shared aggregator, so a
+    /// stream cut before any done event reported the call with empty input
+    /// while a function call in the same shape kept its partial arguments.
+    #[test]
+    fn sse_responses_custom_tool_input_deltas_reach_the_call() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"item_9","call_id":"call_9","name":"apply_patch","input":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** Begin Patch\n"}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** End Patch"}"#,
+            ),
+            // No done event: the capture was cut mid-input.
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["apply_patch: *** Begin Patch\n*** End Patch".to_string()],
+            "the partial custom tool input must be rendered, not dropped"
+        );
+
+        // A full done payload supersedes the partial deltas it repeats.
+        let with_done = vec![
+            sse(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"item_9","call_id":"call_9","name":"apply_patch","input":""}}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"*** Beg"}"#,
+            ),
+            sse(
+                r#"{"type":"response.custom_tool_call_input.done","output_index":0,"input":"*** Begin Patch\n*** End Patch"}"#,
+            ),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&with_done);
+        assert_eq!(
+            resp.tool_calls,
+            vec!["apply_patch: *** Begin Patch\n*** End Patch".to_string()],
+            "the done payload must replace the deltas rather than duplicate them"
+        );
     }
 
     /// Reasoning models on the Responses protocol stream their thinking as
