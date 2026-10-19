@@ -30,7 +30,7 @@ DEFAULT_DIRS = [
 # ─── JSONL → ATIF conversion ─────────────────────────────────────────────────
 
 
-def extract_text(content) -> str:
+def extract_text(content, *, include_tool_results: bool = True) -> str:
     """Extract plain text from message content (string or list of blocks)."""
     if isinstance(content, str):
         return content
@@ -40,7 +40,7 @@ def extract_text(content) -> str:
             if isinstance(block, dict):
                 if block.get("type") == "text":
                     parts.append(block.get("text", ""))
-                elif block.get("type") == "tool_result":
+                elif block.get("type") == "tool_result" and include_tool_results:
                     parts.append(block.get("content", ""))
             elif isinstance(block, str):
                 parts.append(block)
@@ -120,6 +120,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     model_name = None
 
     steps = []
+    tool_call_steps = {}
     step_id = 0
 
     for entry in entries:
@@ -147,30 +148,31 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             model_name = msg.get("model")
 
         if role == "user" or entry_type == "user":
-            # Check if this is a tool result (observation)
+            # Tool replies can arrive after other assistant or user records.
             tool_results = extract_tool_results(content)
-            if tool_results and steps and steps[-1]["source"] == "agent":
-                # Attach as observation to the previous agent step. Parallel
-                # tool calls answer in separate JSONL records, so append to an
-                # existing observation instead of replacing it; otherwise the
-                # earlier results never reach the analysis input.
-                observation = steps[-1].get("observation")
-                if isinstance(observation, dict) and isinstance(
-                    observation.get("results"), list
-                ):
-                    observation["results"].extend(tool_results)
+            unmatched_results = []
+            for result in tool_results:
+                call_id = result.get("source_call_id")
+                owner = tool_call_steps.get(call_id) if isinstance(call_id, str) else None
+                if owner is not None:
+                    owner.setdefault("observation", {"results": []})["results"].append(result)
                 else:
-                    steps[-1]["observation"] = {"results": tool_results}
-            else:
-                text = extract_text(content)
-                if text.strip():
-                    step_id += 1
-                    steps.append({
-                        "step_id": step_id,
-                        "timestamp": timestamp,
-                        "source": "user",
-                        "message": text[:5000],
-                    })
+                    unmatched_results.append(result)
+
+            # A mixed reply still contains a genuine user turn. Pure orphan
+            # results have no issuing step and must not become human input.
+            text = extract_text(content, include_tool_results=False)
+            if text.strip():
+                step_id += 1
+                step = {
+                    "step_id": step_id,
+                    "timestamp": timestamp,
+                    "source": "user",
+                    "message": text[:5000],
+                }
+                if unmatched_results:
+                    step["observation"] = {"results": unmatched_results}
+                steps.append(step)
 
         elif role == "assistant" or entry_type == "assistant":
             text = extract_text(content)
@@ -190,6 +192,10 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             }
             if tool_calls:
                 step["tool_calls"] = tool_calls
+                for call in tool_calls:
+                    call_id = call.get("tool_call_id")
+                    if isinstance(call_id, str) and call_id:
+                        tool_call_steps[call_id] = step
             if thinking:
                 step["reasoning_content"] = thinking[:3000]
 
