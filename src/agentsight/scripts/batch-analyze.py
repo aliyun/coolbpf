@@ -383,21 +383,30 @@ def main():
             tmp_path = tmp.name
 
         try:
-            result = subprocess.run(
-                analyze_cmd + [tmp_path, "--dim", args.dim],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=300,
-            )
+            try:
+                result = subprocess.run(
+                    analyze_cmd + [tmp_path, "--dim", args.dim],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    timeout=300,
+                )
+            except OSError as error:
+                print(f"  FAIL: cannot run analyzer: {error}", file=sys.stderr)
+                failed += 1
+                continue
             if result.returncode == 0:
-                print(f"  OK ({args.dim})", file=sys.stderr)
                 # Output result with file attribution
                 output = json.loads(result.stdout)
+                if not isinstance(output, dict):
+                    print("  FAIL: expected a JSON object from analyzer", file=sys.stderr)
+                    failed += 1
+                    continue
                 output["_source_file"] = str(filepath)
                 output["_session_id"] = atif["session_id"]
                 output["_steps"] = n_steps
                 print(json.dumps(output, ensure_ascii=False, indent=2))
+                print(f"  OK ({args.dim})", file=sys.stderr)
                 analyzed += 1
             else:
                 print(f"  FAIL: {result.stderr.strip()[:200]}", file=sys.stderr)
