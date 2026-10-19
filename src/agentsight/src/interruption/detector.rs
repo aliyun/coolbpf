@@ -249,9 +249,11 @@ fn text_has_tool_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || mentions_failing_http_status(text)
         || lower.contains("error:")
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
         || lower.contains("command not found")
         || lower.contains("eacces")
         || lower.contains("eperm")
@@ -259,25 +261,66 @@ fn text_has_tool_error_signal(text: &str) -> bool {
         || lower.contains("\"status\":") && lower.contains("\"error\"")
 }
 
-/// Whether any `exit code N` mention carries a non-zero status.
+/// Whether a line of the payload opens with an HTTP 4xx/5xx status.
 ///
-/// `exit code 0` is the success spelling a passing command's output routinely
+/// A failed fetch reports itself this way when the tool printed the response
+/// headers instead of an error string: a raw response and `curl -i` output
+/// both start `HTTP/1.1 500 …`, and some wrappers drop the version. The
+/// grader's `mentions_failing_http_status` and the grounding classifier's
+/// `outcome::http_error_line` read the same shape, so a payload that both of
+/// them grade a certain failure still produced no ToolFailure here.
+///
+/// The status has to open its line: a payload that merely mentions a code — a
+/// URL, a changelog line, a sentence — is describing something else, the same
+/// anchor the other two scans apply.
+fn mentions_failing_http_status(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|after| after.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        rest.is_some_and(|status| {
+            let mut digits = status.chars();
+            matches!(digits.next(), Some('4' | '5'))
+                && digits.clone().take(2).all(|c| c.is_ascii_digit())
+                && digits.count() >= 2
+        })
+    })
+}
+
+/// Spellings of a reported process exit status, compared case-insensitively.
+///
+/// The wording is the tool's choice, not a protocol field: a live capture
+/// writes `(Command exited with code 1)` and another wrapper reports
+/// `exit status 1`, neither of which spells `exit code`. The grader and the
+/// grounding classifier read all three spellings for the same payloads, so a
+/// scan that knew only the first missed a failed call on two of the three
+/// capture formats.
+const FAILING_EXIT_STATUS_MARKERS: &[&str] = &["exit code", "exited with code", "exit status"];
+
+/// Whether any reported exit status carries a non-zero value.
+///
+/// A zero status is the success spelling a passing command's output routinely
 /// carries ("60 passing (exit code 0)"), and Anthropic's `is_error` is
 /// optional while `content` may be a plain string, so that success spelling
 /// reaches the bare-text scan with no explicit flag to vouch for it — the
 /// bare `exit code` substring flagged it. Only a non-zero status is a failure
-/// signal; the status may be separated by spaces, a colon, or an equals sign.
+/// signal; the status may be separated by spaces, a colon, or an equals sign,
+/// and more than one wording reports it.
 fn mentions_failing_exit_code(lower: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(found) = lower[search_from..].find("exit code") {
-        let after = &lower[search_from + found + "exit code".len()..];
-        let status = after.trim_start_matches([' ', ':', '=']);
-        if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
-            return true;
+    FAILING_EXIT_STATUS_MARKERS.iter().any(|marker| {
+        let mut search_from = 0;
+        while let Some(found) = lower[search_from..].find(marker) {
+            let after = &lower[search_from + found + marker.len()..];
+            let status = after.trim_start_matches([' ', ':', '=']);
+            if status.starts_with(|c: char| c.is_ascii_digit() && c != '0') {
+                return true;
+            }
+            search_from += found + marker.len();
         }
-        search_from += found + "exit code".len();
-    }
-    false
+        false
+    })
 }
 
 fn tool_response_failure_text(value: &serde_json::Value) -> Option<String> {
@@ -2650,6 +2693,73 @@ mod tests {
                 "a non-zero exit status must keep the failure signal: {payload}"
             );
             assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+    }
+
+    /// The exit-status and HTTP-status-line signals the grader and the
+    /// grounding classifier read are read here too, so one stored payload
+    /// cannot be a `tool_failure` finding in one reader and a clean result
+    /// here. Before this scan learned them, a failed fetch that printed
+    /// `HTTP/1.1 500` and a command that reported `(Command exited with code
+    /// 2)` scored `tool_use` 0.45 in the grader while the detector recorded no
+    /// interruption for the same bytes.
+    ///
+    /// The `EPERM` prose spelling is absent here on purpose: the
+    /// unauthorized-action scan already reads it and classifies such a refusal
+    /// as `UnauthorizedAction`, which this scan must not override.
+    #[test]
+    fn the_sibling_failure_spellings_are_read_here_too() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "running the command".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("stop".to_string()),
+        }];
+
+        for payload in [
+            "make check\n(Command exited with code 2)",
+            "make: *** aborted, exit status 1",
+            "curl -i https://example.test/x\nHTTP/1.1 500 Internal Server Error",
+            "HTTP 502",
+        ] {
+            call.request.messages = vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("toolu-sibling".to_string()),
+                    response: serde_json::json!(payload),
+                }],
+                name: None,
+            }];
+            let events = detector.detect(&call);
+            assert_eq!(
+                events.len(),
+                1,
+                "a failure spelling the siblings read must be a ToolFailure: {payload}"
+            );
+            assert_eq!(events[0].interruption_type, InterruptionType::ToolFailure);
+        }
+
+        // The success spellings of the same shapes stay clean, and so does a
+        // code merely mentioned inside a line rather than opening it.
+        for payload in [
+            "make check\n(Command exited with code 0)",
+            "done\nexit status 0",
+            "HTTP/1.1 200 OK",
+            "retried after HTTP/1.1 503; final attempt HTTP/1.1 200 OK",
+        ] {
+            call.request.messages[0].parts = vec![MessagePart::ToolCallResponse {
+                id: Some("toolu-sibling".to_string()),
+                response: serde_json::json!(payload),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events.is_empty(),
+                "a success spelling is not a failure: {payload}: {events:?}"
+            );
         }
     }
 
