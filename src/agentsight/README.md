@@ -547,6 +547,11 @@ For resource-constrained environments, disable non-essential features and reduce
 
 > With this config: idle RSS ~24–30 MB, with event traffic ~35–40 MB.
 
+## ATIF export
+
+Use `scripts/batch-analyze.py --export-atif DIRECTORY` to save converted Claude/Qoder ATIF locally without invoking an analyzer.
+See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+
 ## Supported LLM Providers
 
 Token parsing supports multiple LLM API formats:
