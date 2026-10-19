@@ -161,6 +161,7 @@ fn text_has_error_signal(text: &str) -> bool {
         || mentions_failing_http_status(text)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
         || lower.contains("command not found")
         || lower.contains("eacces")
         || lower.contains("eperm")
@@ -660,6 +661,7 @@ mod tests {
         for payload in [
             r#"[{"type":"tool_result","content":"open /etc/shadow: EACCES"}]"#,
             r#"[{"type":"tool_result","content":"mount: EPERM"}]"#,
+            r#"[{"type":"tool_result","content":"mount -t tmpfs none /mnt: Operation not permitted"}]"#,
         ] {
             let event = event(None, Some(payload), None);
             assert!(
