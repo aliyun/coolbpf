@@ -190,7 +190,15 @@ pub struct SysomResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
-    /// Response choices
+    /// Response choices.
+    ///
+    /// A cumulative frame may report no choices at all — `null` or the field
+    /// omitted — while still carrying the response id, the same way it may
+    /// send a `null` content or identity mid-call. The SysOM client's own
+    /// reader treats absent or null choices as "this frame carries no
+    /// content"; failing the frame here instead dropped it whole, losing the
+    /// id update it carried.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub choices: Vec<SysomResponseChoice>,
 }
 
@@ -770,5 +778,42 @@ mod tests {
         assert_eq!(tool_use[0].function.name, "read_file");
         assert_eq!(tool_use[0].function.arguments, "{\"path\":\"/tmp/a.txt\"}");
         assert_eq!(resp.choices[0].message.content, "Let me check the file.");
+    }
+
+    /// A closing frame with `"choices": null` still carries the response id;
+    /// failing the frame dropped it whole and the aggregator kept an earlier
+    /// id (or none). The client's own reader treats null choices as "no
+    /// content in this frame", not as a parse error.
+    #[test]
+    fn test_parse_response_sse_null_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last", "choices": null}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// A frame that omits `choices` entirely is the same "no content" case.
+    #[test]
+    fn test_parse_response_sse_missing_choices_keeps_id() {
+        let chunks = serde_json::json!([
+            {"id": "chatcmpl-keep", "choices": [{"message": {"content": "Hello"}}]},
+            {"id": "chatcmpl-last"}
+        ]);
+        let resp = SysomParser::parse_response(&chunks).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-last"));
+        assert_eq!(resp.choices[0].message.content, "Hello");
+    }
+
+    /// The same rule on the non-streaming direct body: a `null` choices
+    /// container parses as "no content" instead of failing the whole call.
+    #[test]
+    fn test_parse_response_non_streaming_null_choices() {
+        let body = serde_json::json!({"id": "chatcmpl-nc", "choices": null});
+        let resp = SysomParser::parse_response(&body).unwrap();
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.id.as_deref(), Some("chatcmpl-nc"));
     }
 }
