@@ -183,6 +183,10 @@ fn default_scan_roots() -> Vec<ScanRoot> {
 /// tenant. Inspect bounded descendants for that canonical marker before
 /// applying the backward-compatible Qoder fallback.
 fn configured_scan_roots(dir: &Path) -> Vec<ScanRoot> {
+    // scan_dirs 可以包含 Hermes 数据库文件，不能将其当作 JSONL 目录反复读取。
+    if dir.is_file() {
+        return Vec::new();
+    }
     if let Some(projects) = standard_claude_projects_root(dir) {
         return vec![claude_scan_root(projects)];
     }
@@ -772,6 +776,16 @@ mod tests {
         assert!(sessions
             .iter()
             .any(|s| s.session_id == UUID_B && s.source == "claude-code"));
+    }
+
+    #[test]
+    fn configured_files_are_not_jsonl_roots() {
+        let base = tmp_projects_dir("file-root");
+        let database = base.join("state.db");
+        std::fs::write(&database, "").unwrap();
+        assert!(configured_scan_roots(&database).is_empty());
+        // 保留尚不存在的目录，使后续创建的会话仍可被发现。
+        assert_eq!(configured_scan_roots(&base.join("later")).len(), 1);
     }
 
     #[test]

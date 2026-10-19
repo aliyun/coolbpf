@@ -1,6 +1,6 @@
-//! Trajectory collector — periodically scans Qoder/QoderWork session
-//! directories, converts JSONL trajectories to ATIF v1.7 and persists them
-//! into a dedicated SQLite database.
+//! Trajectory collector — periodically scans supported local Agent sessions,
+//! converts JSONL or Hermes SQLite state to ATIF v1.7, and persists them into a
+//! dedicated SQLite database.
 //!
 //! Pure user-space (no eBPF, no inotify): the main crate spawns
 //! [`run_collector_loop`] on a named thread when
@@ -10,6 +10,10 @@
 pub mod atif;
 pub mod codex;
 pub mod discovery;
+mod hermes;
+mod hermes_convert;
+#[cfg(test)]
+mod hermes_tests;
 pub mod qoder;
 pub mod store;
 
@@ -33,8 +37,8 @@ use discovery::DiscoveredSession;
 pub struct CollectorConfig {
     /// Seconds between two scan rounds.
     pub scan_interval_secs: u64,
-    /// 可选的会话根目录或 Claude 工作区父目录。
-    /// 未设置时扫描标准目录及 `CLAUDE_CONFIG_DIR`。
+    /// 可选的会话根目录、Claude 工作区父目录或 Hermes 数据库位置。
+    /// 未设置时扫描标准目录及 `CLAUDE_CONFIG_DIR`、`HERMES_HOME`。
     pub scan_dirs: Option<Vec<PathBuf>>,
     /// Retention used to skip already-expired source files during scans.
     pub maintenance: TrajectoryMaintenancePolicy,
@@ -71,6 +75,8 @@ pub fn run_collector_loop(
 /// the rest of the round.
 pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
     let sessions = discovery::discover_sessions(config.scan_dirs.as_deref());
+    let hermes_databases = hermes::discover_state_databases(config.scan_dirs.as_deref());
+    let mut discovered = sessions.len();
     let mut collected = 0usize;
     for session in &sessions {
         match process_session(store, session, config.maintenance.retention_days) {
@@ -84,16 +90,22 @@ pub fn scan_once(store: &TrajectoryStore, config: &CollectorConfig) {
             }
         }
     }
+    for database in &hermes_databases {
+        match hermes::collect_database(store, database, config.maintenance.retention_days) {
+            Ok(outcome) => {
+                discovered += outcome.sessions;
+                collected += outcome.ingested;
+            }
+            Err(error) => log::warn!(
+                "Hermes trajectory collect failed for {}: {error}",
+                database.display()
+            ),
+        }
+    }
     if collected > 0 {
-        log::info!(
-            "Trajectory scan: {collected}/{} session(s) ingested",
-            sessions.len()
-        );
+        log::info!("Trajectory scan: {collected}/{discovered} session(s) ingested");
     } else {
-        log::debug!(
-            "Trajectory scan: {} session(s), none changed",
-            sessions.len()
-        );
+        log::debug!("Trajectory scan: {discovered} session(s), none changed");
     }
 }
 
