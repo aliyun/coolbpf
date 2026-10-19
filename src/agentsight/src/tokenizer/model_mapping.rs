@@ -53,6 +53,7 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o1-pro", "Xenova/gpt-4o");
     m.insert("o3", "Xenova/gpt-4o");
     m.insert("o3-mini", "Xenova/gpt-4o");
+    m.insert("o3-pro", "Xenova/gpt-4o");
     m.insert("o4-mini", "Xenova/gpt-4o");
 
     // ============== Anthropic Models ==============
@@ -525,6 +526,19 @@ mod tests {
                 ("o4-mini", "Xenova/gpt-4o"),
             ]
         );
+    }
+
+    /// `o3-pro` is the third o3 variant and was left out of the table.
+    ///
+    /// tiktoken maps the whole `o3-` prefix to `o200k_base`, and the API also
+    /// echoes the pinned `o3-pro-2025-06-10`, which the snapshot rule strips
+    /// back to this name. Without the entry the model took the unrelated Qwen
+    /// fallback, the exact bug the rest of the family was added for.
+    #[test]
+    fn test_o3_pro_takes_the_o200k_tokenizer() {
+        for name in ["o3-pro", "o3-pro-2025-06-10", "O3-PRO", "openai/o3-pro"] {
+            assert_eq!(map_to_hf_model_id(name), "Xenova/gpt-4o", "{name}");
+        }
     }
 
     #[test]
