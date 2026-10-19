@@ -205,7 +205,14 @@ def prepare_isolated_storage(
 def mounted_storage(storage_directory: Path) -> Iterator[None]:
     """Expose one version's state only inside the runner's mount namespace."""
     command = ["mount", "--bind", str(storage_directory), str(STATE_MOUNT_TARGET)]
-    mounted = subprocess.run(command, capture_output=True, text=True, check=False)
+    mounted = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
     if mounted.returncode != 0:
         detail = (mounted.stderr or mounted.stdout).strip()
         raise RuntimeError(
@@ -219,6 +226,8 @@ def mounted_storage(storage_directory: Path) -> Iterator[None]:
             ["umount", str(STATE_MOUNT_TARGET)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if unmounted.returncode != 0:
@@ -236,7 +245,12 @@ def has_ebpf_privilege(binary: Path) -> bool:
     if not getcap:
         return False
     result = subprocess.run(
-        [getcap, str(binary)], capture_output=True, text=True, check=False
+        [getcap, str(binary)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     fields = result.stdout.lower().split()
     capability_field = fields[-1] if fields else ""

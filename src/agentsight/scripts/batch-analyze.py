@@ -418,6 +418,8 @@ def main():
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=300,
                 )
             except OSError as error:
