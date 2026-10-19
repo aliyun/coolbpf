@@ -158,6 +158,7 @@ fn text_has_error_signal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("traceback")
         || mentions_failing_exit_code(&lower)
+        || mentions_failing_http_status(text)
         || lower.contains("no such file or directory")
         || lower.contains("permission denied")
         || lower.contains("command not found")
@@ -165,6 +166,35 @@ fn text_has_error_signal(text: &str) -> bool {
         || lower.contains("eperm")
         || lower.contains("\"error\"")
         || lower.contains("error:")
+}
+
+/// Whether a line of the payload opens with an HTTP 4xx/5xx status.
+///
+/// A failed fetch reports itself this way when the tool printed the response
+/// headers instead of an error string: a raw response and `curl -i` output
+/// both start `HTTP/1.1 500 …`, and some wrappers drop the version. The
+/// grounding classifier reads exactly this shape (`outcome::http_error_line`)
+/// and grades the call a certain failure, while this scan knew no status-line
+/// signal at all, so the same record scored as a clean tool result and the
+/// root cause could not become a ToolFailure.
+///
+/// The status has to open its line: a payload that merely mentions a code — a
+/// URL, a changelog line, a sentence — is describing something else, the same
+/// anchor the classifier applies.
+fn mentions_failing_http_status(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("HTTP/")
+            .and_then(|after| after.split_once(' ').map(|(_, status)| status))
+            .or_else(|| trimmed.strip_prefix("HTTP "));
+        rest.is_some_and(|status| {
+            let mut digits = status.chars();
+            matches!(digits.next(), Some('4' | '5'))
+                && digits.clone().take(2).all(|c| c.is_ascii_digit())
+                && digits.count() >= 2
+        })
+    })
 }
 
 /// Spellings of a reported process exit status, compared case-insensitively.
@@ -718,6 +748,40 @@ mod tests {
             assert!(
                 !looks_like_tool_failure(&event),
                 "a zero exit status is not a failure: {payload}"
+            );
+        }
+    }
+
+    /// A failed fetch reports itself by printing the response status line,
+    /// with no error string in the body. The grounding classifier reads that
+    /// line (`outcome::http_error_line`) and grades a certain failure, while
+    /// this scan knew no status-line signal: the same record scored as a
+    /// clean tool result and the failure never became a finding.
+    #[test]
+    fn detects_an_http_error_status_line() {
+        for payload in [
+            r#"[{"type":"tool_result","content":"HTTP/1.1 500 Internal Server Error"}]"#,
+            r#"[{"type":"tool_result","content":"HTTP/2 404"}]"#,
+            r#"[{"type":"tool_result","content":"curl -i https://example.test/x\nHTTP/1.1 503 Service Unavailable"}]"#,
+            r#"[{"type":"tool_result","content":"HTTP 502"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                looks_like_tool_failure(&event),
+                "an HTTP error status is a tool failure: {payload}"
+            );
+        }
+
+        // A success status and a code merely mentioned inside a line stay
+        // clean — the classifier applies the same line-start anchor.
+        for payload in [
+            r#"[{"type":"tool_result","content":"HTTP/1.1 200 OK"}]"#,
+            r#"[{"type":"tool_result","content":"retried after HTTP/1.1 503; final attempt HTTP/1.1 200 OK"}]"#,
+        ] {
+            let event = event(None, Some(payload), None);
+            assert!(
+                !looks_like_tool_failure(&event),
+                "a success status is not a failure: {payload}"
             );
         }
     }
