@@ -187,11 +187,45 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// Deserialize a `content` field as its text, accepting both wire shapes.
+///
+/// The native DashScope protocol puts a plain string on the field for
+/// `result_format: text`, and a content-block array for a multimodal turn
+/// (`[{"type":"text","text":…},…]`) — on a request message and on a response
+/// choice alike. Every other reader of the envelope concatenates the block
+/// texts with no separator: the shared native reader in the token extractor,
+/// the chatml reader and `parser::llm`'s request view all do. This typed field
+/// is a `String`, so an array failed the whole body's deserialization instead
+/// of just that one field — the response lost its id and tool calls, the
+/// request lost the entire `llmParamString` decode. Reading the array as its
+/// text keeps the siblings' fields and matches what they count for the same
+/// capture.
+fn content_as_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let content = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match content {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(text)) => text,
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| {
+                // A block carries its text on `text`; the `type` tag is the
+                // block kind, not a constraint on which blocks are read, since
+                // a compatible gateway omits it on a plain text block.
+                block.get("text").and_then(|text| text.as_str())
+            })
+            .collect::<String>(),
+        Some(other) => other.to_string(),
+    })
+}
+
 /// The message part of a SysOM response choice
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysomResponseMessage {
     /// Text content of the response
-    #[serde(default, deserialize_with = "null_as_default")]
+    #[serde(default, deserialize_with = "content_as_text")]
     pub content: String,
 
     /// Tool calls in the response (`tool_use` array, NOT `tool_calls`)
@@ -695,6 +729,26 @@ mod tests {
                 .unwrap_or_else(|| panic!("{body}: the tool call must be kept"));
             assert_eq!(tool_use[0].id, "call_abc123");
         }
+    }
+
+    /// The native protocol puts a multimodal answer's content on
+    /// `choices[].message.content` as a parts array. Every other reader of the
+    /// envelope concatenates the block texts, but `SysomResponseMessage.content`
+    /// is a `String`: the array failed the *whole* response's deserialization,
+    /// so the call recorded no output, and the frame's response id and tool
+    /// calls were dropped with it.
+    #[test]
+    fn test_parse_response_block_array_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [{"type": "text", "text": "这张照片"}, {"type": "text", "text": "里有一只猫"}],
+                    "tool_use": null
+                }
+            }]
+        });
+        let resp = SysomParser::parse_response(&body).expect("a parts-array content must parse");
+        assert_eq!(resp.choices[0].message.content, "这张照片里有一只猫");
     }
 
     /// A provider may omit `index` from its tool_use entries entirely, in
