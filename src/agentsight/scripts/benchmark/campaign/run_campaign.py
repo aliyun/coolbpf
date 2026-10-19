@@ -245,7 +245,12 @@ def has_ebpf_privilege(binary: Path) -> bool:
     if not getcap:
         return False
     result = subprocess.run(
-        [getcap, str(binary)], capture_output=True, text=True, check=False
+        [getcap, str(binary)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     fields = result.stdout.lower().split()
     capability_field = fields[-1] if fields else ""
