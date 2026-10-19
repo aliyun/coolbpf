@@ -765,9 +765,12 @@ impl OpenAIParser {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
-        // The reasoning item's closing event repeats the thinking the same
-        // way, so it is kept aside on the same delta-wins rule.
-        let mut closing_reasoning_text: Option<String> = None;
+        // Reasoning items are kept aside on the same delta-wins rule as the
+        // answer, but unlike it they are not repeats of one another: an
+        // agentic response interleaves a reasoning item with each call it
+        // precedes, and every item carries different thinking. The buffer
+        // therefore accumulates them in arrival order.
+        let mut closing_reasoning_text = String::new();
         let mut saw_reasoning_delta = false;
         let mut reasoning_buf = String::new();
         let mut saw_refusal_delta = false;
@@ -823,7 +826,7 @@ impl OpenAIParser {
                     }
                     if !saw_reasoning_delta {
                         if let Some(text) = Self::closing_reasoning_item_text(chunk) {
-                            closing_reasoning_text = Some(text);
+                            closing_reasoning_text.push_str(&text);
                         }
                     }
                     if !saw_refusal_delta {
@@ -941,9 +944,7 @@ impl OpenAIParser {
             }
         }
         if reasoning_buf.is_empty() {
-            if let Some(text) = closing_reasoning_text {
-                reasoning_buf = text;
-            }
+            reasoning_buf = closing_reasoning_text;
         }
         if refusal_buf.is_empty() {
             if let Some(refusal) = closing_refusal {
@@ -2939,6 +2940,52 @@ mod tests {
             resp.choices[0].message.reasoning_content.as_deref(),
             Some("Think "),
             "a captured reasoning delta supersedes the closing item"
+        );
+    }
+
+    /// An agentic Responses stream interleaves reasoning items with the calls
+    /// they precede, so one response can carry several of them: `reasoning`,
+    /// `function_call`, `reasoning`, `message`. A capture that attached after
+    /// the thinking deltas has only the closing `response.output_item.done`
+    /// events, and they carry different text rather than a repeat of the same
+    /// answer. Keeping the last one dropped the earlier thinking from the
+    /// message view while the token extractor counted every item, so the two
+    /// halves disagreed about the same capture.
+    #[test]
+    fn test_aggregate_responses_sse_keeps_every_closing_reasoning_item() {
+        let chunks = vec![
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_010", "content": [{"type": "reasoning_text", "text": "Check the logs. "}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "function_call", "id": "fc_010", "call_id": "call_010", "name": "read_log", "arguments": "{}"}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_011", "summary": [{"type": "summary_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]}}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r010", "model": "gpt-5", "status": "completed"}}),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("the closing items must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "every closing reasoning item carries different thinking and must be kept"
+        );
+
+        // Accumulating the closing items must not weaken the delta-wins rule:
+        // when the thinking arrived as deltas, the closing items repeat it and
+        // are dropped whatever their number.
+        let with_deltas = vec![
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Check the logs. "}),
+            serde_json::json!({"type": "response.reasoning_text.delta", "delta": "Then retry."}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_012", "content": [{"type": "reasoning_text", "text": "Check the logs. "}]}}),
+            serde_json::json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_013", "content": [{"type": "reasoning_text", "text": "Then retry."}]}}),
+            serde_json::json!({"type": "response.output_text.delta", "delta": "Done"}),
+            serde_json::json!({"type": "response.completed", "response": {"id": "resp_r011", "model": "gpt-5", "status": "completed"}}),
+        ];
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(with_deltas))
+            .expect("the deltas must still aggregate");
+        assert_eq!(
+            resp.choices[0].message.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "delivered deltas supersede every closing reasoning item"
         );
     }
 

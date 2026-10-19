@@ -26,19 +26,25 @@ use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 /// the client executes it before asking again, so the stream completed
 /// normally and must not be treated as truncation.
 fn is_normal_finish(reason: Option<&str>) -> bool {
-    matches!(
-        reason,
-        Some(
-            "stop"
-                | "tool_calls"
-                | "function_call"
-                | "end_turn"
-                | "tool_use"
-                | "stop_sequence"
-                | "pause_turn"
-                | "refusal"
-        )
-    )
+    /// The stop reasons a completed turn may report. Compared ASCII
+    /// case-insensitively: the casing is the provider's, not the protocol's,
+    /// and Gemini spells every one of them in upper case (`STOP`), which the
+    /// detector stored verbatim and then failed to recognise.
+    const NORMAL: &[&str] = &[
+        "stop",
+        "tool_calls",
+        "function_call",
+        "end_turn",
+        "tool_use",
+        "stop_sequence",
+        "pause_turn",
+        "refusal",
+    ];
+    reason.is_some_and(|reason| {
+        NORMAL
+            .iter()
+            .any(|known| reason.eq_ignore_ascii_case(known))
+    })
 }
 
 /// Whether the finish reason indicates a token-limit stop (handled by rule 9).
@@ -46,7 +52,13 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
 /// Both spellings are in use: OpenAI and the DashScope native protocol report
 /// `length`, Anthropic reports `max_tokens`.
 fn is_token_limit_finish(reason: Option<&str>) -> bool {
-    matches!(reason, Some("length" | "max_tokens"))
+    // Gemini reports the same cap as `MAX_TOKENS`; like the normal stop
+    // reasons below it is matched case-insensitively.
+    reason.is_some_and(|reason| {
+        ["length", "max_tokens"]
+            .iter()
+            .any(|known| reason.eq_ignore_ascii_case(known))
+    })
 }
 
 /// Structured error reported inside a `200` SSE body, if any.
@@ -469,7 +481,8 @@ impl InterruptionDetector {
             // a terminal stop reason of its own ("treat the response as
             // truncated"): the answer was cut at the window boundary, not by
             // the stream, so it is a context overflow and not `sse_truncated`.
-            || finish_reason == Some("model_context_window_exceeded")
+            || finish_reason
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("model_context_window_exceeded"))
             // HTTP 413 from some gateways
             || status_code == 413;
 
@@ -646,7 +659,7 @@ impl InterruptionDetector {
 
         // ── 6. SafetyFilter (finish_reason == "content_filter") ───────────────
         // 必须在 LlmError 之前检查：部分厂商对 content_filter 返回 200 + finish_reason
-        if finish_reason == Some("content_filter") {
+        if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("content_filter")) {
             let detail = serde_json::json!({
                 "model": call.model,
                 "finish_reason": "content_filter",
@@ -778,7 +791,7 @@ impl InterruptionDetector {
         // ── 10. Context overflow via finish_reason (200 response, input overflow)
         // 有些模型在输入超出上下文窗口时仍返回 200 + finish_reason="length"。
         // 通过 input_tokens >> max_tokens 启发式判定（input > max_tokens * 4）
-        if finish_reason == Some("length") {
+        if finish_reason.is_some_and(|reason| reason.eq_ignore_ascii_case("length")) {
             if let Some(usage) = &call.token_usage {
                 if let Some(max_tokens) = call.request.max_tokens {
                     // If input tokens are much larger than the output cap, this
@@ -1123,6 +1136,68 @@ mod tests {
         assert_eq!(
             events[0].interruption_type,
             InterruptionType::ContextOverflow
+        );
+    }
+
+    /// Gemini reports every finish reason in upper case (`STOP`, `MAX_TOKENS`,
+    /// `SAFETY`), and `finish_reason` is stored exactly as the wire carried it.
+    /// The detector compared it against lower-case spellings only, so a Gemini
+    /// stream that ended normally matched no normal-stop spelling and rule 8
+    /// reported `sse_truncated` (High) on every completed generation.
+    #[test]
+    fn test_gemini_uppercase_stop_is_a_normal_finish() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 5_000_000_000; // > 1 second min
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "4".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("STOP".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events.is_empty(),
+            "a complete Gemini answer must not report an interruption, got {events:?}"
+        );
+    }
+
+    /// The token-limit spelling is cased by the provider too: Gemini answers
+    /// `MAX_TOKENS` where OpenAI answers `length`. Rule 8 must skip it (rule 9
+    /// owns it) and rule 9 must still fire on the ratio.
+    #[test]
+    fn test_gemini_uppercase_max_tokens_is_a_token_limit() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 5_000_000_000;
+        call.request.max_tokens = Some(4096);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 3900, // 3900/4096 = 0.952 >= 0.95
+            total_tokens: 4900,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "partial".to_string(),
+            }],
+            name: None,
+            finish_reason: Some("MAX_TOKENS".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "an upper-case MAX_TOKENS stop must report TokenLimit, got {events:?}"
         );
     }
 
