@@ -97,7 +97,11 @@ def nm_symbols(binary: str) -> Dict[str, int]:
     ):
         try:
             out = subprocess.check_output(
-                args, stderr=subprocess.DEVNULL, universal_newlines=True
+                args,
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True,
+                encoding="utf-8",
+                errors="replace",
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
             continue
