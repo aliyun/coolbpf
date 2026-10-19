@@ -27,6 +27,8 @@ DEFAULT_DIRS = [
     Path.home() / ".qoder" / "projects",
 ]
 
+_ASCII_ID_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
 # ─── JSONL → ATIF conversion ─────────────────────────────────────────────────
 
 
@@ -96,6 +98,14 @@ def extract_thinking(content) -> Optional[str]:
     return "\n".join(parts) if parts else None
 
 
+def _call_id_keys(identifier: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Index the shared agentsight_atif::same_call_id echo contract."""
+    case_key = ("case", identifier.translate(_ASCII_ID_LOWER))
+    kind = "separated" if "_" in identifier or "-" in identifier else "plain"
+    normalized = "".join(char.lower() for char in identifier if char not in "_-")
+    return case_key, (kind, normalized)
+
+
 def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
     entries = []
@@ -124,6 +134,7 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
 
     steps = []
     tool_call_steps = {}
+    tool_call_aliases = {}
     step_id = 0
 
     for entry in entries:
@@ -157,6 +168,15 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
             for result in tool_results:
                 call_id = result.get("source_call_id")
                 owner = tool_call_steps.get(call_id) if isinstance(call_id, str) else None
+                if owner is None and isinstance(call_id, str):
+                    case_key, (kind, normalized) = _call_id_keys(call_id)
+                    other_kind = "plain" if kind == "separated" else "separated"
+                    matches = tool_call_aliases.get(case_key, set()) | tool_call_aliases.get(
+                        (other_kind, normalized), set()
+                    )
+                    # An exact ID wins; an ambiguous echo must not steal a sibling's result.
+                    if len(matches) == 1:
+                        owner = tool_call_steps[next(iter(matches))]
                 if owner is not None:
                     owner.setdefault("observation", {"results": []})["results"].append(result)
                 else:
@@ -199,6 +219,8 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
                     call_id = call.get("tool_call_id")
                     if isinstance(call_id, str) and call_id:
                         tool_call_steps[call_id] = step
+                        for key in _call_id_keys(call_id):
+                            tool_call_aliases.setdefault(key, set()).add(call_id)
             if thinking:
                 step["reasoning_content"] = thinking[:3000]
 
