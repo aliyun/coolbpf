@@ -75,10 +75,13 @@ def extract_tool_results(content) -> list:
                 result_content = " ".join(
                     b.get("text", "") for b in result_content if isinstance(b, dict)
                 )
-            results.append({
+            result = {
                 "source_call_id": block.get("tool_use_id"),
                 "content": str(result_content)[:2000],  # truncate
-            })
+            }
+            if isinstance(block.get("is_error"), bool):
+                result["extra"] = {"is_error": block["is_error"]}
+            results.append(result)
     return results
 
 
