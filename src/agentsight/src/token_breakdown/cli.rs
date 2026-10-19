@@ -364,7 +364,10 @@ impl AnalyzeChatmlCommand {
         let mut saw_responses_text_delta = false;
         let mut saw_responses_reasoning_delta = false;
         let mut responses_closing_content: Option<String> = None;
-        let mut responses_closing_reasoning: Option<String> = None;
+        // Reasoning items carry different thinking rather than a repeat of
+        // one another (an agentic response interleaves one with each call it
+        // precedes), so they accumulate in arrival order instead of replacing.
+        let mut responses_closing_reasoning = String::new();
 
         /// Answer text of a closing `message` output item, or `None`.
         fn closing_message_item_text(chunk: &serde_json::Value) -> Option<String> {
@@ -584,7 +587,7 @@ impl AnalyzeChatmlCommand {
                             }
                             if !saw_responses_reasoning_delta {
                                 if let Some(text) = closing_reasoning_item_text(&data_json) {
-                                    responses_closing_reasoning = Some(text);
+                                    responses_closing_reasoning.push_str(&text);
                                 }
                             }
                         }
@@ -800,12 +803,8 @@ impl AnalyzeChatmlCommand {
                 }
             }
         }
-        if !saw_responses_reasoning_delta {
-            if let Some(text) = responses_closing_reasoning {
-                if !text.is_empty() {
-                    reasoning_parts.push(text);
-                }
-            }
+        if !saw_responses_reasoning_delta && !responses_closing_reasoning.is_empty() {
+            reasoning_parts.push(responses_closing_reasoning);
         }
 
         let mut tool_calls: Vec<String> = {
@@ -1583,6 +1582,62 @@ mod tests {
         let resp = AnalyzeChatmlCommand::extract_response_from_sse(&only_reasoning);
         assert!(resp.content.is_empty());
         assert_eq!(resp.reasoning_content.as_deref(), Some("thought"));
+    }
+
+    /// An agentic Responses stream interleaves reasoning items with the calls
+    /// they precede, so one response can carry several of them: `reasoning`,
+    /// `function_call`, `reasoning`, `message`. A capture that attached after
+    /// both thinking deltas has only the closing `response.output_item.done`
+    /// events, and they carry different text. Keeping the last one counted
+    /// only the final block as reasoning, so the breakdown under-reported the
+    /// thinking the same capture delivered.
+    #[test]
+    fn sse_responses_keeps_every_closing_reasoning_item() {
+        let events = vec![
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"Check the logs. "}]}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_010","name":"read_log"}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"reasoning","summary":[{"type":"summary_text","text":"Then retry."}]}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Done"}]}}"#,
+            ),
+            sse(r#"{"type":"response.completed","response":{"id":"resp_010"}}"#),
+        ];
+
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&events);
+        assert_eq!(resp.content, vec!["Done".to_string()]);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "every closing reasoning item carries different thinking and must be kept"
+        );
+
+        // Accumulating the closing items must not weaken the delta-wins rule:
+        // when the thinking arrived as deltas, the closing items repeat it and
+        // are dropped whatever their number.
+        let with_deltas = vec![
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"Check the logs. "}"#),
+            sse(r#"{"type":"response.reasoning_text.delta","delta":"Then retry."}"#),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"Check the logs. "}]}}"#,
+            ),
+            sse(
+                r#"{"type":"response.output_item.done","item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"Then retry."}]}}"#,
+            ),
+            sse(r#"{"type":"response.output_text.delta","delta":"Done"}"#),
+            sse(r#"{"type":"response.completed","response":{"id":"resp_011"}}"#),
+        ];
+        let resp = AnalyzeChatmlCommand::extract_response_from_sse(&with_deltas);
+        assert_eq!(
+            resp.reasoning_content.as_deref(),
+            Some("Check the logs. Then retry."),
+            "delivered deltas supersede every closing reasoning item"
+        );
     }
 
     /// The closing events replay what the deltas already delivered; a complete
