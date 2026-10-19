@@ -365,11 +365,26 @@ impl OpenAIParser {
                             // "text", so both must be renamed. This mirrors
                             // the raw parser, which accepts any block with a
                             // `text` field whatever its type.
-                            if matches!(
-                                part.get("type").and_then(|t| t.as_str()),
-                                Some("input_text") | Some("output_text")
-                            ) {
-                                part["type"] = serde_json::json!("text");
+                            // A refused assistant turn replays the answer as a
+                            // part typed `refusal`, keeping the text in
+                            // `refusal`; renaming it the same way gives the
+                            // typed reader the chat shape instead of dropping
+                            // the answer as an unmodeled part.
+                            match part.get("type").and_then(|t| t.as_str()) {
+                                Some("input_text") | Some("output_text") => {
+                                    part["type"] = serde_json::json!("text");
+                                }
+                                Some("refusal") => {
+                                    if part.get("text").is_none() {
+                                        if let Some(refusal) =
+                                            part.get("refusal").and_then(|r| r.as_str())
+                                        {
+                                            part["text"] = serde_json::json!(refusal);
+                                        }
+                                    }
+                                    part["type"] = serde_json::json!("text");
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -2037,6 +2052,56 @@ mod tests {
         assert_eq!(
             resp.choices[0].message.refusal.as_deref(),
             Some("I can't help with that.")
+        );
+    }
+
+    /// A replayed refused assistant turn carries the same `refusal` content
+    /// part in a Responses request. The normalization only renamed the `text`
+    /// tag, so the typed content reader skipped the refusal part and the
+    /// recorded request showed an empty assistant answer.
+    #[test]
+    fn test_parse_request_responses_refusal_part_is_kept() {
+        let json = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "do the thing"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."}
+                ]},
+                {"role": "user", "content": "why not"}
+            ]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("Responses request must parse");
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[1].role, MessageRole::Assistant);
+        assert_eq!(
+            request.messages[1]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "I can't help with that.",
+            "a replayed refusal part must survive typed normalization"
+        );
+
+        // A part that carries its own `text` keeps it: renaming the type must
+        // not move the text out from under a provider that spells both.
+        let with_text = serde_json::json!({
+            "model": "gpt-5",
+            "input": [{"role": "assistant", "content": [
+                {"type": "refusal", "text": "kept", "refusal": "I can't"}
+            ]}]
+        });
+        let request =
+            OpenAIParser::parse_request(&with_text).expect("the mixed part must still parse");
+        assert_eq!(
+            request.messages[0]
+                .content
+                .as_ref()
+                .expect("assistant content")
+                .as_text(),
+            "kept"
         );
     }
 
