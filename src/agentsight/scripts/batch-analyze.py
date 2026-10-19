@@ -377,7 +377,7 @@ def main():
 
         # Write ATIF to temp file and run analyze
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="atif-", delete=False
+            mode="w", encoding="utf-8", suffix=".json", prefix="atif-", delete=False
         ) as tmp:
             json.dump(atif, tmp, ensure_ascii=False)
             tmp_path = tmp.name
