@@ -343,6 +343,15 @@ impl OpenAIParser {
             }
         }
 
+        // The chat protocol also admits `stop` as a single string where the
+        // typed field reads an array. Rejecting that spelling failed the whole
+        // typed parse, so the recorded call lost its prompt, its output cap
+        // and its streaming flag. Rewrite it onto the array shape, the same
+        // normalization `normalize_legacy_completion_request` applies.
+        if let Some(serde_json::Value::String(stop)) = body.get("stop").cloned() {
+            body["stop"] = serde_json::json!([stop]);
+        }
+
         match serde_json::from_value::<OpenAIRequest>(body) {
             Ok(request) => {
                 log::debug!(
@@ -1585,6 +1594,44 @@ mod tests {
         let request = OpenAIParser::parse_request(&json).expect("request must still parse");
         assert_eq!(request.max_tokens, None);
         assert_eq!(request.messages.len(), 1);
+    }
+
+    /// Chat's `stop` parameter accepts one sequence as a bare string as well
+    /// as the array the typed field reads. The chat branch rejected the whole
+    /// typed parse on that spelling, so the recorded call lost its prompt, its
+    /// output cap and its streaming flag — the legacy branch already
+    /// normalizes the same shape.
+    #[test]
+    fn test_parse_request_reads_a_string_stop_sequence() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "stop": "\n"
+        });
+
+        let request =
+            OpenAIParser::parse_request(&json).expect("a string stop sequence must still parse");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.max_tokens, Some(100));
+        assert_eq!(request.stop, Some(vec!["\n".to_string()]));
+    }
+
+    /// The array spelling the typed field already reads must pass through the
+    /// normalization untouched.
+    #[test]
+    fn test_parse_request_keeps_an_array_stop_sequence() {
+        let json = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["\n", "User:"]
+        });
+
+        let request = OpenAIParser::parse_request(&json).expect("an array stop must parse");
+        assert_eq!(
+            request.stop,
+            Some(vec!["\n".to_string(), "User:".to_string()])
+        );
     }
 
     #[test]
