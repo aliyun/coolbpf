@@ -67,6 +67,8 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
 /// or answer blocked), `RECITATION` (the answer would reproduce training data
 /// verbatim), `BLOCKLIST` (a blocked term), `PROHIBITED_CONTENT`, `SPII`
 /// (sensitive personally identifiable information) and `IMAGE_SAFETY`.
+/// GLM (Zhipu) rides the OpenAI-compatible protocol and reports content
+/// moderation as `sensitive` — the same meaning in that provider's spelling.
 ///
 /// The others in Gemini's enum are not safety stops and stay out of this list:
 /// `MALFORMED_FUNCTION_CALL` is a tool-call formatting failure, `OTHER` and
@@ -83,6 +85,7 @@ fn is_safety_stop_reason(reason: Option<&str>) -> bool {
         "prohibited_content",
         "spii",
         "image_safety",
+        "sensitive",
     ];
     reason.is_some_and(|reason| {
         SAFETY
@@ -1350,6 +1353,40 @@ mod tests {
                  SseTruncated, got {events:?}"
             );
         }
+    }
+
+    /// GLM (Zhipu) rides the OpenAI-compatible protocol and reports a content
+    /// moderation stop as finish_reason `sensitive`. It matched no list, so an
+    /// SSE 200 stream fell through to rule 8 and reported `sse_truncated`
+    /// (high) — the exact mislabel the Gemini safety family was fixed for.
+    /// The stop is the provider's safety policy, not the transport: rule 6
+    /// owns it, and the detail keeps the provider's own spelling.
+    #[test]
+    fn test_glm_sensitive_stop_is_a_safety_filter() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("sensitive".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SafetyFilter),
+            "a GLM sensitive stop must report SafetyFilter, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "the stream completed; moderation withheld the answer, got {events:?}"
+        );
     }
 
     /// The safety stop is a property of the last choice, like every other
