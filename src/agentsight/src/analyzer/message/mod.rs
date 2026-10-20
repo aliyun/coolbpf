@@ -712,9 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_by_path_with_sse_openai_returns_none() {
-        // The OpenAI parser does not deep-parse SSE arrays — the genai
-        // builder's SSE fallback handles OpenAI streaming instead.
+    fn test_parse_by_path_with_sse_parses_slim_openai() {
+        // The OpenAI parser deep-parses SSE arrays like every other provider
+        // (see the scoping note above). The chunk here is the slim shape
+        // OpenAI-compatible gateways stream — no `object`, `created` or
+        // choice `index` — which used to fail the chunk's deserialization
+        // and made this test's old "returns None" premise hold by accident.
         let parser = MessageParser::new();
         let chunk = serde_json::json!({
             "id": "chatcmpl-123",
@@ -724,7 +727,20 @@ mod tests {
         let events = vec![make_sse_event(&chunk.to_string())];
 
         let result = parser.parse_by_path_with_sse("/v1/chat/completions", None, &events);
-        assert!(result.is_none());
+        let response = match result {
+            Some(ParsedApiMessage::OpenAICompletion {
+                response: Some(response),
+                ..
+            }) => response,
+            other => panic!("a slimmed OpenAI SSE stream must be deep-parsed, got {other:?}"),
+        };
+        let content = response.choices[0]
+            .message
+            .content
+            .as_ref()
+            .expect("the delta text must reach the message");
+        assert_eq!(content.as_text(), "hi".to_string());
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 
     #[test]

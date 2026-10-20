@@ -303,10 +303,18 @@ impl GenAIBuilder {
     /// as provider `unknown` — while the audit labels the same path `gemini`
     /// through `MessageParser::detect_provider`, so one call had two
     /// identities.
+    ///
+    /// The bare spacings the row gate admits (`/chat/completions`,
+    /// `/completions`, which is what a gateway whose base URL carries no
+    /// `/v1` requests) are admitted here for the same reason: the deep parse
+    /// accepts them, so a bare-path call whose body never parsed must not fall
+    /// through to the token record and end up `unknown`.
     pub(super) fn extract_provider_from_path(&self, path: &str) -> Option<String> {
         if path.contains("anthropic") || path.contains("/v1/messages") {
             Some("anthropic".to_string())
-        } else if path.contains("/v1/chat/completions")
+        } else if path.contains("/chat/completions")
+            || path.contains("/completions")
+            || path.contains("/v1/chat/completions")
             || path.contains("/v1/completions")
             || path.contains("/v1/responses")
         {
@@ -872,6 +880,33 @@ mod tests {
             Some("sysom".to_string())
         );
         assert_eq!(builder.extract_provider_from_path("/unknown"), None);
+    }
+
+    /// The row gate (`parser::llm::is_llm_api_path`) and the deep parse
+    /// (`MessageParser::detect_provider`) both admit the bare spellings a
+    /// gateway whose base URL carries no `/v1` requests. This map did not, so
+    /// a bare-path call whose body never parsed — a truncated capture — had no
+    /// provider left except the token record, and fell through to `unknown`
+    /// while the audit row for the same call said openai.
+    #[test]
+    fn test_extract_provider_from_path_bare_spellings() {
+        let builder = GenAIBuilder::new();
+        for path in [
+            "/chat/completions",
+            "/completions",
+            "https://gw.internal/chat/completions",
+        ] {
+            assert_eq!(
+                crate::analyzer::message::MessageParser::detect_provider(path),
+                Some("openai"),
+                "{path} is a detected provider"
+            );
+            assert_eq!(
+                builder.extract_provider_from_path(path),
+                Some("openai".to_string()),
+                "{path} is detected as openai but the genai row labels it otherwise"
+            );
+        }
     }
 
     /// Native protocol calls used to fall through to `"unknown"` (streaming) or

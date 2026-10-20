@@ -298,17 +298,22 @@ def load_captured_incremental(
                 ]
                 if has_id and pending_genai_ids:
                     pending_rows = []
+                    remaining_ids = set(pending_genai_ids)
                     pending_list = sorted(pending_genai_ids)
                     for start in range(0, len(pending_list), 500):
                         chunk = pending_list[start : start + 500]
                         placeholders = ",".join("?" for _ in chunk)
-                        pending_rows.extend(
+                        refreshed = list(
                             connection.execute(
                                 f"SELECT id, {', '.join(selected)} "
                                 f"FROM genai_events WHERE id IN ({placeholders})",
                                 chunk,
                             )
                         )
+                        pending_rows.extend(refreshed)
+                        remaining_ids.difference_update(row[0] for row in refreshed)
+                    # Retention-deleted rows cannot receive a later completion.
+                    next_pending_ids.difference_update(remaining_ids)
                     rows.extend(pending_rows)
                 for row in rows:
                     row_id = int(row[0]) if row[0] is not None else None

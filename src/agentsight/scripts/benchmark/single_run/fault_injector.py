@@ -10,6 +10,7 @@ import ssl
 import time
 from pathlib import Path
 
+from collect_metrics import read_status
 
 def tls_socket(host: str, port: int, timeout: float) -> ssl.SSLSocket:
     """Open an unverified TLS socket to the local benchmark server."""
@@ -91,7 +92,7 @@ def health_check(host: str, port: int, timeout: float) -> bool:
 
 def process_alive(pid: int | None) -> bool | None:
     """Return process liveness, or None when no process is being watched."""
-    return Path(f"/proc/{pid}").exists() if pid else None
+    return bool(read_status(pid)) if pid else None
 
 
 def inject(

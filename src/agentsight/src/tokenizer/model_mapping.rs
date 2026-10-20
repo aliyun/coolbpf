@@ -34,6 +34,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-4-turbo-preview", "Xenova/gpt-4");
     m.insert("gpt-4o", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini", "Xenova/gpt-4o");
+    // The gpt-4o audio and realtime models. tiktoken's prefix table — the
+    // ground truth the block below cites — routes everything under `gpt-4o-`
+    // to `o200k_base`, the encoding `Xenova/gpt-4o` carries, but the table
+    // keyed only the bare chat names, so the audio and realtime names took
+    // the unrelated Qwen fallback. The dated forms
+    // (`gpt-4o-audio-preview-2024-12-17`) strip back to these bare names.
+    m.insert("gpt-4o-audio-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-audio-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-realtime-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-realtime-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-realtime", "Xenova/gpt-4o");
     m.insert("gpt-4-32k", "Xenova/gpt-4");
     m.insert("gpt-4-vision-preview", "Xenova/gpt-4");
 
@@ -55,6 +66,11 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o3-mini", "Xenova/gpt-4o");
     m.insert("o3-pro", "Xenova/gpt-4o");
     m.insert("o4-mini", "Xenova/gpt-4o");
+    // The deep-research variants of the same family, which the rule above
+    // covers as well: tiktoken maps the whole `o3-` and `o4-mini-` prefixes
+    // to `o200k_base`.
+    m.insert("o3-deep-research", "Xenova/gpt-4o");
+    m.insert("o4-mini-deep-research", "Xenova/gpt-4o");
 
     // The chat families tiktoken also maps to o200k_base. Its prefix table
     // lists `gpt-5`, `gpt-4.1-`, `gpt-4.5-` and `chatgpt-4o-` beside the
@@ -172,6 +188,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // tokenizes it with the Qwen3.5 tokenizer instead.
     m.insert("qwen3.8-max", "Qwen/Qwen3.8-2.4T-A95B");
 
+    // DashScope `qwen3.6-plus` is the name the analyzer's own fixtures carry
+    // as real traffic. No Qwen3.6 open release is verifiable offline, so it
+    // pins the same newest open release of the family that the qwen3.8-max
+    // entry pins, instead of silently taking the Qwen3.5 fallback (and the
+    // `dashscope/` gateway spelling passing through as a bogus Hub repo).
+    m.insert("qwen3.6-plus", "Qwen/Qwen3.8-2.4T-A95B");
+
     // ============== DeepSeek Models ==============
     m.insert("deepseek-chat", "deepseek-ai/DeepSeek-V3");
     m.insert("deepseek-coder", "deepseek-ai/DeepSeek-Coder-V2-Instruct");
@@ -261,6 +284,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("chatglm3-6b", FALLBACK_HF_MODEL_ID);
     m.insert("chatglm-turbo", "THUDM/glm-4-9b-chat-hf");
     m.insert("chatglm_pro", "THUDM/glm-4-9b-chat-hf");
+    // The current Zhipu API names. The section's rule demands a repo that
+    // publishes tokenizer.json; no transformers-native GLM-4.5/4.6 release
+    // could be verified offline, so they follow the section's existing
+    // convention and take the one GLM repo the table already loads — the
+    // same approximation `chatglm-turbo` takes.
+    m.insert("glm-4.5", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.5-air", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.5-flash", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.6", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4-plus", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4-flash", "THUDM/glm-4-9b-chat-hf");
 
     // ============== Baichuan Models ==============
     // The Baichuan repos ship only a sentencepiece tokenizer.model, which
@@ -289,6 +323,16 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-k2.5-128k", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("kimi-k2.5-longcontext", "Qwen/Qwen2.5-7B-Instruct");
 
+    // The K2 generation the Anthropic-protocol gateways serve: the bare
+    // `kimi-k2` and the dated/turbo preview names. None was in the table, so
+    // a bare name took the Qwen fallback while the `moonshot/` gateway
+    // spelling passed through as a bogus Hub repo, recording no tokens. They
+    // take the same Qwen2.5 approximation the K2.5 entries use.
+    m.insert("kimi-k2", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-0711-preview", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-0905-preview", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-turbo-preview", "Qwen/Qwen2.5-7B-Instruct");
+
     // Legacy Kimi models
     m.insert("kimi-v1", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("kimi-v1-8k", "Qwen/Qwen2.5-7B-Instruct");
@@ -304,6 +348,19 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-1.5-pro", "unsloth/gemma-2-9b-it");
     m.insert("gemini-1.5-flash", "unsloth/gemma-2-9b-it");
     m.insert("gemini-2.0-flash", "unsloth/gemma-2-9b-it");
+    // The Gemini 2.5 generation, which the analyzer already sees as real
+    // traffic: the token parser's fixtures carry modelVersion
+    // `gemini-2.5-flash` and the genai builder reads a generativelanguage
+    // body with model `gemini-2.5-pro`, while `gemini-flash-latest` is the
+    // alias that always points at the current Flash. None was in the table,
+    // so a bare name took the unrelated Qwen fallback and the `google/`- and
+    // `gemini/`-prefixed spellings passed through as nonexistent Hub repos,
+    // recording no tokens. They take the same approximation as the family
+    // above.
+    m.insert("gemini-2.5-pro", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-flash-latest", "unsloth/gemma-2-9b-it");
 
     // ============== Gemma Models (Google) ==============
     // `google/gemma-2b-it` and `google/gemma-7b-it` keep their gated repos:
@@ -442,7 +499,8 @@ const API_VENDOR_PREFIXES: [&str; 8] = [
 ];
 
 /// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`], then the same
-/// lookup for the name without its snapshot date, then the Claude family.
+/// lookup for the name without its snapshot date or Google generation
+/// suffix, then the Claude family.
 fn lookup_mapping(model_name: &str) -> Option<&'static str> {
     lookup_exact(model_name)
         .or_else(|| without_snapshot_date(model_name).and_then(lookup_exact))
@@ -474,14 +532,22 @@ fn lookup_exact(model_name: &str) -> Option<&'static str> {
 }
 
 /// The model name without a trailing snapshot date: `-YYYYMMDD` (Anthropic,
-/// `claude-3-7-sonnet-20250219`) or `-YYYY-MM-DD` (OpenAI,
-/// `gpt-4o-2024-08-06`). The APIs accept and echo these pinned IDs, so a
-/// client that pins a snapshot sends the dated name while the table keys the
-/// model by its alias. `None` when the name carries no such suffix.
+/// `claude-3-7-sonnet-20250219`), `-YYYY-MM-DD` (OpenAI,
+/// `gpt-4o-2024-08-06`) or Google's 3-digit generation suffix
+/// (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`). The APIs accept and echo
+/// these pinned IDs, so a client that pins a snapshot sends the dated name
+/// while the table keys the model by its alias. `None` when the name carries
+/// no such suffix.
 fn without_snapshot_date(model_name: &str) -> Option<&str> {
     let digits = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_digit());
     let (stem, last) = model_name.rsplit_once('-')?;
     if digits(last, 8) {
+        return Some(stem);
+    }
+    // generativelanguage traffic names the generations with a 3-digit
+    // suffix (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`), so those names
+    // missed even the existing entries of the family.
+    if digits(last, 3) {
         return Some(stem);
     }
     let (stem, month) = stem.rsplit_once('-')?;
@@ -551,24 +617,31 @@ mod tests {
     /// repo for any of them, so an unmapped name took the unrelated Qwen
     /// fallback. tiktoken maps `o1-`, `o3-` and `o4-mini-` to `o200k_base`,
     /// the encoding `Xenova/gpt-4o` carries, so each one takes that repo.
-    /// The bare `o4` is not a model — the mini variant is the only o4 name.
+    /// The bare `o4` is not a model — the mini variant is the only o4 name —
+    /// and the deep-research variants sit under those same prefixes.
     #[test]
     fn test_o_series_names_take_the_o200k_tokenizer() {
-        // Collect every name before asserting so one run reports all four,
-        // not just the first one that still falls through.
-        let resolved: Vec<(&str, &str)> = ["o1-pro", "o3", "o3-mini", "o4-mini"]
+        // Collect every name before asserting so one run reports all of
+        // them, not just the first one that still falls through.
+        let names = [
+            "o1-pro",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "o3-deep-research",
+            "o3-deep-research-2025-06-26",
+            "o4-mini-deep-research",
+            "openai/o3-deep-research",
+        ];
+        let resolved: Vec<(&str, &str)> = names
             .into_iter()
             .map(|name| (name, map_to_hf_model_id(name)))
             .collect();
-        assert_eq!(
-            resolved,
-            [
-                ("o1-pro", "Xenova/gpt-4o"),
-                ("o3", "Xenova/gpt-4o"),
-                ("o3-mini", "Xenova/gpt-4o"),
-                ("o4-mini", "Xenova/gpt-4o"),
-            ]
-        );
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
     }
 
     /// `o3-pro` is the third o3 variant and was left out of the table.
@@ -590,7 +663,9 @@ mod tests {
     /// `chatgpt-4o-` to `o200k_base`, beside the reasoning prefixes, but none
     /// of them was in this table: each name took the unrelated Qwen fallback
     /// instead of the repo that carries that encoding. The snapshot forms are
-    /// pinned too because the API echoes them.
+    /// pinned too because the API echoes them. Everything under `gpt-4o-`
+    /// routes the same way, which covers the audio and realtime models the
+    /// table only keyed by its bare `gpt-4o` / `gpt-4o-mini` names.
     #[test]
     fn test_o200k_chat_families_take_the_o200k_tokenizer() {
         // Collect every name before asserting so one run reports all of them.
@@ -605,6 +680,14 @@ mod tests {
             "chatgpt-4o",
             "chatgpt-4o-latest",
             "openai/gpt-5",
+            "gpt-4o-audio-preview",
+            "gpt-4o-audio-preview-2024-12-17",
+            "gpt-4o-mini-audio-preview",
+            "gpt-4o-realtime-preview",
+            "gpt-4o-realtime-preview-2024-10-01",
+            "gpt-4o-mini-realtime-preview",
+            "gpt-4o-mini-realtime",
+            "openai/gpt-4o-audio-preview",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
@@ -780,6 +863,14 @@ mod tests {
         assert_eq!(map_to_hf_model_id("qwen-plus"), "Qwen/Qwen2.5-14B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen-max"), "Qwen/Qwen2.5-72B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen3.8-max"), "Qwen/Qwen3.8-2.4T-A95B");
+        // The DashScope name the analyzer's own fixtures carry as real
+        // traffic, and the gateway spelling that passed through as a bogus
+        // Hub repo ID before the entry.
+        assert_eq!(map_to_hf_model_id("qwen3.6-plus"), "Qwen/Qwen3.8-2.4T-A95B");
+        assert_eq!(
+            map_to_hf_model_id("dashscope/qwen3.6-plus"),
+            "Qwen/Qwen3.8-2.4T-A95B"
+        );
         assert_eq!(
             map_to_hf_model_id("qwen2.5-7b-instruct"),
             "Qwen/Qwen2.5-7B-Instruct"
@@ -999,6 +1090,10 @@ mod tests {
             ("gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
             ("gemini-1.5-flash", "unsloth/gemma-2-9b-it"),
             ("gemini-2.0-flash", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it"),
+            ("gemini-flash-latest", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
@@ -1010,11 +1105,17 @@ mod tests {
     /// list when a new production model is observed.
     #[test]
     fn test_production_models_resolve_via_table() {
-        // Convert to a slice + loop when a second production model is observed.
-        assert!(
-            MODEL_MAPPING.get("qwen3.8-max").is_some(),
-            "production model qwen3.8-max must be mapped explicitly"
-        );
+        for name in [
+            "qwen3.8-max",
+            "qwen3.6-plus",
+            "glm-4.5",
+            "kimi-k2-0711-preview",
+        ] {
+            assert!(
+                MODEL_MAPPING.get(name).is_some(),
+                "production model {name} must be mapped explicitly"
+            );
+        }
     }
 
     /// These are real API model names, so they are looked up explicitly. Every
@@ -1028,6 +1129,10 @@ mod tests {
             "moonshot-v1-32k",
             "moonshot-v1-128k",
             "moonshot-v1",
+            "kimi-k2",
+            "kimi-k2-0711-preview",
+            "kimi-k2-0905-preview",
+            "kimi-k2-turbo-preview",
         ] {
             let mapped = map_to_hf_model_id(name);
             assert!(
@@ -1035,6 +1140,12 @@ mod tests {
                 "{name} maps to {mapped:?}, which is not a valid HF repo ID"
             );
         }
+        // The `moonshot/` gateway spelling resolves through the table too,
+        // instead of passing through as a bogus Hub repo ID.
+        assert_eq!(
+            map_to_hf_model_id("moonshot/kimi-k2-0711-preview"),
+            "Qwen/Qwen2.5-7B-Instruct"
+        );
     }
 
     #[test]
@@ -1050,7 +1161,8 @@ mod tests {
     /// one sends the dated name (Claude Code sends `claude-...-YYYYMMDD`) while
     /// the table keys the model by its alias. Those names missed the table and
     /// took the unrelated Qwen fallback; they resolve like their alias, and a
-    /// dated key the table holds itself still wins.
+    /// dated key the table holds itself still wins. Google's 3-digit
+    /// generation suffix (`gemini-2.5-pro-002`) resolves the same way.
     #[test]
     fn test_snapshot_dates_resolve_like_the_alias() {
         for (name, repo) in [
@@ -1065,10 +1177,21 @@ mod tests {
                 "Xenova/claude-tokenizer",
             ),
             ("claude-3-opus-20240229", "Xenova/claude-tokenizer"),
+            // Google's generation suffix, beside the alias it pins.
+            ("gemini-2.0-flash-001", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro-002", "unsloth/gemma-2-9b-it"),
+            // The gateway spellings of the 2.5 generation.
+            ("google/gemini-2.5-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini/gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
-        // Only a whole date is a snapshot suffix.
+        // Only a whole date is a snapshot suffix, and only three whole digits
+        // are a generation suffix.
+        assert_eq!(
+            without_snapshot_date("gemini-2.0-flash-001"),
+            Some("gemini-2.0-flash")
+        );
         assert_eq!(without_snapshot_date("gpt-4o-0806"), None);
         assert_eq!(without_snapshot_date("model-2024-8-06"), None);
         assert_eq!(without_snapshot_date("gpt-4o"), None);
@@ -1133,9 +1256,22 @@ mod tests {
     /// (remote-code tokenizers over a `tokenizer.model`), so mapping to them
     /// failed `register_from_hf` on every call; the GLM-4 names take the
     /// `-hf` release that ships one, and ChatGLM3 the fallback that loads.
+    /// The current Zhipu API names (GLM-4.5, GLM-4.6 and the glm-4 aliases)
+    /// follow the same convention, per the section's rule.
     #[test]
     fn test_glm_names_take_a_loadable_tokenizer() {
-        for name in ["glm-4-9b-chat", "glm-4", "chatglm-turbo", "chatglm_pro"] {
+        for name in [
+            "glm-4-9b-chat",
+            "glm-4",
+            "chatglm-turbo",
+            "chatglm_pro",
+            "glm-4.5",
+            "glm-4.5-air",
+            "glm-4.5-flash",
+            "glm-4.6",
+            "glm-4-plus",
+            "glm-4-flash",
+        ] {
             assert_eq!(map_to_hf_model_id(name), "THUDM/glm-4-9b-chat-hf", "{name}");
         }
         assert_eq!(map_to_hf_model_id("chatglm3-6b"), "Qwen/Qwen3.5-397B-A17B");
