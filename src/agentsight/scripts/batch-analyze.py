@@ -376,6 +376,7 @@ def export_files(args: argparse.Namespace) -> None:
 def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path]:
     """Find JSONL conversation files in given directories."""
     files = []
+    seen = set()
     for d in dirs:
         if not d.exists():
             continue
@@ -384,13 +385,18 @@ def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path
             if "subagent" in str(f):
                 continue
             try:
-                if f.stat().st_size >= min_size:
-                    files.append(f)
-            except OSError:
+                canonical = f.resolve(strict=True)
+                if canonical in seen:
+                    continue
+                metadata = f.stat()
+                if metadata.st_size >= min_size:
+                    seen.add(canonical)
+                    files.append((metadata.st_mtime, f))
+            except (OSError, RuntimeError):
                 continue
     # Sort by modification time (newest first)
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    return files
+    files.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in files]
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
