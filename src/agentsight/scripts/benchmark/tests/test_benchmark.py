@@ -2403,8 +2403,9 @@ def test_final_report_summarizes_headline_improvements(tmp_path: Path) -> None:
     assert comparison["metrics"]["rss_avg_mb"]["delta_pct"] == -20
     report = (tmp_path / "final-report.md").read_text(encoding="utf-8")
     assert "AgentSight baseline/optimized 全量测试报告" in report
-    assert "CPU 占用降低" in report
-    assert "内存占用降低" in report
+    assert "CPU 占用降低" not in report
+    assert "内存占用降低" not in report
+    assert result["optimization_claim_allowed"] is False
     assert "+50.00%" in report
     assert "-25.00%" in report
     assert "x86_64" in report
