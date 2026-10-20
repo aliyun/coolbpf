@@ -1132,12 +1132,16 @@ impl OpenAIParser {
 
     /// Fold one wire tool call into the accumulator slot it names.
     ///
+    /// The key is `(choice index, tool-call index)`: OpenAI defines the
+    /// tool-call index per choice, so two choices naming their call index 0
+    /// are two different calls.
+    ///
     /// `whole` marks a cumulative frame's call: its id, name and arguments
     /// replace the slot's values instead of extending them, because the frame
     /// repeats the complete call rather than a fragment of it.
     fn merge_tool_call(
-        tool_call_map: &mut std::collections::HashMap<u32, (String, String, String)>,
-        idx: u32,
+        tool_call_map: &mut std::collections::HashMap<(u32, u32), (String, String, String)>,
+        idx: (u32, u32),
         tc: &serde_json::Value,
         whole: bool,
     ) {
@@ -1181,8 +1185,10 @@ impl OpenAIParser {
         let mut refusal_parts: Vec<String> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut first_chunk: Option<&serde_json::Value> = None;
-        // Merge tool_call deltas by index: index -> (id, name, arguments_accumulated)
-        let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+        // Merge tool_call deltas by (choice, index): the wire index is scoped
+        // to its choice, so every choice starts its calls at index 0 and the
+        // key must carry both or two choices' calls fold into one slot.
+        let mut tool_call_map: HashMap<(u32, u32), (String, String, String)> = HashMap::new();
         // Slot each choice is currently extending, for index-less compatible
         // streams whose call boundary is not on the wire.
         let mut current_slot: HashMap<u32, u32> = HashMap::new();
@@ -1236,7 +1242,12 @@ impl OpenAIParser {
                                 );
                                 continue;
                             }
-                            Self::merge_tool_call(&mut tool_call_map, idx as u32, tc, true);
+                            Self::merge_tool_call(
+                                &mut tool_call_map,
+                                (choice.index, idx as u32),
+                                tc,
+                                true,
+                            );
                         }
                     }
                     if let Some(content) = &choice.delta.content {
@@ -1288,10 +1299,16 @@ impl OpenAIParser {
                                         .and_then(|v| v.as_str())
                                         .is_some_and(|name| !name.is_empty());
                                     if starts_call {
+                                        // Allocate within the current choice,
+                                        // so a second choice's first call
+                                        // does not extend the first choice's
+                                        // last slot.
                                         tool_call_map
                                             .keys()
+                                            .filter(|(choice_idx, _)| *choice_idx == choice.index)
+                                            .map(|(_, slot)| u64::from(*slot))
                                             .max()
-                                            .map_or(0, |slot| u64::from(*slot).saturating_add(1))
+                                            .map_or(0, |slot| slot.saturating_add(1))
                                     } else {
                                         u64::from(
                                             current_slot.get(&choice.index).copied().unwrap_or(0),
@@ -1307,7 +1324,12 @@ impl OpenAIParser {
                             }
                             let idx = idx as u32;
                             current_slot.insert(choice.index, idx);
-                            Self::merge_tool_call(&mut tool_call_map, idx, tc, false);
+                            Self::merge_tool_call(
+                                &mut tool_call_map,
+                                (choice.index, idx),
+                                tc,
+                                false,
+                            );
                         }
                     }
                     // Legacy function_call delta: the pre-`tool_calls`
@@ -1328,8 +1350,14 @@ impl OpenAIParser {
                             entry.1.push_str(args);
                         }
                     }
-                    if finish_reason.is_none() && choice.finish_reason.is_some() {
-                        finish_reason = choice.finish_reason.clone();
+                    // The last non-null value is decisive: a multi-choice
+                    // stream finishes each choice on its own chunk, and every
+                    // other reader (the interruption detector, the drain
+                    // merger) reads the last one. Keeping the first reported
+                    // an earlier choice's `stop` for a call whose final choice
+                    // was cut.
+                    if let Some(reason) = choice.finish_reason.as_ref() {
+                        finish_reason = Some(reason.clone());
                     }
                 }
             }
@@ -1339,7 +1367,7 @@ impl OpenAIParser {
         let tool_calls = if tool_call_map.is_empty() {
             None
         } else {
-            let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
+            let mut sorted_indices: Vec<(u32, u32)> = tool_call_map.keys().cloned().collect();
             sorted_indices.sort();
             let merged: Vec<serde_json::Value> = sorted_indices
                 .into_iter()
@@ -3126,8 +3154,12 @@ mod tests {
     /// the thinking deltas has only the closing `response.output_item.done`
     /// events, and they carry different text rather than a repeat of the same
     /// answer. Keeping the last one dropped the earlier thinking from the
-    /// message view while the token extractor counted every item, so the two
-    /// halves disagreed about the same capture.
+    /// message view.
+    ///
+    /// Both views lost it: the token extractor's `merge_response_output_text`
+    /// applied the same last-wins replacement to a closing reasoning item, so
+    /// the two halves agreed on the wrong answer rather than disagreeing. Each
+    /// reader now accumulates its own closing items.
     #[test]
     fn test_aggregate_responses_sse_keeps_every_closing_reasoning_item() {
         let chunks = vec![
@@ -3596,6 +3628,171 @@ mod tests {
         assert_eq!(
             tc[1]["function"]["arguments"].as_str().unwrap(),
             "{\"path\":\"/tmp/b.md\"}"
+        );
+    }
+
+    /// OpenAI defines `tool_calls[].index` per choice: every choice starts at
+    /// 0. Keying the slot only by that wire index folded a second choice's
+    /// call into the first choice's slot, so the aggregated message reported
+    /// one call made of two different names and spliced argument fragments.
+    #[test]
+    fn test_aggregate_sse_chunks_keeps_each_choices_tool_calls_apart() {
+        let chunk = |choice: u32, tc: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-2",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": choice, "delta": {"tool_calls": [tc]}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                0,
+                serde_json::json!({"index": 0, "id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                1,
+                serde_json::json!({"index": 0, "id": "call_b", "function": {"name": "write_file", "arguments": "{\"path\":"}}),
+                None,
+            ),
+            chunk(
+                0,
+                serde_json::json!({"index": 0, "function": {"arguments": "\"/tmp/a.md\"}"}}),
+                None,
+            ),
+            chunk(
+                1,
+                serde_json::json!({"index": 0, "function": {"arguments": "\"/tmp/b.md\"}"}}),
+                Some("tool_calls"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "each choice's index 0 is a different call: {tc:?}"
+        );
+        let rendered: Vec<(String, String)> = tc
+            .iter()
+            .map(|call| {
+                (
+                    call["function"]["name"].as_str().unwrap_or("").to_string(),
+                    call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            rendered.contains(&(
+                "read_file".to_string(),
+                "{\"path\":\"/tmp/a.md\"}".to_string()
+            )),
+            "choice 0's call must keep its own arguments: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&(
+                "write_file".to_string(),
+                "{\"path\":\"/tmp/b.md\"}".to_string()
+            )),
+            "choice 1's call must keep its own arguments: {rendered:?}"
+        );
+    }
+
+    /// The same per-choice scoping applies to the snapshot shape: a gateway
+    /// that closes with a whole `message` per choice repeats each choice's
+    /// call, and both choices name their call index 0.
+    #[test]
+    fn test_aggregate_sse_chunks_snapshots_keep_each_choices_tool_calls_apart() {
+        let snapshot = |choice: u32, id: &str, name: &str, path: &str| {
+            serde_json::json!({
+                "id": "chatcmpl-3",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{
+                    "index": choice,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": path}
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })
+        };
+        let chunks = vec![
+            snapshot(0, "call_a", "read_file", "{\"path\":\"/tmp/a.md\"}"),
+            snapshot(1, "call_b", "write_file", "{\"path\":\"/tmp/b.md\"}"),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        let tc = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls");
+
+        assert_eq!(
+            tc.len(),
+            2,
+            "each choice's snapshot is a different call: {tc:?}"
+        );
+        assert_eq!(tc[0]["function"]["name"].as_str().unwrap(), "read_file");
+        assert_eq!(tc[1]["function"]["name"].as_str().unwrap(), "write_file");
+    }
+
+    /// A multi-choice stream finishes each choice on its own chunk. Keeping the
+    /// *first* non-null finish reason therefore reports an earlier choice's
+    /// `stop` for a call whose last choice was cut by the safety filter — the
+    /// same "last is decisive" rule the interruption detector and the drain
+    /// merger follow.
+    #[test]
+    fn test_aggregate_sse_chunks_reads_the_last_choices_finish_reason() {
+        let chunk = |choice: u32, finish: &str| {
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": choice, "delta": {"content": "x"}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(0, "stop"),
+            serde_json::json!({
+                "id": "chatcmpl-4",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "compat-model",
+                "choices": [{"index": 1, "delta": {"content": "y"}, "finish_reason": null}]
+            }),
+            chunk(1, "content_filter"),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason.as_deref(),
+            Some("content_filter"),
+            "the last choice's finish reason is decisive, not the first"
         );
     }
 }

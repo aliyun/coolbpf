@@ -21,7 +21,7 @@ import tempfile
 from collections import abc, deque
 from io import StringIO
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, Iterator, List, Optional
 
 # ─── Directories to scan ──────────────────────────────────────────────────────
 
@@ -137,26 +137,35 @@ def usage_to_metrics(usage) -> dict:
     return metrics
 
 
+def _read_entries(filepath: Path) -> Iterator[dict]:
+    """Decode one record at a time so ignored metadata is not retained."""
+    with open(filepath, "r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                yield parsed
+
+
 def jsonl_to_atif(filepath: Path) -> Optional[dict]:
     """Convert a Claude/Qoder conversation JSONL to ATIF v1.7 dict."""
-    entries = []
+    entries = _read_entries(filepath)
     try:
-        with open(filepath, "r", encoding="utf-8-sig", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                # json.loads also accepts scalars and arrays; only objects
-                # carry event fields, so anything else is skipped exactly like
-                # a decode error instead of aborting the whole batch.
-                if isinstance(parsed, dict):
-                    entries.append(parsed)
+        return _entries_to_atif(entries, filepath)
     except OSError:
+        # A late read error must not expose a partially converted trajectory.
         return None
+    finally:
+        entries.close()
+
+
+def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
+    """Keep only output steps and the call/usage state needed to correlate them."""
 
     # Extract session_id
     session_id = filepath.stem

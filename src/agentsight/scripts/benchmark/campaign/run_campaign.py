@@ -387,11 +387,16 @@ class TracerProcess:
         self.log: TextIO | None = None
 
     def __enter__(self) -> int:
+        try:
+            return self._start()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self) -> int:
         log_path = Path(self.version["log_file"])
         metrics_path = (
-            Path(self.version["metrics_file"])
-            if self.version.get("metrics_file")
-            else None
+            Path(self.version["metrics_file"]) if self.version.get("metrics_file") else None
         )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if metrics_path is not None:
@@ -484,6 +489,13 @@ class BenchmarkServer:
         self.log: TextIO | None = None
 
     def __enter__(self) -> Self:
+        try:
+            return self._start()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self) -> Self:
         self.runtime.mkdir(parents=True, exist_ok=True)
         certificate = self.runtime / "server.crt"
         key = self.runtime / "server.key"
