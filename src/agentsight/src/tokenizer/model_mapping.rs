@@ -34,6 +34,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-4-turbo-preview", "Xenova/gpt-4");
     m.insert("gpt-4o", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini", "Xenova/gpt-4o");
+    // The gpt-4o audio and realtime models. tiktoken's prefix table — the
+    // ground truth the block below cites — routes everything under `gpt-4o-`
+    // to `o200k_base`, the encoding `Xenova/gpt-4o` carries, but the table
+    // keyed only the bare chat names, so the audio and realtime names took
+    // the unrelated Qwen fallback. The dated forms
+    // (`gpt-4o-audio-preview-2024-12-17`) strip back to these bare names.
+    m.insert("gpt-4o-audio-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-audio-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-realtime-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-realtime-preview", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-realtime", "Xenova/gpt-4o");
     m.insert("gpt-4-32k", "Xenova/gpt-4");
     m.insert("gpt-4-vision-preview", "Xenova/gpt-4");
 
@@ -55,6 +66,11 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("o3-mini", "Xenova/gpt-4o");
     m.insert("o3-pro", "Xenova/gpt-4o");
     m.insert("o4-mini", "Xenova/gpt-4o");
+    // The deep-research variants of the same family, which the rule above
+    // covers as well: tiktoken maps the whole `o3-` and `o4-mini-` prefixes
+    // to `o200k_base`.
+    m.insert("o3-deep-research", "Xenova/gpt-4o");
+    m.insert("o4-mini-deep-research", "Xenova/gpt-4o");
 
     // The chat families tiktoken also maps to o200k_base. Its prefix table
     // lists `gpt-5`, `gpt-4.1-`, `gpt-4.5-` and `chatgpt-4o-` beside the
@@ -573,24 +589,31 @@ mod tests {
     /// repo for any of them, so an unmapped name took the unrelated Qwen
     /// fallback. tiktoken maps `o1-`, `o3-` and `o4-mini-` to `o200k_base`,
     /// the encoding `Xenova/gpt-4o` carries, so each one takes that repo.
-    /// The bare `o4` is not a model — the mini variant is the only o4 name.
+    /// The bare `o4` is not a model — the mini variant is the only o4 name —
+    /// and the deep-research variants sit under those same prefixes.
     #[test]
     fn test_o_series_names_take_the_o200k_tokenizer() {
-        // Collect every name before asserting so one run reports all four,
-        // not just the first one that still falls through.
-        let resolved: Vec<(&str, &str)> = ["o1-pro", "o3", "o3-mini", "o4-mini"]
+        // Collect every name before asserting so one run reports all of
+        // them, not just the first one that still falls through.
+        let names = [
+            "o1-pro",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "o3-deep-research",
+            "o3-deep-research-2025-06-26",
+            "o4-mini-deep-research",
+            "openai/o3-deep-research",
+        ];
+        let resolved: Vec<(&str, &str)> = names
             .into_iter()
             .map(|name| (name, map_to_hf_model_id(name)))
             .collect();
-        assert_eq!(
-            resolved,
-            [
-                ("o1-pro", "Xenova/gpt-4o"),
-                ("o3", "Xenova/gpt-4o"),
-                ("o3-mini", "Xenova/gpt-4o"),
-                ("o4-mini", "Xenova/gpt-4o"),
-            ]
-        );
+        let expected: Vec<(&str, &str)> = names
+            .into_iter()
+            .map(|name| (name, "Xenova/gpt-4o"))
+            .collect();
+        assert_eq!(resolved, expected);
     }
 
     /// `o3-pro` is the third o3 variant and was left out of the table.
@@ -612,7 +635,9 @@ mod tests {
     /// `chatgpt-4o-` to `o200k_base`, beside the reasoning prefixes, but none
     /// of them was in this table: each name took the unrelated Qwen fallback
     /// instead of the repo that carries that encoding. The snapshot forms are
-    /// pinned too because the API echoes them.
+    /// pinned too because the API echoes them. Everything under `gpt-4o-`
+    /// routes the same way, which covers the audio and realtime models the
+    /// table only keyed by its bare `gpt-4o` / `gpt-4o-mini` names.
     #[test]
     fn test_o200k_chat_families_take_the_o200k_tokenizer() {
         // Collect every name before asserting so one run reports all of them.
@@ -627,6 +652,14 @@ mod tests {
             "chatgpt-4o",
             "chatgpt-4o-latest",
             "openai/gpt-5",
+            "gpt-4o-audio-preview",
+            "gpt-4o-audio-preview-2024-12-17",
+            "gpt-4o-mini-audio-preview",
+            "gpt-4o-realtime-preview",
+            "gpt-4o-realtime-preview-2024-10-01",
+            "gpt-4o-mini-realtime-preview",
+            "gpt-4o-mini-realtime",
+            "openai/gpt-4o-audio-preview",
         ];
         let resolved: Vec<(&str, &str)> = names
             .into_iter()
