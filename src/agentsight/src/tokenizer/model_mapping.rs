@@ -45,6 +45,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gpt-4o-realtime-preview", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini-realtime-preview", "Xenova/gpt-4o");
     m.insert("gpt-4o-mini-realtime", "Xenova/gpt-4o");
+    // The speech models. tiktoken routes the whole `gpt-4o-` prefix to
+    // `o200k_base`, which these names fall under, so they carry the same
+    // encoding as the chat model; without the entries the transcription and
+    // TTS traffic took the unrelated Qwen fallback.
+    m.insert("gpt-4o-transcribe", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-transcribe", "Xenova/gpt-4o");
+    m.insert("gpt-4o-mini-tts", "Xenova/gpt-4o");
     m.insert("gpt-4-32k", "Xenova/gpt-4");
     m.insert("gpt-4-vision-preview", "Xenova/gpt-4");
 
@@ -627,6 +634,24 @@ mod tests {
             ("o1-preview", "Xenova/gpt-4o"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
+        }
+    }
+
+    /// The gpt-4o speech models. tiktoken maps the whole `gpt-4o-` prefix to
+    /// `o200k_base`, which `Xenova/gpt-4o` carries, but the table keyed only
+    /// the chat and realtime names, so transcription and TTS traffic took the
+    /// unrelated Qwen fallback and its tokens were counted with the wrong
+    /// vocabulary.
+    #[test]
+    fn test_gpt_4o_speech_models_take_the_o200k_tokenizer() {
+        for name in [
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-mini-tts",
+            "gpt-4o-transcribe-2025-03-20",
+            "openai/gpt-4o-mini-tts",
+        ] {
+            assert_eq!(map_to_hf_model_id(name), "Xenova/gpt-4o", "{name}");
         }
     }
 
