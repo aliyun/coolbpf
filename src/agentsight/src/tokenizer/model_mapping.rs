@@ -304,6 +304,19 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-1.5-pro", "unsloth/gemma-2-9b-it");
     m.insert("gemini-1.5-flash", "unsloth/gemma-2-9b-it");
     m.insert("gemini-2.0-flash", "unsloth/gemma-2-9b-it");
+    // The Gemini 2.5 generation, which the analyzer already sees as real
+    // traffic: the token parser's fixtures carry modelVersion
+    // `gemini-2.5-flash` and the genai builder reads a generativelanguage
+    // body with model `gemini-2.5-pro`, while `gemini-flash-latest` is the
+    // alias that always points at the current Flash. None was in the table,
+    // so a bare name took the unrelated Qwen fallback and the `google/`- and
+    // `gemini/`-prefixed spellings passed through as nonexistent Hub repos,
+    // recording no tokens. They take the same approximation as the family
+    // above.
+    m.insert("gemini-2.5-pro", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-flash-latest", "unsloth/gemma-2-9b-it");
 
     // ============== Gemma Models (Google) ==============
     // `google/gemma-2b-it` and `google/gemma-7b-it` keep their gated repos:
@@ -442,7 +455,8 @@ const API_VENDOR_PREFIXES: [&str; 8] = [
 ];
 
 /// Exact, then case-insensitive, lookup in [`MODEL_MAPPING`], then the same
-/// lookup for the name without its snapshot date, then the Claude family.
+/// lookup for the name without its snapshot date or Google generation
+/// suffix, then the Claude family.
 fn lookup_mapping(model_name: &str) -> Option<&'static str> {
     lookup_exact(model_name)
         .or_else(|| without_snapshot_date(model_name).and_then(lookup_exact))
@@ -474,14 +488,22 @@ fn lookup_exact(model_name: &str) -> Option<&'static str> {
 }
 
 /// The model name without a trailing snapshot date: `-YYYYMMDD` (Anthropic,
-/// `claude-3-7-sonnet-20250219`) or `-YYYY-MM-DD` (OpenAI,
-/// `gpt-4o-2024-08-06`). The APIs accept and echo these pinned IDs, so a
-/// client that pins a snapshot sends the dated name while the table keys the
-/// model by its alias. `None` when the name carries no such suffix.
+/// `claude-3-7-sonnet-20250219`), `-YYYY-MM-DD` (OpenAI,
+/// `gpt-4o-2024-08-06`) or Google's 3-digit generation suffix
+/// (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`). The APIs accept and echo
+/// these pinned IDs, so a client that pins a snapshot sends the dated name
+/// while the table keys the model by its alias. `None` when the name carries
+/// no such suffix.
 fn without_snapshot_date(model_name: &str) -> Option<&str> {
     let digits = |s: &str, len: usize| s.len() == len && s.bytes().all(|b| b.is_ascii_digit());
     let (stem, last) = model_name.rsplit_once('-')?;
     if digits(last, 8) {
+        return Some(stem);
+    }
+    // generativelanguage traffic names the generations with a 3-digit
+    // suffix (`gemini-2.0-flash-001`, `gemini-2.5-pro-002`), so those names
+    // missed even the existing entries of the family.
+    if digits(last, 3) {
         return Some(stem);
     }
     let (stem, month) = stem.rsplit_once('-')?;
@@ -999,6 +1021,10 @@ mod tests {
             ("gemini-1.5-pro", "unsloth/gemma-2-9b-it"),
             ("gemini-1.5-flash", "unsloth/gemma-2-9b-it"),
             ("gemini-2.0-flash", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it"),
+            ("gemini-flash-latest", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
@@ -1050,7 +1076,8 @@ mod tests {
     /// one sends the dated name (Claude Code sends `claude-...-YYYYMMDD`) while
     /// the table keys the model by its alias. Those names missed the table and
     /// took the unrelated Qwen fallback; they resolve like their alias, and a
-    /// dated key the table holds itself still wins.
+    /// dated key the table holds itself still wins. Google's 3-digit
+    /// generation suffix (`gemini-2.5-pro-002`) resolves the same way.
     #[test]
     fn test_snapshot_dates_resolve_like_the_alias() {
         for (name, repo) in [
@@ -1065,10 +1092,21 @@ mod tests {
                 "Xenova/claude-tokenizer",
             ),
             ("claude-3-opus-20240229", "Xenova/claude-tokenizer"),
+            // Google's generation suffix, beside the alias it pins.
+            ("gemini-2.0-flash-001", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro-002", "unsloth/gemma-2-9b-it"),
+            // The gateway spellings of the 2.5 generation.
+            ("google/gemini-2.5-pro", "unsloth/gemma-2-9b-it"),
+            ("gemini/gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
-        // Only a whole date is a snapshot suffix.
+        // Only a whole date is a snapshot suffix, and only three whole digits
+        // are a generation suffix.
+        assert_eq!(
+            without_snapshot_date("gemini-2.0-flash-001"),
+            Some("gemini-2.0-flash")
+        );
         assert_eq!(without_snapshot_date("gpt-4o-0806"), None);
         assert_eq!(without_snapshot_date("model-2024-8-06"), None);
         assert_eq!(without_snapshot_date("gpt-4o"), None);
