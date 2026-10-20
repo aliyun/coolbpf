@@ -1788,6 +1788,40 @@ mod tests {
         assert!(response.is_none());
     }
 
+    /// OpenAI-compatible gateways slim the response body: GLM's
+    /// `/api/paas/v4/chat/completions` returns `{id, choices, created, model,
+    /// request_id}` with no `object`. The identity fields are metadata the
+    /// record can live without, but a required one failed the whole
+    /// deserialization and `parse_response` dropped the response — the call
+    /// looked empty and lost its finish reason and usage.
+    #[test]
+    fn test_parse_response_slim_compatible_body_without_object() {
+        let json = serde_json::json!({
+            "id": "1097830983179126888",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "created": 1_778_000_000u64,
+            "model": "glm-4.7",
+            "request_id": "req-42",
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+        });
+
+        let resp = OpenAIParser::parse_response(&json).expect("a slimmed body must still parse");
+        assert_eq!(resp.id, "1097830983179126888");
+        assert_eq!(resp.model, "glm-4.7");
+        assert_eq!(resp.choices.len(), 1);
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello"),
+            other => panic!("the answer must survive the slim body: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = resp.usage.expect("the usage must survive the slim body");
+        assert_eq!(usage.total_tokens, 4);
+    }
+
     /// `/v1/completions` is an admitted LLM path, but its answer rides
     /// `choices[].text` instead of a `message` object. `OpenAIChoice.message`
     /// is a required field, so the whole response failed to deserialize and
@@ -3317,6 +3351,43 @@ mod tests {
                 assert_eq!(text, "The capital of France is Paris.")
             }
             other => panic!("the streamed fragments must reach the message: {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// OpenAI-compatible gateways slim their SSE chunks the same way they slim
+    /// the plain body: GLM streams `{id, model, choices}` with no `object`,
+    /// `created` or choice `index`. A required identity field failed the
+    /// chunk's deserialization, the aggregation silently skipped every chunk
+    /// (`if let Ok`), and the stream looked empty — an `empty_response` false
+    /// positive with no finish reason.
+    #[test]
+    fn test_aggregate_sse_chunks_slim_compatible_chunks() {
+        let chunks = vec![
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {"role": "assistant", "content": "Hello"}, "finish_reason": null}]
+            }),
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {"content": " world"}, "finish_reason": null}]
+            }),
+            serde_json::json!({
+                "id": "1097830983179126888",
+                "model": "glm-4.7",
+                "choices": [{"delta": {}, "finish_reason": "stop"}]
+            }),
+        ];
+
+        let resp = OpenAIParser::parse_response(&serde_json::Value::Array(chunks))
+            .expect("a slimmed stream must still aggregate");
+        assert_eq!(resp.id, "1097830983179126888");
+        assert_eq!(resp.model, "glm-4.7");
+        match resp.choices[0].message.content.as_ref() {
+            Some(OpenAIContent::Text(text)) => assert_eq!(text, "Hello world"),
+            other => panic!("the slimmed chunks must keep their delta text: {other:?}"),
         }
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
     }

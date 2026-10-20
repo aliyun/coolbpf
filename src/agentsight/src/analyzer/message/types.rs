@@ -124,18 +124,30 @@ pub struct OpenAIRequest {
 /// OpenAI Chat Completions API response body
 ///
 /// Reference: https://platform.openai.com/docs/api-reference/chat/object
+///
+/// The identity fields are optional because compatible gateways slim the
+/// body down to what they have: GLM's `/api/paas/v4/chat/completions`
+/// returns `{id, choices, created, model, request_id}` with no `object`. A
+/// required identity field failed the whole deserialization, so the
+/// recorded response was dropped whole — no output message, no finish
+/// reason, no usage. `choices` stays required: an OpenAI response without
+/// choices is not slim, it is broken.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIResponse {
     /// Unique completion ID
+    #[serde(default)]
     pub id: String,
 
     /// Object type (always "chat.completion")
+    #[serde(default)]
     pub object: String,
 
     /// Unix timestamp of creation
+    #[serde(default)]
     pub created: u64,
 
     /// Model used for the completion
+    #[serde(default)]
     pub model: String,
 
     /// List of completion choices
@@ -581,15 +593,26 @@ impl AnthropicUsage {
 ///
 /// Each SSE event in an OpenAI streaming response contains a chunk
 /// with delta updates instead of complete messages.
+///
+/// The identity fields are optional because compatible gateways slim the
+/// event down to what they have, the same way they slim the plain body
+/// (see [`OpenAIResponse`]): a required field failed the whole event's
+/// deserialization, so the aggregation silently skipped every chunk and
+/// the stream looked empty. `choices` stays required — a chunk without
+/// choices carries nothing to aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiSseChunk {
     /// Unique completion ID
+    #[serde(default)]
     pub id: String,
     /// Object type (usually "chat.completion.chunk")
+    #[serde(default)]
     pub object: String,
     /// Unix timestamp of creation
+    #[serde(default)]
     pub created: u64,
     /// Model used for the completion
+    #[serde(default)]
     pub model: String,
     /// List of chunk choices with deltas
     pub choices: Vec<OpenAiSseChoice>,
@@ -602,6 +625,10 @@ pub struct OpenAiSseChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiSseChoice {
     /// Index of the choice
+    ///
+    /// Slimmed compatible streams omit it — their stream carries a single
+    /// choice, so the index defaults to that one slot.
+    #[serde(default)]
     pub index: u32,
     /// Delta content (incremental update)
     ///
