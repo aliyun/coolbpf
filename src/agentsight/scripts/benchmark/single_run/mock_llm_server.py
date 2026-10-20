@@ -297,17 +297,18 @@ class BenchmarkHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 128
 
-    def process_request(self, request: socket.socket, client_address: Any) -> None:
-        """Route ALPN-negotiated HTTP/2 connections to the h2 event loop."""
-        if request.selected_alpn_protocol() == "h2":
-            thread = threading.Thread(
-                target=serve_h2,
-                args=(request, self.settings, self.verbose),  # type: ignore[attr-defined]
-                daemon=True,
-            )
-            thread.start()
-        else:
-            super().process_request(request, client_address)
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        """Keep slow handshakes off the accept loop and dispatch after ALPN."""
+        try:
+            if isinstance(request, ssl.SSLSocket):
+                request.do_handshake()
+            if request.selected_alpn_protocol() == "h2":
+                serve_h2(request, self.settings, self.verbose)
+                return
+        except OSError:
+            self.shutdown_request(request)
+            return
+        super().process_request_thread(request, client_address)
 
 
 def serve_h2(sock: socket.socket, settings: Any, verbose: bool) -> None:
@@ -516,7 +517,9 @@ def main() -> int:
         context.set_alpn_protocols(["h2", "http/1.1"])
     else:
         context.set_alpn_protocols(["http/1.1"])
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(
+        server.socket, server_side=True, do_handshake_on_connect=False
+    )
     print(f"mock LLM server listening on https://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
