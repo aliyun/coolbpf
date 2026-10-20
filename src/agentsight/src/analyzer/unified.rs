@@ -113,9 +113,15 @@ fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> 
 /// label: Gemini's `:generateContent` path falls through to this counter
 /// whenever its terminal `usageMetadata` was not captured, and mapping it to
 /// OpenAI made the token row disagree with the audit and genai rows for the
-/// same call. Anything the parser does not recognise stays OpenAI, which is
-/// what an unrecognised completion path speaks.
+/// same call. The DashScope/Bailian native protocol is the fourth such case:
+/// its path family is not one of the message parser's providers, but the genai
+/// row already labels it `dashscope`, so a native call counted here must not
+/// claim to be OpenAI. Anything else stays OpenAI, which is what an
+/// unrecognised completion path speaks.
 fn manual_provider_from_path(path: &str) -> &'static str {
+    if crate::parser::llm::is_dashscope_native_path(path) {
+        return "dashscope";
+    }
     match crate::analyzer::message::MessageParser::detect_provider(path) {
         Some("anthropic") => "anthropic",
         Some("sysom") => "sysom",
@@ -1402,6 +1408,27 @@ mod tests {
                 "{path} is detected as gemini but the manual counter labels it otherwise"
             );
         }
+    }
+
+    /// The native DashScope path family is not one of the message parser's
+    /// providers, but the genai row labels it `dashscope`. A native stream
+    /// whose usage was not captured is counted by the manual counter, which
+    /// used to label it openai — the same two-identities drift as the Gemini
+    /// arm, one protocol further out.
+    #[test]
+    fn manual_provider_names_the_dashscope_native_family() {
+        for path in [
+            "/api/v1/services/aigc/text-generation/generation",
+            "/api/v1/services/aigc/multimodal-generation/generation",
+        ] {
+            assert_eq!(manual_provider_from_path(path), "dashscope", "{path}");
+        }
+        // An OpenAI-compatible completion path through the same host is not
+        // the native protocol and keeps the OpenAI label.
+        assert_eq!(
+            manual_provider_from_path("/compatible-mode/v1/chat/completions"),
+            "openai"
+        );
     }
 
     #[test]
