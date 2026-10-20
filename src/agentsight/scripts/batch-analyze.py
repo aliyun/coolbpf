@@ -12,6 +12,7 @@ Environment variables (forwarded to analyze binary):
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -301,6 +302,69 @@ def jsonl_to_atif(filepath: Path) -> Optional[dict]:
 # ─── File discovery ───────────────────────────────────────────────────────────
 
 
+def export_atif(atif: dict, source: Path, directory: Path) -> Path:
+    """Atomically replace the artifact for one canonical source path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    identity = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()
+    target = directory / f"{identity}.atif.json"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, prefix=".atif-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(atif, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return target
+
+
+def export_files(args: argparse.Namespace) -> None:
+    """Run the local export workflow without entering analyzer execution."""
+    if args.file:
+        files = [Path(args.file)]
+    else:
+        dirs = [Path(d).expanduser() for d in args.dir] if args.dir else DEFAULT_DIRS
+        print(f"Scanning directories: {[str(d) for d in dirs]}", file=sys.stderr)
+        files = find_conversation_files(dirs)
+        print(f"Found {len(files)} conversation files", file=sys.stderr)
+    counts = {"exported": 0, "skipped": 0, "failed": 0}
+    for filepath in files[: args.limit]:
+        print(f"\n{'='*60}\nFile: {filepath}", file=sys.stderr)
+        atif = jsonl_to_atif(filepath)
+        if atif is None or len(atif["steps"]) < args.min_steps:
+            print("  SKIP: cannot parse, empty, or fewer than minimum steps", file=sys.stderr)
+            counts["skipped"] += 1
+            continue
+        try:
+            target = export_atif(atif, filepath, Path(args.export_atif).expanduser())
+        except OSError as error:
+            print(f"  FAIL: cannot export ATIF: {error}", file=sys.stderr)
+            counts["failed"] += 1
+            continue
+        print(
+            json.dumps(
+                {
+                    "_source_file": str(filepath),
+                    "_session_id": atif["session_id"],
+                    "_steps": len(atif["steps"]),
+                    "_atif_file": str(target),
+                },
+                ensure_ascii=False,
+            )
+        )
+        print(f"  EXPORTED: {target}", file=sys.stderr)
+        counts["exported"] += 1
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(
+        f"Done: {counts['exported']} exported, {counts['skipped']} skipped, {counts['failed']} failed",
+        file=sys.stderr,
+    )
+
+
 def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path]:
     """Find JSONL conversation files in given directories."""
     files = []
@@ -328,11 +392,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="Batch analyze agent trajectories from ~/.claude and ~/.qoder"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--dim",
-        required=True,
         choices=["perf", "cost", "accuracy"],
         help="Analysis dimension",
+    )
+    mode.add_argument(
+        "--export-atif",
+        metavar="DIRECTORY",
+        help="Export converted ATIF files locally without invoking an analyzer",
     )
     parser.add_argument(
         "--dir",
@@ -361,6 +430,12 @@ def main():
         help="Path to analyze binary (default: cargo run -p agentsight-opt --bin analyze)",
     )
     args = parser.parse_args()
+
+    if args.export_atif is not None:
+        if args.binary:
+            parser.error("--binary is only supported with --dim")
+        export_files(args)
+        return
 
     # Determine analyze command
     if args.binary:
