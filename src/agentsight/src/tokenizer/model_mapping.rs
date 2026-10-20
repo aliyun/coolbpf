@@ -361,6 +361,14 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-2.5-flash", "unsloth/gemma-2-9b-it");
     m.insert("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it");
     m.insert("gemini-flash-latest", "unsloth/gemma-2-9b-it");
+    // The rest of Google's moving aliases and the preview channel. Each
+    // `-latest` alias names the model its family resolves above, and a
+    // preview ID is the same generation behind the preview name; leaving them
+    // out sent all of them to the unrelated Qwen fallback.
+    m.insert("gemini-pro-latest", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-flash-lite-latest", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-pro-preview", "unsloth/gemma-2-9b-it");
+    m.insert("gemini-2.5-flash-preview", "unsloth/gemma-2-9b-it");
 
     // ============== Gemma Models (Google) ==============
     // `google/gemma-2b-it` and `google/gemma-7b-it` keep their gated repos:
@@ -1094,6 +1102,10 @@ mod tests {
             ("gemini-2.5-flash", "unsloth/gemma-2-9b-it"),
             ("gemini-2.5-flash-lite", "unsloth/gemma-2-9b-it"),
             ("gemini-flash-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-pro-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-flash-lite-latest", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-pro-preview", "unsloth/gemma-2-9b-it"),
+            ("gemini-2.5-flash-preview", "unsloth/gemma-2-9b-it"),
         ] {
             assert_eq!(map_to_hf_model_id(name), repo, "{name}");
         }
