@@ -97,6 +97,8 @@ def read_status(pid: int) -> dict[str, int]:
         if not separator:
             continue
         first = remainder.strip().split(maxsplit=1)[0] if remainder.strip() else ""
+        if key == "State" and first in {"Z", "X", "x"}:
+            return {}
         if key in {"VmRSS", "VmHWM", "VmSize", "Threads"}:
             try:
                 values[key] = int(first)
