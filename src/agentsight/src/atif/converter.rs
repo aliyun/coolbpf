@@ -722,6 +722,23 @@ fn flatten_result_content(payload: &serde_json::Value) -> String {
     }
 }
 
+/// The keys an error envelope can carry its reason under, tried in order when
+/// unwrapping a flagged tool result.
+///
+/// `content` is the common spelling and stays first. The rest are what the
+/// twin readers of the same payload already scan — the interruption detector's
+/// `tool_response_failure_text` reads `error`, `message`, `content`,
+/// `response` and `details`; the grader's `tool_response_has_error_signal`
+/// reads `response`, `content`, `error` and `output` — so an MCP result that
+/// reports `{"error":"grep: …","is_error":true}` exports its reason as text
+/// for every consumer, not as the serialised object that defeats a classifier
+/// matching lines that start with an error token. A key holding `null` is
+/// skipped, and an envelope with none of these keys falls back to the whole
+/// response, which is the previous rendering.
+const ERROR_ENVELOPE_KEYS: &[&str] = &[
+    "content", "error", "message", "output", "response", "details",
+];
+
 /// Scan input messages for ToolCallResponse parts, matching by tool_call_id.
 ///
 /// Role is deliberately not filtered. Agents disagree about where a tool result
@@ -823,8 +840,21 @@ fn collect_tool_responses(
                 // classification looks for lines that *start* with an error
                 // token, and a `{"content":"Error: …` prefix defeats that check
                 // on precisely the results the flag marks as failures.
+                //
+                // The reason text can sit under a key other than `content` —
+                // MCP servers wrap it as `error` or `output` — so every key the
+                // failure readers of the same payload scan is tried in turn:
+                // the detector reads ["error","message","content","response",
+                // "details"] and the grader ["response","content","error",
+                // "output"]. `content` stays first (the common spelling), a
+                // null value is skipped, and an envelope with none of the keys
+                // keeps the whole response as before.
                 let payload = if is_error.is_some() {
-                    envelope.get("content").unwrap_or(response)
+                    ERROR_ENVELOPE_KEYS
+                        .iter()
+                        .filter_map(|key| envelope.get(*key))
+                        .find(|value| !value.is_null())
+                        .unwrap_or(response)
                 } else {
                     response
                 };
@@ -1541,24 +1571,48 @@ pub(crate) mod tests {
     /// result with a clean body was read as a success and stayed in the
     /// evidence pool as grounding evidence, while the interruption detector
     /// and the grader both honour the flag.
+    ///
+    /// A flagged failure can also carry its reason under a key other than
+    /// `content`: MCP servers wrap it as `error` or `output` (the grader scans
+    /// `response`/`content`/`error`/`output`, the detector
+    /// `error`/`message`/`content`/`response`/`details`). The converter
+    /// unwrapped only `content`, so `{"error":"grep: …","is_error":true}`
+    /// reached `classify_call` as the serialised object — the same
+    /// `{"error":"…` punctuation prefix that defeats a line starting with an
+    /// error token.
     #[test]
     fn a_tool_result_flag_spelled_iserror_reaches_the_classifier() {
         use crate::grounding::{evidence::build_index, outcome::CallStatus};
 
-        for (response, flag, expected) in [
+        for (response, flag, expected_content, expected) in [
             (
                 serde_json::json!({"content": "grep: /root/.ssh: no such file or directory", "isError": false}),
                 Some(false),
+                "grep: /root/.ssh: no such file or directory",
                 CallStatus::Ok,
             ),
             (
                 serde_json::json!({"content": "done", "isError": true}),
                 Some(true),
+                "done",
                 CallStatus::Failed,
             ),
             (
                 serde_json::json!({"content": "done", "status": "error"}),
                 Some(true),
+                "done",
+                CallStatus::Failed,
+            ),
+            (
+                serde_json::json!({"error": "grep: no such file or directory", "isError": true}),
+                Some(true),
+                "grep: no such file or directory",
+                CallStatus::Failed,
+            ),
+            (
+                serde_json::json!({"output": "Error: command failed", "is_error": true}),
+                Some(true),
+                "Error: command failed",
                 CallStatus::Failed,
             ),
         ] {
@@ -1592,6 +1646,14 @@ pub(crate) mod tests {
                 doc.steps[2].observation.as_ref().unwrap().results[0].is_error(),
                 flag,
                 "{response}"
+            );
+            assert_eq!(
+                doc.steps[2].observation.as_ref().unwrap().results[0]
+                    .content
+                    .as_ref()
+                    .and_then(|content| content.as_str()),
+                Some(expected_content),
+                "the failure text must be unwrapped, payload {response}"
             );
             let index = build_index(&doc, 0..doc.steps.len());
             assert_eq!(
