@@ -119,12 +119,14 @@ class BatchStreamingTests(unittest.TestCase):
         self.assertIsNone(batch_analyze.jsonl_to_atif(self.path))
 
     def test_conversion_exception_closes_the_reader_before_it_propagates(self) -> None:
-        record = {"type": "assistant", "message": {"content": [{"type": "text", "text": []}]}}
+        record = {"type": "assistant", "message": {"content": "valid text"}}
         stream = io.StringIO(json.dumps(record) + '\n{"type":"mode"}\n')
-        with patch("builtins.open", return_value=stream):
+        with patch("builtins.open", return_value=stream), patch.object(
+            batch_analyze, "extract_text", side_effect=RuntimeError("fixture conversion failure")
+        ):
             try:
                 batch_analyze.jsonl_to_atif(self.path)
-            except TypeError as error:
+            except RuntimeError as error:
                 # Retain the traceback while checking: it holds the converter frame.
                 self.assertIsNotNone(error.__traceback__)
                 self.assertTrue(stream.closed)
