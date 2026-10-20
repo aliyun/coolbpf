@@ -577,6 +577,75 @@ def test_recovery_and_fault_evidence_apply_every_gate(tmp_path: Path) -> None:
     assert fault["failed"] == ["token_accuracy"]
 
 
+@pytest.mark.parametrize(
+    ("scenario", "field"),
+    [
+        ("recovery", "trace_completeness"),
+        ("fault", "http_success_rate"),
+        ("fault", "trace_completeness"),
+        ("fault", "token_accuracy"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("measurement", "verdict"),
+    [
+        pytest.param(json.loads("1e999"), "INCONCLUSIVE", id="positive-infinity"),
+        pytest.param(float("-inf"), "INCONCLUSIVE", id="negative-infinity"),
+        pytest.param(float("nan"), "INCONCLUSIVE", id="nan"),
+        pytest.param(10**1000, "INCONCLUSIVE", id="overflowing-integer"),
+        pytest.param(True, "INCONCLUSIVE", id="boolean"),
+        pytest.param(None, "INCONCLUSIVE", id="missing"),
+        pytest.param("1.0", "INCONCLUSIVE", id="numeric-string"),
+        pytest.param(1.0, "PASS", id="finite-pass"),
+        pytest.param(0.5, "FAIL", id="finite-failure"),
+    ],
+)
+def test_quality_gates_require_usable_measurements(
+    tmp_path: Path, scenario: str, field: str, measurement: Any, verdict: str
+) -> None:
+    measured = summary()
+    measured[field] = measurement
+    if scenario == "recovery":
+        phases = {}
+        for label in campaign_evidence.RECOVERY_PHASES:
+            run_path = tmp_path / label / "run-result.json"
+            phases[label] = (
+                run_path,
+                {
+                    "summary": measured if label == "recover" else summary(),
+                    "evaluation": {"verdict": "PASS"},
+                },
+            )
+            if label == "recover":
+                write_recovery_artifacts(run_path)
+        outcome = campaign_evidence.recovery_outcome(
+            phases,
+            {"tolerance_ratio": 0.1, "recovery_window_seconds": 2},
+            thresholds(),
+        )
+    else:
+        run_path = tmp_path / "fault" / "run-result.json"
+        measurement_dir = run_path.parent / "measurement"
+        measurement_dir.mkdir(parents=True)
+        measurement_dir.joinpath("fault-results.json").write_text(
+            json.dumps(
+                {
+                    "outcomes": {name: {"handled": 1} for name in campaign_evidence.FAULT_CASES},
+                    "server_healthy_after": True,
+                    "process_alive_before": True,
+                    "process_alive_after": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        outcome = campaign_evidence.fault_outcome(
+            run_path, {"summary": measured}, {"repetitions_per_case": 1}, thresholds()
+        )
+    assert outcome["verdict"] == verdict
+    assert outcome["missing"] == ([field] if verdict == "INCONCLUSIVE" else [])
+    assert outcome["failed"] == ([field] if verdict == "FAIL" else [])
+
+
 def test_recovery_evidence_rejects_malformed_references_and_summaries(
     tmp_path: Path,
 ) -> None:

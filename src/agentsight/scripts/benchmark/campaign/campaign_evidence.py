@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from campaign_evaluation import numeric_measurement
+
 # Campaign evidence uses the same percentile calculation as a single run.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
 from benchmark_stats import percentile
@@ -276,7 +278,7 @@ def recovery_outcome(
     ]
     quality_checks = {
         "trace_completeness": (
-            nested(recover, "trace_completeness"),
+            numeric_measurement(nested(recover, "trace_completeness")),
             thresholds["min_trace_completeness"],
         ),
     }
@@ -357,15 +359,15 @@ def fault_outcome(
     summary = run.get("summary", {})
     checks = {
         "http_success_rate": (
-            nested(summary, "http_success_rate"),
+            numeric_measurement(nested(summary, "http_success_rate")),
             thresholds["min_http_success_rate"],
         ),
         "trace_completeness": (
-            nested(summary, "trace_completeness"),
+            numeric_measurement(nested(summary, "trace_completeness")),
             thresholds["min_trace_completeness"],
         ),
         "token_accuracy": (
-            nested(summary, "token_accuracy"),
+            numeric_measurement(nested(summary, "token_accuracy")),
             thresholds["min_token_accuracy"],
         ),
         "process_survived": (nested(summary, "process_survived"), True),
