@@ -265,9 +265,18 @@ impl GenAIBuilder {
             // `gen_ai.request.max_tokens` telemetry keep working.
             // A null legacy `max_tokens` is not a cap and must not stop the
             // search before a newer spelling that carries one.
+            // Gemini adds a fourth, camelCase spelling — `maxOutputTokens`
+            // nested under `generationConfig` — which the `param` helper
+            // cannot reach: it probes keys as spelled at the top level and
+            // under the DashScope `parameters` object only.
             max_tokens: ["max_tokens", "max_completion_tokens", "max_output_tokens"]
                 .iter()
                 .find_map(|key| param(key).and_then(|v| v.as_u64()))
+                .or_else(|| {
+                    obj.get("generationConfig")
+                        .and_then(|cfg| cfg.get("maxOutputTokens"))
+                        .and_then(|v| v.as_u64())
+                })
                 .map(|v| v as u32),
             frequency_penalty: param("frequency_penalty").and_then(|v| v.as_f64()),
             presence_penalty: param("presence_penalty").and_then(|v| v.as_f64()),
@@ -1814,6 +1823,29 @@ mod tests {
         }"#;
         let req = GenAIBuilder::parse_request_body(body).expect("body parses");
         assert_eq!(req.max_tokens, Some(7));
+    }
+
+    /// The Gemini protocol nests its sampling parameters under
+    /// `generationConfig` with camelCase keys; reading only the top level and
+    /// the DashScope `parameters` object left the output cap invisible, so the
+    /// token-limit rules never fired for a stream the provider itself capped
+    /// at `maxOutputTokens`.
+    #[test]
+    fn test_parse_request_body_gemini_generation_config_cap() {
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"maxOutputTokens": 100}
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("gemini body parses");
+        assert_eq!(req.max_tokens, Some(100));
+
+        // Without the cap the request stays uncapped.
+        let body = r#"{
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"temperature": 0.7}
+        }"#;
+        let req = GenAIBuilder::parse_request_body(body).expect("body parses");
+        assert_eq!(req.max_tokens, None);
     }
 
     #[test]
