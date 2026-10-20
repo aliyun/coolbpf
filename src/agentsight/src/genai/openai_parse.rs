@@ -1210,10 +1210,12 @@ impl GenAIBuilder {
         let mut added_indexes: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut orphan_done: Vec<(String, String, String)> = Vec::new();
         // Set by the terminal `response.incomplete` event when the stream was
-        // cut by the output cap, mirroring `aggregate_responses_sse_chunks`;
-        // `response.completed` sets `completed` for the finish fallback below.
+        // cut by the output cap or the safety filter, mirroring
+        // `aggregate_responses_sse_chunks`; `response.completed` sets
+        // `completed` for the finish fallback below.
         let mut completed = false;
         let mut output_capped = false;
+        let mut output_filtered = false;
 
         for chunk in chunks {
             calls.observe(chunk);
@@ -1342,17 +1344,21 @@ impl GenAIBuilder {
                 }
                 // A capped stream terminates with response.incomplete instead
                 // of response.completed; the cap reason must surface as the
-                // chat-completions "length" finish rather than a clean "stop".
+                // chat-completions "length" finish rather than a clean "stop",
+                // and a safety-filter cut as "content_filter" — the same
+                // reason mapping the live parser's aggregator applies.
                 "response.incomplete" => {
                     saw_responses_event = true;
                     if let Some(resp) = chunk.get("response") {
-                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete")
-                            && resp
+                        if resp.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
+                            match resp
                                 .pointer("/incomplete_details/reason")
                                 .and_then(|v| v.as_str())
-                                == Some("max_output_tokens")
-                        {
-                            output_capped = true;
+                            {
+                                Some("max_output_tokens") => output_capped = true,
+                                Some("content_filter") => output_filtered = true,
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -1418,12 +1424,15 @@ impl GenAIBuilder {
         // Same finish-reason convention as the analyzer's aggregator: the
         // terminal event decides. A capped stream is the chat "length"
         // finish — the cap wins even when a tool call was in flight, because
-        // its arguments may be cut mid-JSON — and a stream whose capture
-        // never saw a terminal event at all keeps an unknown finish instead
-        // of a fabricated clean stop, the same None the Anthropic merger
-        // leaves on a missing message_delta.
+        // its arguments may be cut mid-JSON — a filtered one is
+        // "content_filter" in the aggregator's order (cap first), and a
+        // stream whose capture never saw a terminal event at all keeps an
+        // unknown finish instead of a fabricated clean stop, the same None
+        // the Anthropic merger leaves on a missing message_delta.
         let finish_reason = if output_capped {
             Some("length".to_string())
+        } else if output_filtered {
+            Some("content_filter".to_string())
         } else if !completed {
             None
         } else if parts
@@ -2491,6 +2500,56 @@ mod tests {
             MessagePart::Text { content } if content == "partial"
         ));
         assert_eq!(finish.as_deref(), Some("length"));
+    }
+
+    /// A Responses stream the safety policy cut terminates with
+    /// `response.incomplete` and `incomplete_details.reason =
+    /// "content_filter"`, and never sends `response.completed`. The merger
+    /// read only the output-cap reason, so the finish reason stayed None and
+    /// the detector reported `sse_truncated` (high) — a transport failure —
+    /// for a stop the provider itself chose. The live parser's aggregator
+    /// already maps the reason to the chat-completions "content_filter".
+    #[test]
+    fn test_responses_sse_incomplete_content_filter_is_filter() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.incomplete","response":{"id":"resp_f","status":"incomplete","incomplete_details":{"reason":"content_filter"}}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(
+            parts.len(),
+            1,
+            "the deltas delivered before the cut persist"
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "partial"
+        ));
+        assert_eq!(finish.as_deref(), Some("content_filter"));
+    }
+
+    /// The cap reason keeps its "length" mapping, and a stream that ends
+    /// with `response.completed` is untouched by the incomplete arms.
+    #[test]
+    fn test_responses_sse_incomplete_reasons_stay_distinct() {
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"partial"},
+            {"type":"response.incomplete","response":{"id":"resp_c","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}
+        ]"#;
+        let (_, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(finish.as_deref(), Some("length"));
+
+        let body = r#"[
+            {"type":"response.output_text.delta","delta":"done"},
+            {"type":"response.completed","response":{"id":"resp_c","status":"completed"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { content } if content == "done"
+        ));
+        assert_eq!(finish.as_deref(), Some("stop"));
     }
 
     /// A stream whose capture never saw a terminal event (dead-pid drain of
