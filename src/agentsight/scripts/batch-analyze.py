@@ -44,9 +44,11 @@ def extract_text(content, *, include_tool_results: bool = True) -> str:
         for block in content:
             if isinstance(block, dict):
                 if block.get("type") == "text":
-                    parts.append(block.get("text", ""))
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
                 elif block.get("type") == "tool_result" and include_tool_results:
-                    parts.append(block.get("content", ""))
+                    parts.append(extract_text(block.get("content", "")))
             elif isinstance(block, str):
                 parts.append(block)
         return "\n".join(parts)
@@ -78,7 +80,9 @@ def extract_tool_results(content) -> list:
             result_content = block.get("content", "")
             if isinstance(result_content, list):
                 result_content = " ".join(
-                    b.get("text", "") for b in result_content if isinstance(b, dict)
+                    b.get("text", "")
+                    for b in result_content
+                    if isinstance(b, dict) and isinstance(b.get("text", ""), str)
                 )
             result = {
                 "source_call_id": block.get("tool_use_id"),
@@ -97,7 +101,9 @@ def extract_thinking(content) -> Optional[str]:
     parts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") == "thinking":
-            parts.append(block.get("thinking", ""))
+            thinking = block.get("thinking", "")
+            if isinstance(thinking, str):
+                parts.append(thinking)
     return "\n".join(parts) if parts else None
 
 
