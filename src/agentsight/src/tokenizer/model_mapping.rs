@@ -188,6 +188,13 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // tokenizes it with the Qwen3.5 tokenizer instead.
     m.insert("qwen3.8-max", "Qwen/Qwen3.8-2.4T-A95B");
 
+    // DashScope `qwen3.6-plus` is the name the analyzer's own fixtures carry
+    // as real traffic. No Qwen3.6 open release is verifiable offline, so it
+    // pins the same newest open release of the family that the qwen3.8-max
+    // entry pins, instead of silently taking the Qwen3.5 fallback (and the
+    // `dashscope/` gateway spelling passing through as a bogus Hub repo).
+    m.insert("qwen3.6-plus", "Qwen/Qwen3.8-2.4T-A95B");
+
     // ============== DeepSeek Models ==============
     m.insert("deepseek-chat", "deepseek-ai/DeepSeek-V3");
     m.insert("deepseek-coder", "deepseek-ai/DeepSeek-Coder-V2-Instruct");
@@ -277,6 +284,17 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("chatglm3-6b", FALLBACK_HF_MODEL_ID);
     m.insert("chatglm-turbo", "THUDM/glm-4-9b-chat-hf");
     m.insert("chatglm_pro", "THUDM/glm-4-9b-chat-hf");
+    // The current Zhipu API names. The section's rule demands a repo that
+    // publishes tokenizer.json; no transformers-native GLM-4.5/4.6 release
+    // could be verified offline, so they follow the section's existing
+    // convention and take the one GLM repo the table already loads — the
+    // same approximation `chatglm-turbo` takes.
+    m.insert("glm-4.5", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.5-air", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.5-flash", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4.6", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4-plus", "THUDM/glm-4-9b-chat-hf");
+    m.insert("glm-4-flash", "THUDM/glm-4-9b-chat-hf");
 
     // ============== Baichuan Models ==============
     // The Baichuan repos ship only a sentencepiece tokenizer.model, which
@@ -304,6 +322,16 @@ static MODEL_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("kimi-k2.5-32k", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("kimi-k2.5-128k", "Qwen/Qwen2.5-7B-Instruct");
     m.insert("kimi-k2.5-longcontext", "Qwen/Qwen2.5-7B-Instruct");
+
+    // The K2 generation the Anthropic-protocol gateways serve: the bare
+    // `kimi-k2` and the dated/turbo preview names. None was in the table, so
+    // a bare name took the Qwen fallback while the `moonshot/` gateway
+    // spelling passed through as a bogus Hub repo, recording no tokens. They
+    // take the same Qwen2.5 approximation the K2.5 entries use.
+    m.insert("kimi-k2", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-0711-preview", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-0905-preview", "Qwen/Qwen2.5-7B-Instruct");
+    m.insert("kimi-k2-turbo-preview", "Qwen/Qwen2.5-7B-Instruct");
 
     // Legacy Kimi models
     m.insert("kimi-v1", "Qwen/Qwen2.5-7B-Instruct");
@@ -835,6 +863,14 @@ mod tests {
         assert_eq!(map_to_hf_model_id("qwen-plus"), "Qwen/Qwen2.5-14B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen-max"), "Qwen/Qwen2.5-72B-Instruct");
         assert_eq!(map_to_hf_model_id("qwen3.8-max"), "Qwen/Qwen3.8-2.4T-A95B");
+        // The DashScope name the analyzer's own fixtures carry as real
+        // traffic, and the gateway spelling that passed through as a bogus
+        // Hub repo ID before the entry.
+        assert_eq!(map_to_hf_model_id("qwen3.6-plus"), "Qwen/Qwen3.8-2.4T-A95B");
+        assert_eq!(
+            map_to_hf_model_id("dashscope/qwen3.6-plus"),
+            "Qwen/Qwen3.8-2.4T-A95B"
+        );
         assert_eq!(
             map_to_hf_model_id("qwen2.5-7b-instruct"),
             "Qwen/Qwen2.5-7B-Instruct"
@@ -1069,11 +1105,17 @@ mod tests {
     /// list when a new production model is observed.
     #[test]
     fn test_production_models_resolve_via_table() {
-        // Convert to a slice + loop when a second production model is observed.
-        assert!(
-            MODEL_MAPPING.get("qwen3.8-max").is_some(),
-            "production model qwen3.8-max must be mapped explicitly"
-        );
+        for name in [
+            "qwen3.8-max",
+            "qwen3.6-plus",
+            "glm-4.5",
+            "kimi-k2-0711-preview",
+        ] {
+            assert!(
+                MODEL_MAPPING.get(name).is_some(),
+                "production model {name} must be mapped explicitly"
+            );
+        }
     }
 
     /// These are real API model names, so they are looked up explicitly. Every
@@ -1087,6 +1129,10 @@ mod tests {
             "moonshot-v1-32k",
             "moonshot-v1-128k",
             "moonshot-v1",
+            "kimi-k2",
+            "kimi-k2-0711-preview",
+            "kimi-k2-0905-preview",
+            "kimi-k2-turbo-preview",
         ] {
             let mapped = map_to_hf_model_id(name);
             assert!(
@@ -1094,6 +1140,12 @@ mod tests {
                 "{name} maps to {mapped:?}, which is not a valid HF repo ID"
             );
         }
+        // The `moonshot/` gateway spelling resolves through the table too,
+        // instead of passing through as a bogus Hub repo ID.
+        assert_eq!(
+            map_to_hf_model_id("moonshot/kimi-k2-0711-preview"),
+            "Qwen/Qwen2.5-7B-Instruct"
+        );
     }
 
     #[test]
@@ -1204,9 +1256,22 @@ mod tests {
     /// (remote-code tokenizers over a `tokenizer.model`), so mapping to them
     /// failed `register_from_hf` on every call; the GLM-4 names take the
     /// `-hf` release that ships one, and ChatGLM3 the fallback that loads.
+    /// The current Zhipu API names (GLM-4.5, GLM-4.6 and the glm-4 aliases)
+    /// follow the same convention, per the section's rule.
     #[test]
     fn test_glm_names_take_a_loadable_tokenizer() {
-        for name in ["glm-4-9b-chat", "glm-4", "chatglm-turbo", "chatglm_pro"] {
+        for name in [
+            "glm-4-9b-chat",
+            "glm-4",
+            "chatglm-turbo",
+            "chatglm_pro",
+            "glm-4.5",
+            "glm-4.5-air",
+            "glm-4.5-flash",
+            "glm-4.6",
+            "glm-4-plus",
+            "glm-4-flash",
+        ] {
             assert_eq!(map_to_hf_model_id(name), "THUDM/glm-4-9b-chat-hf", "{name}");
         }
         assert_eq!(map_to_hf_model_id("chatglm3-6b"), "Qwen/Qwen3.5-397B-A17B");
