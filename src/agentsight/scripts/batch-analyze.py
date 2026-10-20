@@ -44,9 +44,11 @@ def extract_text(content, *, include_tool_results: bool = True) -> str:
         for block in content:
             if isinstance(block, dict):
                 if block.get("type") == "text":
-                    parts.append(block.get("text", ""))
+                    text = block.get("text", "")
+                    if isinstance(text, str):
+                        parts.append(text)
                 elif block.get("type") == "tool_result" and include_tool_results:
-                    parts.append(block.get("content", ""))
+                    parts.append(extract_text(block.get("content", "")))
             elif isinstance(block, str):
                 parts.append(block)
         return "\n".join(parts)
@@ -60,11 +62,13 @@ def extract_tool_calls(content) -> list:
         return calls
     for block in content:
         if isinstance(block, dict) and block.get("type") == "tool_use":
-            calls.append({
-                "tool_call_id": block.get("id", ""),
-                "function_name": block.get("name", ""),
-                "arguments": block.get("input", {}),
-            })
+            calls.append(
+                {
+                    "tool_call_id": block.get("id", ""),
+                    "function_name": block.get("name", ""),
+                    "arguments": block.get("input", {}),
+                }
+            )
     return calls
 
 
@@ -78,7 +82,9 @@ def extract_tool_results(content) -> list:
             result_content = block.get("content", "")
             if isinstance(result_content, list):
                 result_content = " ".join(
-                    b.get("text", "") for b in result_content if isinstance(b, dict)
+                    b.get("text", "")
+                    for b in result_content
+                    if isinstance(b, dict) and isinstance(b.get("text", ""), str)
                 )
             result = {
                 "source_call_id": block.get("tool_use_id"),
@@ -97,7 +103,9 @@ def extract_thinking(content) -> Optional[str]:
     parts = []
     for block in content:
         if isinstance(block, dict) and block.get("type") == "thinking":
-            parts.append(block.get("thinking", ""))
+            thinking = block.get("thinking", "")
+            if isinstance(thinking, str):
+                parts.append(thinking)
     return "\n".join(parts) if parts else None
 
 
@@ -113,9 +121,7 @@ def usage_to_metrics(usage) -> dict:
     """Map a provider usage object onto ATIF metric names."""
     if not isinstance(usage, dict):
         return {}
-    counters = {
-        key: value for key, value in usage.items() if type(value) is int and value >= 0
-    }
+    counters = {key: value for key, value in usage.items() if type(value) is int and value >= 0}
     metrics = {}
     for source, target in (
         ("input_tokens", "prompt_tokens"),
@@ -370,21 +376,30 @@ def export_files(args: argparse.Namespace) -> None:
 def find_conversation_files(dirs: List[Path], min_size: int = 1024) -> List[Path]:
     """Find JSONL conversation files in given directories."""
     files = []
+    seen = set()
     for d in dirs:
-        if not d.exists():
+        if not d.exists() or d.name in ("subagent", "subagents"):
             continue
         for f in d.rglob("*.jsonl"):
-            # Skip subagent files and small files
-            if "subagent" in str(f):
+            # Only child locations inside this scan root identify a child run;
+            # arbitrary ancestors and encoded project names do not.
+            if "subagent" in f.name or any(
+                part in ("subagent", "subagents") for part in f.relative_to(d).parent.parts
+            ):
                 continue
             try:
-                if f.stat().st_size >= min_size:
-                    files.append(f)
-            except OSError:
+                canonical = f.resolve(strict=True)
+                if canonical in seen:
+                    continue
+                metadata = f.stat()
+                if metadata.st_size >= min_size:
+                    seen.add(canonical)
+                    files.append((metadata.st_mtime, f))
+            except (OSError, RuntimeError):
                 continue
     # Sort by modification time (newest first)
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    return files
+    files.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in files]
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

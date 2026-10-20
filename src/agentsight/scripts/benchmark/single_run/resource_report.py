@@ -22,6 +22,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
     cpu: list[float] = []
     cpu_seconds = covered = 0.0
     complete = True
+    previous_end: float | None = None
     for index, row in enumerate(rows):
         timestamp = numeric(row.get("monotonic_timestamp"))
         if timestamp is None:
@@ -36,9 +37,22 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
             if index != 0 or row.get("cpu_pct") or row.get("cpu_interval_seconds"):
                 complete = False
             continue
-        overlap = min(timestamp, end) - max(timestamp - interval, start)
+        interval_start = max(timestamp - interval, start)
+        interval_end = min(timestamp, end)
+        overlap = interval_end - interval_start
         if overlap <= 0:
             continue
+        if previous_end is not None:
+            # Collector timestamps can round at float precision; larger overlap
+            # is repeated evidence and must not satisfy the coverage gate.
+            if interval_start < previous_end - 1e-6:
+                complete = False
+                continue
+            interval_start = max(interval_start, previous_end)
+            overlap = interval_end - interval_start
+            if overlap <= 0:
+                complete = False
+                continue
         value = numeric(row.get("cpu_pct"))
         if value is None or value < 0:
             complete = False
@@ -46,6 +60,7 @@ def resource_stats(rows: list[dict[str, str]], start: float, end: float) -> dict
         cpu.append(value)
         cpu_seconds += value / 100 * overlap
         covered += overlap
+        previous_end = interval_end
     return {
         "rss_average_mib": sum(rss) / len(rss) if rss else None,
         "rss_peak_mib": max(rss) if rss else None,
