@@ -49,10 +49,11 @@ pub fn detect_provider_from_path(path: &str) -> Option<Provider> {
 
 /// Whether a message carries a content block only the Anthropic schema has.
 ///
-/// `tool_result`, `tool_use` and `thinking` are Anthropic Messages block
-/// types; the OpenAI-compatible schema spells the same information with
-/// `tool_calls`, `tool_call_id` and plain `text` / `image_url` parts, so one
-/// of these blocks is proof of the protocol no matter which path carried it.
+/// `tool_result`, `tool_use`, `thinking` and `redacted_thinking` are Anthropic
+/// Messages block types; the OpenAI-compatible schema spells the same
+/// information with `tool_calls`, `tool_call_id` and plain `text` /
+/// `image_url` parts, so one of these blocks is proof of the protocol no
+/// matter which path carried it.
 fn has_anthropic_block(message: &Value) -> bool {
     message
         .get("content")
@@ -61,7 +62,7 @@ fn has_anthropic_block(message: &Value) -> bool {
             blocks.iter().any(|block| {
                 matches!(
                     block.get("type").and_then(|t| t.as_str()),
-                    Some("tool_result" | "tool_use" | "thinking")
+                    Some("tool_result" | "tool_use" | "thinking" | "redacted_thinking")
                 )
             })
         })
@@ -70,8 +71,13 @@ fn has_anthropic_block(message: &Value) -> bool {
 /// Detect provider from JSON content structure
 ///
 /// This function analyzes the JSON content to determine the protocol format:
-/// - Anthropic: Has "system" as top-level field or "max_tokens" (required in Anthropic)
-/// - OpenAI: Has "messages" with "function_call" or "response_format"
+/// - Anthropic: Has "system" as a top-level field, or a message carrying a
+///   content block only the Anthropic schema has (`tool_result`, `tool_use`,
+///   `thinking`, `redacted_thinking`)
+/// - OpenAI: Has "response_format", "seed" or "parallel_tool_calls"
+/// - Otherwise a message's "name" or "tool_calls" identifies OpenAI, and an
+///   undecided body defaults to OpenAI because most compatible endpoints
+///   follow that format
 ///
 /// # Arguments
 /// * `json` - The request JSON body
@@ -281,6 +287,36 @@ mod tests {
 
         // The same request through the whole detector: a compatible-mode path
         // bows out of the path check, so the JSON verdict is the one used.
+        assert_eq!(
+            detect_provider("/compatible-mode/v1/messages", Some(&request)),
+            Some(Provider::Anthropic)
+        );
+    }
+
+    #[test]
+    fn test_detect_provider_from_json_redacted_thinking_without_system() {
+        // `redacted_thinking` is an Anthropic block type too. A request whose
+        // only protocol-specific block is that one, and which carries no
+        // top-level `system`, still names the Anthropic schema; without the
+        // block in the arm such a request fell through to the OpenAI default.
+        let request = serde_json::json!({
+            "model": "claude-3-7-sonnet",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "what did you conclude?"},
+                {"role": "assistant", "content": [
+                    {"type": "redacted_thinking", "data": "EmwKAhgBEgy3vdaL"},
+                    {"type": "text", "text": "The answer is 42."}
+                ]}
+            ]
+        });
+        assert_eq!(
+            detect_provider_from_json(&request),
+            Some(Provider::Anthropic),
+            "a redacted_thinking block in a system-less request names the protocol"
+        );
+
+        // Through the whole detector, on a path the path check bows out of.
         assert_eq!(
             detect_provider("/compatible-mode/v1/messages", Some(&request)),
             Some(Provider::Anthropic)
