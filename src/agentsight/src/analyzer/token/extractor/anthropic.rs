@@ -80,7 +80,7 @@ pub fn extract_token_data(
                         }
                     }
                     // Extended thinking arrives as a `thinking` block whose
-                    // text sits in the `thinking` field (a `redacting_thinking`
+                    // text sits in the `thinking` field (a `redacted_thinking`
                     // block carries no plaintext and stays unextracted). The
                     // shared SSE extractor already maps thinking deltas to
                     // reasoning_content; without this arm a non-streaming
@@ -426,7 +426,7 @@ mod tests {
         let response = serde_json::json!({
             "model": "claude-3-7-sonnet",
             "content": [
-                {"type": "redacting_thinking", "data": "encrypted"},
+                {"type": "redacted_thinking", "data": "encrypted"},
                 {"type": "text", "text": "Answer"}
             ]
         });
