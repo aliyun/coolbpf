@@ -109,11 +109,17 @@ fn request_messages(body: &serde_json::Value) -> Option<Vec<serde_json::Value>> 
 /// A host-name substring is not the path: `POST /v1/messages` is Anthropic
 /// even though it never spells "anthropic", and an Anthropic request through a
 /// proxy carries no such word at all. The path-based detection the message
-/// parser uses is authoritative; anything unrecognised stays OpenAI.
+/// parser uses is authoritative, so every provider it names keeps its own
+/// label: Gemini's `:generateContent` path falls through to this counter
+/// whenever its terminal `usageMetadata` was not captured, and mapping it to
+/// OpenAI made the token row disagree with the audit and genai rows for the
+/// same call. Anything the parser does not recognise stays OpenAI, which is
+/// what an unrecognised completion path speaks.
 fn manual_provider_from_path(path: &str) -> &'static str {
     match crate::analyzer::message::MessageParser::detect_provider(path) {
         Some("anthropic") => "anthropic",
         Some("sysom") => "sysom",
+        Some("gemini") => "gemini",
         _ => "openai",
     }
 }
@@ -1372,6 +1378,32 @@ mod tests {
     /// The manual counters labelled every `/v1/messages` call openai, and
     /// `billed_input_tokens` only adds cache counters for Anthropic, so those
     /// records under-reported their cache usage.
+    /// `detect_provider` names four providers; the manual-counter map moved
+    /// only two of them. A Gemini generation path that lost its terminal
+    /// `usageMetadata` falls through to the manual counter, and its record was
+    /// then labelled openai while the audit and the genai row label the same
+    /// path gemini — one call with two identities, and Gemini traffic counted
+    /// under the OpenAI provider.
+    #[test]
+    fn manual_provider_maps_every_detected_provider() {
+        for path in [
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+            "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-pro:streamGenerateContent",
+        ] {
+            assert_eq!(
+                crate::analyzer::message::MessageParser::detect_provider(path),
+                Some("gemini"),
+                "{path} must be a detected provider"
+            );
+            assert_eq!(
+                manual_provider_from_path(path),
+                "gemini",
+                "{path} is detected as gemini but the manual counter labels it otherwise"
+            );
+        }
+    }
+
     #[test]
     fn manual_provider_follows_the_path_not_the_host_name() {
         assert_eq!(manual_provider_from_path("/v1/messages"), "anthropic");
