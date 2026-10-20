@@ -561,6 +561,11 @@ Token parsing supports multiple LLM API formats:
 - Google Gemini
 - Qwen (with native chat template support)
 
+## Batch concurrency
+
+The batch script accepts opt-in `--jobs 1..8` (default 1), with bounded concurrent invocations and ordered output.
+See the [CLI reference](../../docs/user-guide/en/agent-observability/agentsight/cli-reference.md) for usage and limits.
+
 ## Origins
 
 This project is derived from [https://github.com/eunomia-bpf/agentsight.git](https://github.com/eunomia-bpf/agentsight.git).
