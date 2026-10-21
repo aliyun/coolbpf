@@ -1160,6 +1160,51 @@ impl GenAIBuilder {
         (!text.is_empty()).then_some(text)
     }
 
+    /// Refusal text of a finished `message` output item, or `None`.
+    ///
+    /// The answer a model declines to give is its own content part, typed
+    /// `refusal` and carrying the text in `refusal` rather than `text` — the
+    /// shape the non-streaming normalizer and the token extractor's
+    /// `read_output_item` read. A capture that attached after the refusal
+    /// deltas has this part as its only copy of the answer, so it is read
+    /// here as well; the deltas win over it, as they do for text.
+    fn closing_message_item_refusal(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) == Some("reasoning") {
+            return None;
+        }
+        let parts = item.get("content")?.as_array()?;
+        let refusal: String = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(|t| t.as_str()) == Some("refusal"))
+            .filter_map(|part| part.get("refusal").and_then(|r| r.as_str()))
+            .collect();
+        (!refusal.is_empty()).then_some(refusal)
+    }
+
+    /// Thinking text of a finished `reasoning` output item, or `None`.
+    ///
+    /// The closing item carries its thinking in `content[]` parts (dashscope
+    /// `reasoning_text`) and/or `summary[]` (the o-series default), the same
+    /// two fields the token extractor's `read_output_item` routes to its
+    /// thinking half. Unlike the answer, reasoning items do not repeat one
+    /// another: an agentic response interleaves one before each call it makes
+    /// and every item carries different thinking, so callers accumulate the
+    /// results in arrival order instead of replacing.
+    fn closing_reasoning_item_text(chunk: &serde_json::Value) -> Option<String> {
+        let item = chunk.get("item")?;
+        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+            return None;
+        }
+        let text: String = ["content", "summary"]
+            .iter()
+            .filter_map(|key| item.get(*key).and_then(|c| c.as_array()))
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// Aggregate OpenAI **Responses** API SSE chunks into parts.
     ///
     /// The Responses protocol (used by codex 0.137+ via `/v1/responses`) emits
@@ -1193,7 +1238,17 @@ impl GenAIBuilder {
         // Answer text carried by a closing event, kept aside until the whole
         // stream is read: a delta captured later supersedes it.
         let mut closing_text: Option<String> = None;
+        // Whether a non-empty reasoning delta arrived, and the thinking a
+        // finished `reasoning` item carries. Same delta-wins rule as the text
+        // above, but the items accumulate rather than replace: each one holds
+        // different thinking.
+        let mut saw_reasoning_delta = false;
+        let mut closing_reasoning_text = String::new();
         let mut reasoning_buf = String::new();
+        // Whether a non-empty refusal delta arrived, and the refusal a closing
+        // message item carries, on the same delta-wins rule as the text above.
+        let mut saw_refusal_delta = false;
+        let mut closing_refusal: Option<String> = None;
         let mut refusal_buf = String::new();
         let mut calls = ResponsesToolCalls::default();
         let mut saw_responses_event = false;
@@ -1252,6 +1307,9 @@ impl GenAIBuilder {
                 "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_reasoning_delta = true;
+                        }
                         reasoning_buf.push_str(delta);
                     }
                 }
@@ -1289,6 +1347,9 @@ impl GenAIBuilder {
                 "response.refusal.delta" => {
                     saw_responses_event = true;
                     if let Some(delta) = chunk.get("delta").and_then(|d| d.as_str()) {
+                        if !delta.is_empty() {
+                            saw_refusal_delta = true;
+                        }
                         refusal_buf.push_str(delta);
                     }
                 }
@@ -1321,6 +1382,25 @@ impl GenAIBuilder {
                     // rule as `response.output_text.done` above.
                     if !saw_text_delta && let Some(text) = Self::closing_message_item_text(chunk) {
                         closing_text = Some(text);
+                        saw_responses_event = true;
+                    }
+                    // A `reasoning` item carries the thinking the deltas
+                    // streamed; a capture that attached after them has the
+                    // item as its only copy. Every item is kept, in order.
+                    if !saw_reasoning_delta
+                        && let Some(text) = Self::closing_reasoning_item_text(chunk)
+                    {
+                        closing_reasoning_text.push_str(&text);
+                        saw_responses_event = true;
+                    }
+                    // The answer a model declines to give rides a `refusal`
+                    // part of the same item instead of a `text` part, so it is
+                    // read separately; a capture that attached after the
+                    // refusal deltas has it as the only copy.
+                    if !saw_refusal_delta
+                        && let Some(refusal) = Self::closing_message_item_refusal(chunk)
+                    {
+                        closing_refusal = Some(refusal);
                         saw_responses_event = true;
                     }
                 }
@@ -1374,6 +1454,12 @@ impl GenAIBuilder {
         // non-empty delta was captured.
         if !saw_text_delta && let Some(text) = closing_text {
             text_buf = text;
+        }
+        if !saw_reasoning_delta && !closing_reasoning_text.is_empty() {
+            reasoning_buf = closing_reasoning_text;
+        }
+        if !saw_refusal_delta && let Some(refusal) = closing_refusal {
+            refusal_buf = refusal;
         }
 
         let mut tool_parts: Vec<_> = calls
@@ -2434,6 +2520,98 @@ mod tests {
             "got {parts:?}"
         );
         assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    /// A refusal is the model's answer too, but it rides a `refusal` content
+    /// part instead of a `text` part. A capture that attached after the
+    /// refusal deltas has only the finished item, so the drain merger must
+    /// read that part the way the live parser's `closing_message_item_refusal`
+    /// and the token extractor's `read_output_item` do.
+    #[test]
+    fn test_responses_sse_closing_message_item_keeps_refusal() {
+        let body = r#"[
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"refusal","refusal":"I can't help with that."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("a closing refusal part must yield an answer");
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that."),
+            "got {parts:?}"
+        );
+        assert_eq!(finish.as_deref(), Some("stop"));
+    }
+
+    /// The refusal deltas repeat the closing part, so a capture that saw them
+    /// must not append the copy on top.
+    #[test]
+    fn test_responses_sse_refusal_delta_wins_over_the_closing_copy() {
+        let body = r#"[
+            {"type":"response.refusal.delta","delta":"I can't help"},
+            {"type":"response.refusal.delta","delta":" with that."},
+            {"type":"response.output_item.done","item":{"type":"message","content":[
+                {"type":"refusal","refusal":"I can't help with that."}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(
+            matches!(&parts[0], MessagePart::Text { content } if content == "I can't help with that."),
+            "deltas must win over their closing copies, got {parts:?}"
+        );
+    }
+
+    /// A capture that attached after the reasoning deltas has only the
+    /// finished `reasoning` items. Both the live parser
+    /// (`closing_reasoning_item_text`) and the token extractor's
+    /// `read_output_item` read them; the drain merger read only the deltas and
+    /// dropped the thinking entirely.
+    ///
+    /// An agentic turn interleaves one reasoning item per call, and each item
+    /// holds different thinking, so every item must be kept in arrival order —
+    /// not replaced by the last one.
+    #[test]
+    fn test_responses_sse_closing_reasoning_items_keep_thinking() {
+        let body = r#"[
+            {"type":"response.output_item.done","item":{"type":"reasoning","content":[
+                {"type":"reasoning_text","text":"first thought"}
+            ]}},
+            {"type":"response.output_item.done","item":{"type":"reasoning","summary":[
+                {"type":"summary_text","text":"second thought"}
+            ]}},
+            {"type":"response.output_text.done","text":"answer"},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body)
+            .expect("closing reasoning items must yield output");
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content }
+                if content == "first thoughtsecond thought"),
+            "got {parts:?}"
+        );
+        assert!(matches!(&parts[1], MessagePart::Text { content } if content == "answer"));
+    }
+
+    /// The reasoning deltas repeat the closing items, so a capture that saw
+    /// them must not append the copies on top.
+    #[test]
+    fn test_responses_sse_reasoning_delta_wins_over_the_closing_item() {
+        let body = r#"[
+            {"type":"response.reasoning_summary_text.delta","delta":"think"},
+            {"type":"response.output_item.done","item":{"type":"reasoning","summary":[
+                {"type":"summary_text","text":"think"}
+            ]}},
+            {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(
+            matches!(&parts[0], MessagePart::Reasoning { content } if content == "think"),
+            "deltas must win over their closing copies, got {parts:?}"
+        );
     }
 
     /// Closing events repeat the deltas. When the capture saw a non-empty
