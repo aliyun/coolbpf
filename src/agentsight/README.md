@@ -83,7 +83,7 @@ Start tracing of AI agent activity.
 
 **Linux**: Full eBPF-based tracing (probes → parser → aggregator → storage). Also runs trajectory collector if `features.trajectory_collection.enabled` is set.
 
-**Linux without privileges**: `--no-ebpf` skips the probes and runs the trajectory collector alone, so unprivileged sandboxes and containers still collect trajectories. The flag implies trajectory collection regardless of `features.trajectory_collection.enabled`, since it is the only remaining data source. Data derived from eBPF — token metering, audit events, interruption detection — is unavailable in this mode.
+**Linux without privileges**: `--no-ebpf` skips the probes and runs the trajectory collector alone, so unprivileged sandboxes and containers still collect trajectories. The collector supports Claude Agent SDK/Claude Code, Qoder, Codex, and Cursor JSONL sessions plus Hermes `state.db`; expose a non-standard SDK config through `CLAUDE_CONFIG_DIR`, or supply per-tenant workspace roots through `features.trajectory_collection.scan_dirs`. The flag implies trajectory collection regardless of `features.trajectory_collection.enabled`, since it is the only remaining data source. Data derived from eBPF — token metering, audit events, interruption detection — is unavailable in this mode.
 
 **macOS**: Trajectory collection only — scans local JSONL session files (Claude Code, Qoder, Codex, Cursor), converts to ATIF v1.7, and stores in `trajectories.db`. No eBPF.
 

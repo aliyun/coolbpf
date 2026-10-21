@@ -83,7 +83,7 @@ agentsight/
 
 **Linux**：完整 eBPF 追踪（probes → parser → aggregator → storage）。若 `features.trajectory_collection.enabled` 开启，同时运行轨迹采集器。
 
-**Linux 无特权环境**：`--no-ebpf` 跳过探针，仅运行轨迹采集器，使无特权沙箱与容器同样可以采集轨迹。该参数会强制启用轨迹采集，不受 `features.trajectory_collection.enabled` 影响，因为此模式下它是唯一的数据来源。依赖 eBPF 的数据 —— Token 计量、审计事件、中断检测 —— 在此模式下不可用。
+**Linux 无特权环境**：`--no-ebpf` 跳过探针，仅运行轨迹采集器，使无特权沙箱与容器同样可以采集轨迹。采集器支持 Claude Agent SDK/Claude Code、Qoder、Codex 和 Cursor JSONL 会话，以及 Hermes `state.db`；非标准 SDK 配置目录通过 `CLAUDE_CONFIG_DIR` 暴露，多租户工作区根目录通过 `features.trajectory_collection.scan_dirs` 指定。该参数会强制启用轨迹采集，不受 `features.trajectory_collection.enabled` 影响，因为此模式下它是唯一的数据来源。依赖 eBPF 的数据 —— Token 计量、审计事件、中断检测 —— 在此模式下不可用。
 
 **macOS**：仅轨迹采集 — 扫描本地 JSONL 会话文件（Claude Code、Qoder、Codex、Cursor），转换为 ATIF v1.7 格式，存入 `trajectories.db`。无 eBPF。
 

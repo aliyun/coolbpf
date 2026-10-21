@@ -392,11 +392,13 @@ dependencies = [
  "agentsight-atif",
  "agentsight-sqlite-lifecycle",
  "anyhow",
+ "chrono",
  "dirs",
  "log 0.4.33",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
