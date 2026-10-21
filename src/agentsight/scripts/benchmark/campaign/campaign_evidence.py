@@ -376,6 +376,10 @@ def fault_outcome(
     for name in ("server_healthy_after", "process_alive_before", "process_alive_after"):
         if value.get(name) is not True:
             failed.append(name)
+    if "sse_truncation_verified" not in value:
+        missing.append("sse_truncation_verified")
+    elif value["sse_truncation_verified"] is not True:
+        failed.append("sse_truncation_verified")
     summary = run.get("summary", {})
     checks = {
         "http_success_rate": (
