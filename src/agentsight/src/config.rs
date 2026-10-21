@@ -682,7 +682,7 @@ pub struct JsonTrajectoryCollectionFeature {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub scan_interval_secs: Option<u64>,
-    /// Optional override of the projects directories to scan.
+    /// 可选的会话根目录或 Claude 工作区父目录。
     #[serde(default)]
     pub scan_dirs: Option<Vec<String>>,
 }
@@ -1007,7 +1007,7 @@ pub struct FeatureFlags {
     pub trajectory_collection_enabled: bool,
     /// Seconds between two trajectory scan rounds.
     pub trajectory_scan_interval_secs: u64,
-    /// Optional override of the trajectory projects directories to scan.
+    /// 可选的会话根目录或 Claude 工作区父目录。
     pub trajectory_scan_dirs: Option<Vec<String>>,
     /// Whether a model may be asked to label collected trajectories.
     ///

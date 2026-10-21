@@ -33,8 +33,8 @@ use discovery::DiscoveredSession;
 pub struct CollectorConfig {
     /// Seconds between two scan rounds.
     pub scan_interval_secs: u64,
-    /// Optional override of the projects directories to scan; `None` probes
-    /// `/root` + `/home/*` for the default Qoder/QoderWork layout.
+    /// 可选的会话根目录或 Claude 工作区父目录。
+    /// 未设置时扫描标准目录及 `CLAUDE_CONFIG_DIR`。
     pub scan_dirs: Option<Vec<PathBuf>>,
     /// Retention used to skip already-expired source files during scans.
     pub maintenance: TrajectoryMaintenancePolicy,
