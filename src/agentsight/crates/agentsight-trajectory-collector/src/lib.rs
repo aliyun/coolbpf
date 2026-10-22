@@ -10,6 +10,7 @@
 pub mod atif;
 pub mod codex;
 pub mod discovery;
+pub mod gemini;
 mod hermes;
 mod hermes_convert;
 #[cfg(test)]
@@ -156,7 +157,14 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let events = qoder::load_jsonl_events(&content);
+    let mut events = qoder::load_jsonl_events(&content);
+    // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
+    // document: no line parses, so the whole content is the only unit.
+    if events.is_empty() {
+        if let Some(doc) = gemini::legacy_document(&content) {
+            events.push(doc);
+        }
+    }
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).
@@ -165,11 +173,15 @@ fn process_session(
     }
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
-    // that needs a dedicated converter; everything else shares the
-    // Claude-style converter.
+    // that needs a dedicated converter; Gemini CLI chats use an append-only
+    // record stream with `$`-prefixed correction records; everything else
+    // shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let is_gemini = !is_codex && gemini::is_gemini_chat(&events);
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
+    } else if is_gemini {
+        gemini::convert_gemini_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -187,6 +199,8 @@ fn process_session(
     // Agent-private info (cwd, message counts, project) rides in `extra`.
     let private = if is_codex {
         codex::extract_private_metadata(&events, &session.project)
+    } else if is_gemini {
+        gemini::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
