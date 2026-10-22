@@ -529,12 +529,12 @@ impl GenAIBuilder {
         fallback_finish_reason: Option<&str>,
     ) -> Option<Vec<OutputMessage>> {
         let (parts, sse_finish_reason) = Self::extract_parts_from_sse_body(body)?;
-        if parts.is_empty() {
-            return None;
-        }
         // Prefer finish_reason from SSE, fall back to caller-supplied value
         let finish_reason =
             sse_finish_reason.or_else(|| fallback_finish_reason.map(|s| s.to_string()));
+        if parts.is_empty() && finish_reason.is_none() {
+            return None;
+        }
         Some(vec![OutputMessage {
             role: "assistant".to_string(),
             parts,
@@ -568,7 +568,8 @@ impl GenAIBuilder {
 
         let (parts, finish_reason) = Self::merge_sse_chunks(&chunks);
         if parts.is_empty() {
-            return Self::extract_dashscope_native_parts(&chunks);
+            return Self::extract_dashscope_native_parts(&chunks)
+                .or_else(|| finish_reason.map(|reason| (parts, Some(reason))));
         }
         Some((parts, finish_reason))
     }
