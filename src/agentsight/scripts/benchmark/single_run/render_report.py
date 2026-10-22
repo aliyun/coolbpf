@@ -119,7 +119,12 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
 
 def summarize_resources(path: Path | None) -> dict[str, dict[str, float | None]]:
     """Keep point statistics, deriving trends only from a valid elapsed timeline."""
-    rows = metric_rows(path)
+    return _summarize_resource_rows(metric_rows(path))
+
+
+def _summarize_resource_rows(
+    rows: list[dict[str, str]],
+) -> dict[str, dict[str, float | None]]:
     clock = (
         "monotonic_timestamp" if any("monotonic_timestamp" in row for row in rows) else "timestamp"
     )
@@ -169,8 +174,12 @@ def qps_sort_key(value: str) -> tuple[bool, float, str]:
 
 def summarize_qps_resources(path: Path | None) -> dict[str, Any]:
     """Group CPU and RSS samples by the input QPS recorded in the CSV."""
+    return _summarize_qps_resource_rows(metric_rows(path))
+
+
+def _summarize_qps_resource_rows(rows: list[dict[str, str]]) -> dict[str, Any]:
     grouped: dict[str, dict[str, Any]] = {}
-    for row in metric_rows(path):
+    for row in rows:
         key = qps_key(row.get("input_qps"))
         group = grouped.setdefault(key, {"samples": 0, "cpu_pct": [], "rss_mb": []})
         group["samples"] += 1
@@ -207,8 +216,14 @@ def summarize_drops(
     path: Path | None, load_requests: int
 ) -> dict[str, int | float | None]:
     """Summarize dropped events and derive a measurable drop rate."""
+    return _summarize_drop_rows(metric_rows(path), load_requests)
+
+
+def _summarize_drop_rows(
+    rows: list[dict[str, str]], load_requests: int
+) -> dict[str, int | float | None]:
     values = {name: [] for name in DROP_METRICS}
-    for row in metric_rows(path):
+    for row in rows:
         for name in DROP_METRICS:
             value = numeric(row.get(name))
             if value is not None:
@@ -562,15 +577,16 @@ def main() -> int:
         else summarize_load(args.load_results)
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    resources = summarize_resources(args.metrics)
-    drops = summarize_drops(args.metrics, load["requests"])
+    rows = metric_rows(args.metrics)
+    resources = _summarize_resource_rows(rows)
+    drops = _summarize_drop_rows(rows, load["requests"])
     report = render_markdown(
         protocol=args.protocol,
         qps=args.qps,
         duration=args.duration,
         load=load,
         resources=resources,
-        qps_resources=summarize_qps_resources(args.metrics),
+        qps_resources=_summarize_qps_resource_rows(rows),
         drops=drops,
         validation=validation,
         load_artifact=args.load_results,
