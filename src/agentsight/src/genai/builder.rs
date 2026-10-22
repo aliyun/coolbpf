@@ -796,7 +796,7 @@ impl GenAIBuilder {
             parts = native_parts;
             finish_reason = native_finish;
         }
-        let output_messages = if parts.is_empty() {
+        let output_messages = if parts.is_empty() && finish_reason.is_none() {
             None
         } else {
             serde_json::to_string(&vec![OutputMessage {
@@ -1171,6 +1171,24 @@ mod tests {
         )];
         let enrichment = GenAIBuilder::extract_sse_enrichment(&events).unwrap();
         assert!(enrichment.output_messages.is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_keeps_terminal_only_gemini_reason() {
+        let events = vec![make_sse_event(
+            r#"{"candidates":[{"finishReason":"SAFETY","index":0}]}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        let messages: Vec<OutputMessage> = serde_json::from_str(
+            enrichment
+                .output_messages
+                .as_deref()
+                .expect("output messages"),
+        )
+        .expect("parsed output messages");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].parts.is_empty());
+        assert_eq!(messages[0].finish_reason.as_deref(), Some("SAFETY"));
     }
 
     #[test]

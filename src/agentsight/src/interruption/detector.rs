@@ -61,21 +61,11 @@ fn is_normal_finish(reason: Option<&str>) -> bool {
 
 /// Whether the finish reason is a provider safety stop that withheld the answer.
 ///
-/// OpenAI spells it `content_filter`, which rule 6 matches separately. Gemini
-/// reports a whole family instead, all of them meaning the provider's safety
-/// policy stopped the generation rather than the transport: `SAFETY` (prompt
-/// or answer blocked), `RECITATION` (the answer would reproduce training data
-/// verbatim), `BLOCKLIST` (a blocked term), `PROHIBITED_CONTENT`, `SPII`
-/// (sensitive personally identifiable information) and `IMAGE_SAFETY`.
-/// GLM (Zhipu) rides the OpenAI-compatible protocol and reports content
-/// moderation as `sensitive` — the same meaning in that provider's spelling.
-///
-/// The others in Gemini's enum are not safety stops and stay out of this list:
-/// `MALFORMED_FUNCTION_CALL` is a tool-call formatting failure, `OTHER` and
-/// `LANGUAGE` are unspecific and language-related reasons.
-///
-/// Compared ASCII case-insensitively, like [`is_normal_finish`]: the casing is
-/// the provider's (`SAFETY`), not the protocol's.
+/// OpenAI reports content_filter; Gemini reports safety, recitation, blocked
+/// content, image safety, escalation, and prohibited-use policy stops.
+/// Unknown, language, and malformed tool/response stops have other meanings.
+/// GLM reports content moderation as sensitive. Match provider spellings
+/// case-insensitively.
 fn is_safety_stop_reason(reason: Option<&str>) -> bool {
     /// The safety-class finish reasons, lower-cased for comparison.
     const SAFETY: &[&str] = &[
@@ -85,6 +75,10 @@ fn is_safety_stop_reason(reason: Option<&str>) -> bool {
         "prohibited_content",
         "spii",
         "image_safety",
+        "image_prohibited_content",
+        "image_recitation",
+        "escalation",
+        "pup_limited_disabled",
         "sensitive",
     ];
     reason.is_some_and(|reason| {
@@ -801,9 +795,8 @@ impl InterruptionDetector {
         // ── 6.5 State machine / protocol error ──────────────────────────────
         // Agent received a response that violates expected protocol state,
         // e.g. malformed response structure or invalid state transition.
-        // Gemini reports a tool call it could not parse as a terminal finish
-        // reason (`MALFORMED_FUNCTION_CALL`) rather than an error body; that is
-        // the same protocol failure with no keyword to match on.
+        // Gemini reports invalid tool calls and malformed responses as terminal
+        // reasons rather than error bodies; classify those as protocol failures.
         let is_state_error = combined_error.contains("invalid state")
             || combined_error.contains("protocol error")
             || combined_error.contains("malformed")
@@ -811,8 +804,16 @@ impl InterruptionDetector {
             || combined_error.contains("invalid transition")
             || combined_error.contains("parse error")
             || combined_error.contains("deserialization")
-            || finish_reason
-                .is_some_and(|reason| reason.eq_ignore_ascii_case("malformed_function_call"));
+            || finish_reason.is_some_and(|reason| {
+                [
+                    "malformed_function_call",
+                    "unexpected_tool_call",
+                    "missing_thought_signature",
+                    "malformed_response",
+                ]
+                .iter()
+                .any(|known| reason.eq_ignore_ascii_case(known))
+            });
         if is_state_error {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -1346,6 +1347,10 @@ mod tests {
             "PROHIBITED_CONTENT",
             "SPII",
             "IMAGE_SAFETY",
+            "IMAGE_PROHIBITED_CONTENT",
+            "IMAGE_RECITATION",
+            "ESCALATION",
+            "PUP_LIMITED_DISABLED",
         ] {
             let detector = InterruptionDetector::default();
             let mut call = make_base_call();
@@ -1436,40 +1441,41 @@ mod tests {
         );
     }
 
-    /// `MALFORMED_FUNCTION_CALL` is Gemini's way of saying the model emitted a
-    /// tool call the runtime could not parse — a protocol failure in the Agent
-    /// loop, not a safety decision and not a truncated stream. It is the one
-    /// Gemini reason that is neither a normal stop, nor a token limit, nor a
-    /// safety stop, so it fell to rule 8 and was reported as `sse_truncated`
-    /// (high), which sends the reader looking at the transport. Rule 6.5
-    /// (`state_machine_error`) is the type the rule set has for a response that
-    /// violates the expected protocol shape.
+    /// Gemini's invalid tool-call and response finish reasons are protocol
+    /// failures, not truncated streams. Rule 6.5 retains the original reason.
     #[test]
-    fn test_gemini_malformed_function_call_is_a_state_machine_error() {
+    fn test_gemini_invalid_completion_is_a_state_machine_error() {
         let detector = InterruptionDetector::default();
-        let mut call = make_base_call();
-        call.metadata
-            .insert("is_sse".to_string(), "true".to_string());
-        call.duration_ns = 2_000_000_000;
-        call.response.messages = vec![OutputMessage {
-            role: "assistant".to_string(),
-            parts: vec![],
-            name: None,
-            finish_reason: Some("MALFORMED_FUNCTION_CALL".to_string()),
-        }];
-        let events = detector.detect(&call);
-        assert!(
-            events
-                .iter()
-                .any(|e| e.interruption_type == InterruptionType::StateMachineError),
-            "a malformed function call stop is a protocol error, got {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
-            "the stream completed; only the tool call was malformed, got {events:?}"
-        );
+        for reason in [
+            "MALFORMED_FUNCTION_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "MISSING_THOUGHT_SIGNATURE",
+            "MALFORMED_RESPONSE",
+        ] {
+            let mut call = make_base_call();
+            call.metadata
+                .insert("is_sse".to_string(), "true".to_string());
+            call.duration_ns = 2_000_000_000;
+            call.response.messages = vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![],
+                name: None,
+                finish_reason: Some(reason.to_string()),
+            }];
+            let events = detector.detect(&call);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.interruption_type == InterruptionType::StateMachineError),
+                "{reason} is a protocol error, got {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+                "{reason} is a complete provider response, got {events:?}"
+            );
+        }
     }
 
     /// Gemini's `OTHER` and `LANGUAGE` are generation stops of their own: the
