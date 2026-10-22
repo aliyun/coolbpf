@@ -178,8 +178,16 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
                 requests[second] += value
             elif item.get("metric") == "benchmark_latency":
                 latencies[second].append(value)
+    throughput = []
+    previous_second: int | None = None
+    for second in sorted(requests):
+        if previous_second is not None and second > previous_second + 1:
+            # One zero breaks continuity without allocating a potentially huge gap.
+            throughput.append((float(previous_second + 1), 0.0))
+        throughput.append((float(second), requests[second]))
+        previous_second = second
     return {
-        "effective_qps": [(float(key), requests[key]) for key in sorted(requests)],
+        "effective_qps": throughput,
         "latency_p99_ms": [
             (float(key), float(percentile(latencies[key], 0.99)))
             for key in sorted(latencies)
