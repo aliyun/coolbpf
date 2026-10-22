@@ -118,23 +118,28 @@ def summarize_load(path: Path | None) -> dict[str, Any]:
 
 
 def summarize_resources(path: Path | None) -> dict[str, dict[str, float | None]]:
-    """Summarize numeric columns from the process metrics CSV."""
-    samples: dict[str, list[tuple[float, float]]] = {
-        name: [] for name in RESOURCE_METRICS
-    }
-    for row in metric_rows(path):
-        timestamp = numeric(row.get("timestamp"))
-        if timestamp is None:
-            continue
+    """Keep point statistics, deriving trends only from a valid elapsed timeline."""
+    rows = metric_rows(path)
+    clock = (
+        "monotonic_timestamp" if any("monotonic_timestamp" in row for row in rows) else "timestamp"
+    )
+    timestamps = [numeric(row.get(clock)) for row in rows]
+    valid_timeline = all(value is not None for value in timestamps) and all(
+        current > previous for previous, current in pairwise(timestamps)
+    )
+    samples: dict[str, list[tuple[float, float]]] = {name: [] for name in RESOURCE_METRICS}
+    for row, timestamp in zip(rows, timestamps):
         for name in RESOURCE_METRICS:
             value = numeric(row.get(name))
             if value is not None:
-                samples[name].append((timestamp, value))
+                samples[name].append((timestamp if timestamp is not None else 0, value))
     result: dict[str, dict[str, float | None]] = {}
     for name, metric_samples in samples.items():
         summary = stats([value for _, value in metric_samples])
-        summary["slope_per_hour"] = linear_slope(metric_samples)
-        summary["rolling_5m_max_increase"] = rolling_max_increase(metric_samples)
+        summary["slope_per_hour"] = linear_slope(metric_samples) if valid_timeline else None
+        summary["rolling_5m_max_increase"] = (
+            rolling_max_increase(metric_samples) if valid_timeline else None
+        )
         result[name] = summary
     return result
 

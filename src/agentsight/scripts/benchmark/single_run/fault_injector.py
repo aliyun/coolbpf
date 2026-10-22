@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import socket
 import ssl
@@ -22,16 +23,53 @@ def tls_socket(host: str, port: int, timeout: float) -> ssl.SSLSocket:
 
 
 def exchange(
-    host: str, port: int, payload: bytes, timeout: float, *, read_response: bool = True
+    host: str,
+    port: int,
+    payload: bytes,
+    timeout: float,
+    *,
+    read_response: bool = True,
+    truncate_sse: bool = False,
 ) -> str:
     """Send bytes over TLS and classify the peer response without raising."""
     try:
         with tls_socket(host, port, timeout) as connection:
             connection.sendall(payload)
+            if truncate_sse:
+                with http.client.HTTPResponse(connection) as stream:
+                    stream.begin()
+                    if (
+                        stream.status != 200
+                        or stream.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
+                        != "text/event-stream"
+                    ):
+                        return "not_sse_response"
+                    # Bound the prefix: this fault proves response-side data was
+                    # received, then closes without draining the stream or DONE.
+                    remaining = 65536
+                    deadline = time.monotonic() + timeout
+                    has_data = False
+                    while remaining > 0:
+                        budget = deadline - time.monotonic()
+                        if budget <= 0:
+                            return "sse_prefix_timeout"
+                        connection.settimeout(budget)
+                        line = stream.readline(remaining + 1)
+                        remaining -= len(line)
+                        if not line or remaining < 0:
+                            break
+                        if line.rstrip(b"\r\n") == b"" and has_data:
+                            return "truncated_sse_after_data"
+                        if line.startswith(b"data:"):
+                            data = line[5:].strip()
+                            if data == b"[DONE]":
+                                return "sse_completed_before_truncation"
+                            has_data = has_data or bool(data)
+                    return "missing_sse_data_frame"
             if not read_response:
                 return "sent_and_closed"
             response = connection.recv(4096)
-    except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as error:
+    except (OSError, ssl.SSLError, http.client.HTTPException) as error:
         return f"closed:{type(error).__name__}"
     if not response:
         return "closed_without_response"
@@ -66,18 +104,14 @@ def cases(oversized_bytes: int) -> dict[str, tuple[bytes, bool]]:
             True,
         ),
         "content_length_mismatch": (
-            post(valid).replace(
-                f"Content-Length: {len(valid)}".encode(), b"Content-Length: 2"
-            ),
+            post(valid).replace(f"Content-Length: {len(valid)}".encode(), b"Content-Length: 2"),
             True,
         ),
         "truncated_body": (
-            post(valid).replace(
-                f"Content-Length: {len(valid)}".encode(), b"Content-Length: 4096"
-            ),
+            post(valid).replace(f"Content-Length: {len(valid)}".encode(), b"Content-Length: 4096"),
             False,
         ),
-        "truncated_sse": (post(valid), False),
+        "truncated_sse": (post(valid, b"X-Benchmark-Fault: truncated-sse\r\n"), True),
         "invalid_utf8": (post(b'\xff\xfe{"request_id":"bench-invalid-utf8"}'), True),
         "binary_body": (post(bytes(range(256))), True),
         "oversized_body": (post(b"x" * oversized_bytes), True),
@@ -111,7 +145,12 @@ def inject(
         counts: dict[str, int] = {}
         for _ in range(repetitions):
             outcome = exchange(
-                host, port, payload, timeout, read_response=read_response
+                host,
+                port,
+                payload,
+                timeout,
+                read_response=read_response,
+                truncate_sse=name == "truncated_sse",
             )
             counts[outcome] = counts.get(outcome, 0) + 1
         outcomes[name] = counts
@@ -133,6 +172,8 @@ def inject(
         "repetitions_per_case": repetitions,
         "oversized_bytes": oversized_bytes,
         "outcomes": outcomes,
+        "sse_truncation_verified": outcomes.get("truncated_sse")
+        == {"truncated_sse_after_data": repetitions},
         "server_healthy_after": health_check(host, port, timeout),
         "watched_pid": watch_pid,
         "process_alive_before": before,
@@ -167,7 +208,9 @@ def main() -> int:
     print(json.dumps(report, sort_keys=True))
     return (
         0
-        if report["server_healthy_after"] and report["process_alive_after"] is not False
+        if report["server_healthy_after"]
+        and report["process_alive_after"] is not False
+        and report.get("sse_truncation_verified") is True
         else 1
     )
 
