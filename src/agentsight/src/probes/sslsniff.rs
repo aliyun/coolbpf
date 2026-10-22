@@ -932,6 +932,21 @@ fn probe_exe_static_ssl(
     traced: &mut HashSet<FileKey>,
 ) -> Option<(String, FileKey, SslLibKind, String)> {
     let exe = proc_pid_entry(pid, "exe");
+    // Never treat Python interpreters as statically-linked BoringSSL via exe
+    // content probing: Python stubs/binaries may accidentally contain marker
+    // strings and must go through the normal OpenSSL/uv-python paths instead.
+    if let Ok(link) = fs::read_link(&exe) {
+        let name = Path::new(&link).file_name()?.to_string_lossy();
+        if name.starts_with("python") {
+            return None;
+        }
+    }
+    // Also check the symlink target string form
+    let exe_str_check = exe.to_string_lossy();
+    if exe_str_check.contains("/python") {
+        // Could be /proc/pid/exe symlinked to python; readlink already tried above
+        // but be defensive
+    }
     let meta = fs::metadata(&exe).ok()?;
     use std::os::unix::fs::MetadataExt;
     let key = (stat_dev_to_key(meta.dev()), meta.ino());
