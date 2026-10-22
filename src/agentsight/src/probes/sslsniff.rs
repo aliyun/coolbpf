@@ -941,12 +941,6 @@ fn probe_exe_static_ssl(
             return None;
         }
     }
-    // Also check the symlink target string form
-    let exe_str_check = exe.to_string_lossy();
-    if exe_str_check.contains("/python") {
-        // Could be /proc/pid/exe symlinked to python; readlink already tried above
-        // but be defensive
-    }
     let meta = fs::metadata(&exe).ok()?;
     use std::os::unix::fs::MetadataExt;
     let key = (stat_dev_to_key(meta.dev()), meta.ino());
