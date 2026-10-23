@@ -225,7 +225,7 @@ impl GenAISqliteStore {
         let mut stmt = conn.prepare(
             "SELECT record_json FROM tokenless_statistics
             WHERE source=?1 AND timestamp_ns >= ?2 AND timestamp_ns <= ?3
-            AND json_extract(record_json,'$.mode')='active'
+            AND COALESCE(LOWER(json_extract(record_json,'$.mode')),'active') NOT IN ('dry-run','dryrun')
             AND tool_use_id IN (SELECT value FROM json_each(?4))
             AND (?5 IS NULL OR EXISTS (SELECT 1 FROM json_each(?5) fresh
                 WHERE json_extract(fresh.value,'$[0]')=record_id
