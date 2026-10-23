@@ -783,6 +783,67 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn applied_stats_respect_the_requested_time_range() {
+        // The client-configured savings path bounds the applied records by the
+        // dashboard request window; the reader filters on the stored
+        // timestamp_ns. Two records for the same tool, one month apart — a
+        // one-month window keeps only its own record.
+        let dir = std::env::temp_dir().join(format!("stats-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let store = GenAISqliteStore::new_with_path(
+            &dir.join("genai.db"),
+            PeriodicStoragePolicy::default(),
+        )
+        .unwrap();
+        for (id, when, before) in [
+            (1, "2026-01-01T00:00:00Z", 10),
+            (2, "2026-03-01T00:00:00Z", 20),
+        ] {
+            let record = json!({"id":id,"timestamp":when,"session_id":"source-session",
+                "tool_use_id":"tool","mode":"active","before_tokens":before,"after_tokens":2,
+                "content_included":false});
+            store
+                .save_tokenless_records("source", std::slice::from_ref(&record))
+                .unwrap();
+        }
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO genai_events
+            (event_type,call_id,session_id,start_timestamp_ns,tool_call_ids,event_json)
+            VALUES ('llm_call','call','local',1,'[\"tool\"]','{}')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .tokenless_applied_stats("source", &["tool"], 0, i64::MAX, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        let march = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let april = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let rows = store
+            .tokenless_applied_stats("source", &["tool"], march, april, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].before_tokens, 20,
+            "only the March record is in range"
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn list_rejects_a_non_object_record_without_panicking() {
         // record_json is external data. Valid JSON that is not an object (a
         // top-level array or scalar) used to hit `Value::index_mut`, which
