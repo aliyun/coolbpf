@@ -9,6 +9,8 @@ use std::ops::{Deref, DerefMut};
 pub(super) struct TestProbes {
     live: Option<crate::probes::Probes>,
     events: RefCell<VecDeque<Event>>,
+    /// Pids handed to `attach_process` by the production handlers.
+    attached_pids: RefCell<Vec<i32>>,
 }
 
 impl Deref for TestProbes {
@@ -43,7 +45,27 @@ impl TestProbes {
                 pids, uid, filewatch, dns, tcp, cgroup, limits,
             )?),
             events: RefCell::new(VecDeque::new()),
+            attached_pids: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Record a best-effort attach without touching kernel probes.
+    ///
+    /// Inherent methods win over the `Deref` target, so production handlers
+    /// that call `probes.attach_process(pid)` stay exercisable in replay
+    /// fixtures that own no live probe object.
+    pub(super) fn attach_process(&mut self, pid: i32) -> Result<()> {
+        self.attached_pids.borrow_mut().push(pid);
+        Ok(())
+    }
+
+    /// Record pid registration without touching kernel maps.
+    pub(super) fn add_traced_pid(&mut self, _pid: u32) -> Result<()> {
+        Ok(())
+    }
+
+    pub(super) fn attached_pids(&self) -> Vec<i32> {
+        self.attached_pids.borrow().clone()
     }
 
     pub(super) fn run(&self) -> Result<TestPoller> {
@@ -125,6 +147,7 @@ impl RuntimeFixture {
                 probes: TestProbes {
                     live: None,
                     events: RefCell::new(VecDeque::new()),
+                    attached_pids: RefCell::new(Vec::new()),
                 },
                 core: PipelineCore::new(&config, Analyzer::new()),
                 genai_builder: GenAIBuilder::new(),
