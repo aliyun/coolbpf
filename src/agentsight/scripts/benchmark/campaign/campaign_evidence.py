@@ -132,19 +132,28 @@ def continuous_recovery(
 
 def resource_samples(run_path: Path, field: str) -> list[tuple[float, float]]:
     """Read one process or internal metric from the recovery CSV."""
+    return _resource_series(run_path, (field,))[field]
+
+
+def _resource_series(
+    run_path: Path, fields: tuple[str, ...]
+) -> dict[str, list[tuple[float, float]]]:
+    samples: dict[str, list[tuple[float, float]]] = {field: [] for field in fields}
     path = run_path.parent / "measurement" / "metrics.csv"
     if not path.exists():
         path = path.with_suffix(path.suffix + ".gz")
     if not path.exists():
-        return []
-    samples = []
+        return samples
     opener = gzip.open if path.suffix == ".gz" else Path.open
     with opener(path, mode="rt", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             sample_time = timestamp(row.get("timestamp"))
-            value = finite_float(row.get(field))
-            if sample_time is not None and value is not None:
-                samples.append((sample_time, value))
+            if sample_time is None:
+                continue
+            for field in fields:
+                value = finite_float(row.get(field))
+                if value is not None:
+                    samples[field].append((sample_time, value))
     return samples
 
 
@@ -238,6 +247,9 @@ def recovery_outcome(
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
     load = load_samples(recover_path)
+    resources = _resource_series(
+        recover_path, ("rss_mb", "channel_length", "connection_cache_bytes")
+    )
     specifications = {
         "effective_qps": (
             nested(stable, "effective_qps"),
@@ -251,19 +263,19 @@ def recovery_outcome(
         ),
         "rss_mb": (
             nested(stable, "resources", "rss_mb", "avg"),
-            resource_samples(recover_path, "rss_mb"),
+            resources["rss_mb"],
             False,
         ),
     }
     optional_specifications = {
         "channel_length": (
             nested(stable, "resources", "channel_length", "avg"),
-            resource_samples(recover_path, "channel_length"),
+            resources["channel_length"],
             False,
         ),
         "connection_cache_bytes": (
             nested(stable, "resources", "connection_cache_bytes", "avg"),
-            resource_samples(recover_path, "connection_cache_bytes"),
+            resources["connection_cache_bytes"],
             False,
         ),
     }
