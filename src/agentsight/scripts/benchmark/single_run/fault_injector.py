@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import socket
 import ssl
 import time
@@ -206,8 +207,15 @@ def main() -> int:
     parser.add_argument("--watch-pid", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if args.count < 1 or args.oversized_bytes < 1 or args.timeout <= 0:
-        raise SystemExit("count, oversized-bytes, and timeout must be positive")
+    if (
+        args.count < 1
+        or args.oversized_bytes < 1
+        or not math.isfinite(args.timeout)
+        or args.timeout <= 0
+    ):
+        raise SystemExit(
+            "count and oversized-bytes must be positive; timeout must be finite and positive"
+        )
     report = inject(
         args.host,
         args.port,
