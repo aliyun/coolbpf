@@ -32,9 +32,12 @@ def exchange(
     truncate_sse: bool = False,
 ) -> str:
     """Send bytes over TLS and classify the peer response without raising."""
+    phase = "not_sent"
     try:
         with tls_socket(host, port, timeout) as connection:
+            phase = "send_failed"
             connection.sendall(payload)
+            phase = "closed"
             if truncate_sse:
                 with http.client.HTTPResponse(connection) as stream:
                     stream.begin()
@@ -70,7 +73,7 @@ def exchange(
                 return "sent_and_closed"
             response = connection.recv(4096)
     except (OSError, ssl.SSLError, http.client.HTTPException) as error:
-        return f"closed:{type(error).__name__}"
+        return f"{phase}:{type(error).__name__}"
     if not response:
         return "closed_without_response"
     first_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
@@ -116,6 +119,18 @@ def cases(oversized_bytes: int) -> dict[str, tuple[bytes, bool]]:
         "binary_body": (post(bytes(range(256))), True),
         "oversized_body": (post(b"x" * oversized_bytes), True),
     }
+
+
+def delivery_failures(outcomes: dict[str, dict[str, int]]) -> list[str]:
+    """Find cases with failed connection or incomplete request transmission."""
+    return sorted(
+        name
+        for name, counts in outcomes.items()
+        if any(
+            count > 0 and outcome.startswith(("not_sent:", "send_failed:", "failed:"))
+            for outcome, count in counts.items()
+        )
+    )
 
 
 def health_check(host: str, port: int, timeout: float) -> bool:
@@ -211,6 +226,7 @@ def main() -> int:
         if report["server_healthy_after"]
         and report["process_alive_after"] is not False
         and report.get("sse_truncation_verified") is True
+        and not delivery_failures(report["outcomes"])
         else 1
     )
 

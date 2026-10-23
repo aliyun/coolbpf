@@ -17,6 +17,7 @@ from campaign_evaluation import numeric_measurement
 # Campaign evidence uses the same percentile calculation as a single run.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
 from benchmark_stats import numeric, percentile
+from fault_injector import delivery_failures
 
 VERSIONS = ("baseline", "optimized")
 RECOVERY_PHASES = ("stable", "overload", "recover")
@@ -388,6 +389,9 @@ def fault_outcome(
     for name in ("server_healthy_after", "process_alive_before", "process_alive_after"):
         if value.get(name) is not True:
             failed.append(name)
+    failed.extend(
+        f"delivery:{name}" for name in delivery_failures({name: outcomes[name] for name in usable})
+    )
     if "sse_truncation_verified" not in value:
         missing.append("sse_truncation_verified")
     elif value["sse_truncation_verified"] is not True:
