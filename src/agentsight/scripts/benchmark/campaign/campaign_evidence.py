@@ -6,6 +6,7 @@ import csv
 import gzip
 import json
 import math
+import shlex
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -34,12 +35,37 @@ FAULT_CASES = {
     "tls_connect_then_close",
 }
 
-REQUIRED_REGRESSION_TOOLS = {
-    "diff-cover": ("diff-cover", "diff_cover.diff_cover_tool"),
-    "cargo fmt": ("cargo fmt",),
-    "cargo clippy": ("cargo clippy",),
-    "cargo test": ("cargo test",),
-}
+REQUIRED_REGRESSION_TOOLS = ("diff-cover", "cargo fmt", "cargo clippy", "cargo test")
+
+
+def regression_tool(check: dict[str, Any]) -> str | None:
+    """Identify the executed tool, never tool names inside arguments or output."""
+    try:
+        command = shlex.split(check["command"])
+    except ValueError:
+        return None
+    argv = check.get("argv", command)
+    if not isinstance(argv, list) or not argv or argv != command:
+        return None
+    if not all(isinstance(argument, str) for argument in argv):
+        return None
+    if any(flag in argv for flag in ("--help", "-h", "--version", "-V", "--list", "--no-run")):
+        return None
+    if Path(argv[0]).name == "rustup":
+        if len(argv) < 5 or argv[1] != "run":
+            return None
+        argv = argv[3:]
+    executable = Path(argv[0]).name
+    if executable == "cargo" and len(argv) >= 2:
+        # Cargo also accepts an explicit +toolchain selector before the subcommand.
+        position = 2 if argv[1].startswith("+") else 1
+        if len(argv) > position and argv[position] in ("fmt", "clippy", "test"):
+            return "cargo " + argv[position]
+    if executable == "diff-cover":
+        return "diff-cover"
+    if executable.startswith("python") and argv[1:3] == ["-m", "diff_cover.diff_cover_tool"]:
+        return "diff-cover"
+    return None
 
 
 def usable_regression_check(check: Any) -> bool:
@@ -611,16 +637,16 @@ def audit_campaign(
     checks = regression.get("checks", [])
     checks = checks if isinstance(checks, list) else []
     usable_checks = [check for check in checks if usable_regression_check(check)]
-    commands = "\n".join(check["command"] for check in usable_checks)
+    tools = {regression_tool(check) for check in usable_checks}
     if (
         not checks
         or len(usable_checks) != len(checks)
         or any(check["exit_code"] != 0 for check in usable_checks)
     ):
         issues.append("regression checks are missing or failed")
-    if not regression.get("full"):
+    if regression.get("full") is not True:
         issues.append("full Rust regression gates were not recorded")
-    for required, aliases in REQUIRED_REGRESSION_TOOLS.items():
-        if not any(alias in commands for alias in aliases):
+    for required in REQUIRED_REGRESSION_TOOLS:
+        if required not in tools:
             issues.append(f"regression evidence is missing {required}")
     return issues
