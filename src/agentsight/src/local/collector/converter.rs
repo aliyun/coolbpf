@@ -80,6 +80,9 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
     let mut agent_name = String::new();
+    let mut message_session_id = None;
+    let mut message_version = None;
+    let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
 
@@ -94,6 +97,30 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if matches!(event_type, "user" | "assistant") {
+            if message_session_id.is_none() {
+                message_session_id = event
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if message_version.is_none() {
+                message_version = event
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if event_type == "assistant" && message_model.is_none() {
+                message_model = event
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+        }
 
         match event_type {
             "runtime-config" => {
@@ -289,6 +316,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Claude Code records identity on messages without a runtime-config.
+    // Explicit runtime metadata retains precedence even when it arrives later.
+    if session_id.is_empty() {
+        session_id = message_session_id.unwrap_or_default();
+    }
+    if agent_version.is_empty() {
+        agent_version = message_version.unwrap_or_default();
+    }
+    if model_name.is_none() {
+        model_name = message_model;
+    }
     let total_steps = steps.len();
 
     let agent = Agent {
