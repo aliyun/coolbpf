@@ -529,7 +529,10 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     && step.calls().iter().enumerate().all(|(index, call)| {
                         step.results().iter().any(|result| {
                             result.source_call_id.as_deref().is_some_and(|id| {
-                                agentsight_atif::same_call_id(id, &call.tool_call_id)
+                                agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                ) == Some(call.tool_call_id.as_str())
                             })
                         }) || (step
                             .results()
@@ -1207,10 +1210,14 @@ pub(crate) fn extract_waste_candidates_from(
                             .source_call_id
                             .as_deref()
                             .and_then(|id| {
+                                let owner = agentsight_atif::resolve_call_id(
+                                    id,
+                                    step.calls().iter().map(|call| call.tool_call_id.as_str()),
+                                )?;
                                 step.calls()
                                     .iter()
-                                    .find(|c| agentsight_atif::same_call_id(&c.tool_call_id, id))
-                                    .map(|c| c.function_name.clone())
+                                    .find(|call| call.tool_call_id == owner)
+                                    .map(|call| call.function_name.clone())
                             })
                             .or_else(|| {
                                 // Positional pairing is only for documents whose
