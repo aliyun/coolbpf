@@ -361,19 +361,6 @@ fn flatten_tool_result_content(content: &Value) -> String {
 }
 
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
-    let last_agent_step = steps
-        .iter_mut()
-        .rev()
-        .find(|s| s.source == StepSource::Agent);
-    let step = match last_agent_step {
-        Some(s) => s,
-        None => return,
-    };
-
-    let observation = step.observation.get_or_insert(Observation {
-        results: Vec::new(),
-    });
-
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -383,6 +370,40 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let Some(id) = source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        // Prefer the original ID across the whole history before considering
+        // a unique provider echo; intervening assistant steps do not own it.
+        let exact = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
+        });
+        let owner = exact.or_else(|| {
+            let mut matched_id: Option<&str> = None;
+            let mut owner = None;
+            for (index, step) in steps.iter().enumerate() {
+                for call in step.tool_calls.iter().flatten() {
+                    if agentsight_atif::same_call_id(&call.tool_call_id, id) {
+                        if matched_id.is_some_and(|previous| previous != call.tool_call_id) {
+                            return None;
+                        }
+                        matched_id = Some(&call.tool_call_id);
+                        owner = Some(index);
+                    }
+                }
+            }
+            owner
+        });
+        let Some(step) = owner.map(|index| &mut steps[index]) else {
+            continue;
+        };
+        let observation = step.observation.get_or_insert_with(|| Observation {
+            results: Vec::new(),
+        });
         let content = Some(Value::String(
             block
                 .get("content")
