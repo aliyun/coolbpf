@@ -67,6 +67,20 @@ use crate::tokenizer::LlmTokenizer;
 #[cfg(test)]
 use capture_runtime_tests::{TestPoller as ProbesPoller, TestProbes as Probes};
 
+/// Minimal SSL-attach surface used by [`AgentSight::attach_if_agent_name_unknown`].
+///
+/// Implemented for the real probe manager and, in tests, for stubs so the
+/// "unknown agent name" decision can be exercised without kernel probes.
+pub(crate) trait SslProbe {
+    fn attach_ssl(&mut self, pid: i32);
+}
+
+impl SslProbe for Probes {
+    fn attach_ssl(&mut self, pid: i32) {
+        let _ = self.attach_process(pid);
+    }
+}
+
 /// Main AgentSight struct for tracing AI agent activity
 ///
 /// This is the unified entry point that orchestrates:
@@ -614,6 +628,10 @@ impl AgentSight {
                 result.pid,
                 agent_name.as_deref().unwrap_or("unknown"),
             );
+            // Best-effort attach for processes without a recognized agent name:
+            // the first TLS connection may arrive before a later connection
+            // scan identifies the agent.
+            Self::attach_if_agent_name_unknown(&mut probes, agent_name.as_deref(), result.pid);
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -1122,6 +1140,23 @@ impl AgentSight {
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
     }
 
+    /// Attach SSL probes best-effort when the process has no recognized agent
+    /// name yet.
+    ///
+    /// `Probes::attach_process` already logs the degrade path and registers the
+    /// pid for global uprobe coverage, so a failure is not fatal here.  The
+    /// decision lives in this helper so it stays unit-testable without live
+    /// eBPF probes: the surrounding scan loops still need a real `Probes`.
+    fn attach_if_agent_name_unknown<P: SslProbe>(
+        probes: &mut P,
+        agent_name: Option<&str>,
+        pid: u32,
+    ) {
+        if agent_name.is_none() {
+            probes.attach_ssl(pid as i32);
+        }
+    }
+
     fn register_resource_targets(
         targets: &Arc<RwLock<HashMap<u32, String>>>,
         pid: u32,
@@ -1373,9 +1408,11 @@ impl AgentSight {
                 );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
-                } else if let Some(agent_name) =
-                    Self::conn_scan_agent_name(&self.scanner, dns_event.pid)
-                {
+                }
+                // Resolve/register the agent name regardless of the attach
+                // result so the resource target is recorded even when the
+                // uprobe attach degrades.
+                if let Some(agent_name) = Self::conn_scan_agent_name(&self.scanner, dns_event.pid) {
                     self.pid_agent_name_cache
                         .put(dns_event.pid, agent_name.clone());
                     if let Ok(mut targets) = self.resource_targets.write() {
@@ -1445,7 +1482,11 @@ impl AgentSight {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
+                    return;
                 }
+                // Unknown process: attach best-effort so a first TLS connection
+                // is captured before any scan classifies it.
+                Self::attach_if_agent_name_unknown(&mut self.probes, None, *pid);
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
                 self.flush_completions_for_pid(*pid);
@@ -3217,6 +3258,10 @@ fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, St
     report.push_str(&format!(", pending_genai {pending_genai} entries"));
     (needs_attention, report)
 }
+
+#[cfg(test)]
+#[path = "unified/attach_early_tests.rs"]
+mod attach_early_tests;
 
 #[cfg(test)]
 mod response_pending_tests;
