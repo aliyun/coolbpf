@@ -392,7 +392,7 @@ fn gemini_step(
                 let failed = call.get("status").and_then(|v| v.as_str()) == Some("error");
                 observations.push(ObservationResult {
                     source_call_id: Some(call_id.to_string()),
-                    content: Some(serde_json::Value::String(joined_text(Some(result)))),
+                    content: Some(serde_json::Value::String(tool_result_text(result))),
                     subagent_trajectory_ref: None,
                     extra: failed.then(|| {
                         HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(true))])
@@ -436,6 +436,31 @@ fn gemini_step(
         llm_call_count: None,
         is_copied_context: None,
     }
+}
+
+// Keep the response payload (including structured JSON), without serializing
+// binary parts or leaking the function-call envelope into token estimates.
+fn tool_result_text(result: &serde_json::Value) -> String {
+    fn part_text(part: &serde_json::Value) -> Option<String> {
+        if let Some(response) = part.pointer("/functionResponse/response") {
+            return Some(match response {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            });
+        }
+        part.as_str()
+            .or_else(|| part.get("text").and_then(|v| v.as_str()))
+            .map(String::from)
+    }
+    let text = match result {
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(part_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        part => part_text(part).unwrap_or_default(),
+    };
+    text.trim().to_string()
 }
 
 /// Whether a `gemini` record carries none of the mapped content; skipping
