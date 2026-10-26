@@ -383,7 +383,8 @@ pub(crate) fn is_content_degraded(traj: &AtifTrajectory) -> bool {
 
 /// Per-turn metadata kept aside to compute `removable_turn` in a second pass.
 struct TurnMeta {
-    primary_sig: String, // "name|cmd_sig" of the first tool call in the step
+    actions: Vec<(String, serde_json::Value)>,
+    user_turn: usize,
     all_calls_errored: bool,
     has_tool: bool,
 }
@@ -495,6 +496,7 @@ impl CallBuilder {
 fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall> {
     let origin = traj.origin_ts().unwrap_or_default();
     let mut b = CallBuilder::new(origin, static_region);
+    let mut user_turn = 0usize;
 
     for step in &traj.steps {
         match step.source.as_str() {
@@ -507,20 +509,14 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     turn_output += estimate_tokens(m);
                 }
                 let mut label: Option<String> = None;
-                let mut primary_sig = String::new();
+                let mut actions = Vec::new();
                 for call in step.calls() {
                     // Tool-call args are model-generated output, replayed as history.
                     turn_output += estimate_tokens(&call.arguments.to_string());
                     if label.is_none() {
                         label = Some(call.function_name.clone());
                     }
-                    if primary_sig.is_empty() {
-                        primary_sig = format!(
-                            "{}|{}",
-                            call.function_name,
-                            call.command_summary(usize::MAX)
-                        );
-                    }
+                    actions.push((call.function_name.clone(), call.arguments.clone()));
                 }
                 let has_tool = !step.calls().is_empty();
                 let all_calls_errored = has_tool
@@ -547,7 +543,8 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                     turn_output,
                     label,
                     TurnMeta {
-                        primary_sig,
+                        actions,
+                        user_turn,
                         all_calls_errored,
                         has_tool,
                     },
@@ -564,6 +561,7 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
                 }
             }
             "user" => {
+                user_turn += 1;
                 b.hist_user += estimate_tokens(step.message.as_deref().unwrap_or(""));
             }
             _ => {} // system steps feed the static region, already injected
@@ -571,11 +569,16 @@ fn compute_llm_calls(traj: &AtifTrajectory, static_region: usize) -> Vec<LlmCall
     }
 
     // Second pass: orchestration-layer heuristic for removable_turn.
-    // A turn is flagged when it duplicates the previous turn's primary action
-    // (spinning) or every tool call in it errored (failed retry).
+    // Repeating one action does not make the whole parallel batch redundant.
+    // A new user turn can explicitly request a repeat, so compare complete
+    // action batches only within the same user turn. Failed-call handling is
+    // independent of this duplicate-action heuristic.
     for i in 0..b.calls.len() {
         let m = &b.metas[i];
-        let dup = i > 0 && !m.primary_sig.is_empty() && b.metas[i - 1].primary_sig == m.primary_sig;
+        let dup = i > 0
+            && !m.actions.is_empty()
+            && b.metas[i - 1].user_turn == m.user_turn
+            && b.metas[i - 1].actions == m.actions;
         b.calls[i].removable_turn = dup || (m.has_tool && m.all_calls_errored);
     }
 
