@@ -134,6 +134,7 @@ def continuous_recovery(
     higher_is_better: bool,
     max_gap_seconds: float = 2.5,
     started_at: float | None = None,
+    ended_at: float | None = None,
 ) -> float | None:
     """Return time to the first uninterrupted recovered window."""
     if reference is None or not samples:
@@ -144,6 +145,10 @@ def continuous_recovery(
     recovered_at: float | None = None
     previous: float | None = None
     for sample_time, value in ordered:
+        # Legacy k6 series label each second at its beginning. Raw load
+        # records and resource points are filtered by the caller first.
+        if sample_time < math.floor(origin) or (ended_at is not None and sample_time > ended_at):
+            continue
         if value is None:
             recovered_at = None
             previous = sample_time
@@ -202,7 +207,9 @@ def _resource_series(
     return samples
 
 
-def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
+def load_samples(
+    run_path: Path, *, started_at: float | None = None, ended_at: float | None = None
+) -> dict[str, list[tuple[float, float]]]:
     """Build per-second effective-QPS and P99-latency samples from k6 JSONL."""
     path = run_path.parent / "measurement" / "k6.jsonl"
     if not path.exists():
@@ -219,6 +226,10 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
         value = finite_float(data.get("value"))
         if sample_time is None or value is None:
             continue
+        if (started_at is not None and sample_time < started_at) or (
+            ended_at is not None and sample_time > ended_at
+        ):
+            continue
         second = int(sample_time)
         if item.get("metric") == "benchmark_requests":
             requests[second] += value
@@ -230,12 +241,12 @@ def load_samples(run_path: Path) -> dict[str, list[tuple[float, float]]]:
         if previous_second is not None and second > previous_second + 1:
             # One zero breaks continuity without allocating a potentially huge gap.
             throughput.append((float(previous_second + 1), 0.0))
-        throughput.append((float(second), requests[second]))
+        throughput.append((max(float(second), started_at or float(second)), requests[second]))
         previous_second = second
     return {
         "effective_qps": throughput,
         "latency_p99_ms": [
-            (float(key), float(percentile(latencies[key], 0.99)))
+            (max(float(key), started_at or float(key)), float(percentile(latencies[key], 0.99)))
             for key in sorted(latencies)
             if latencies[key]
         ],
@@ -280,15 +291,31 @@ def recovery_outcome(
             "failed": [],
             "seconds": {},
         }
+    ended_at = numeric(recover_run.get("ended_at_unix"))
+    if "ended_at_unix" in recover_run and (ended_at is None or ended_at <= started_at):
+        return {
+            "verdict": "INCONCLUSIVE",
+            "missing": ["recover.ended_at_unix"],
+            "failed": [],
+            "seconds": {},
+        }
     recover = summary_of_phase(phases, "recover")
     tolerance = settings["tolerance_ratio"]
     window = settings["recovery_window_seconds"]
-    load = load_samples(recover_path)
+    load = load_samples(recover_path, started_at=started_at, ended_at=ended_at)
     resources = _resource_series(
         recover_path,
         ("rss_mb", "channel_length", "connection_cache_bytes"),
         preserve_gaps=True,
     )
+    resources = {
+        field: [
+            (sample_time, value)
+            for sample_time, value in samples
+            if sample_time >= started_at and (ended_at is None or sample_time <= ended_at)
+        ]
+        for field, samples in resources.items()
+    }
     specifications = {
         "effective_qps": (
             nested(stable, "effective_qps"),
@@ -338,6 +365,7 @@ def recovery_outcome(
             window,
             higher_is_better=higher_is_better,
             started_at=started_at,
+            ended_at=ended_at,
         )
         for name, (reference, samples, higher_is_better) in specifications.items()
     }
