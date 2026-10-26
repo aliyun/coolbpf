@@ -114,6 +114,7 @@ dirs = { workspace = true }
 sysinfo = "0.33"
 
 [dev-dependencies]
+dirs = { workspace = true }
 actix-web = { version = "4", features = ["macros"] }
 agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
 criterion = { workspace = true }

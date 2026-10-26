@@ -1,7 +1,7 @@
 //! Local agent session file discovery.
 //!
-//! Scans known local AI agent session roots and returns JSONL files that can be
-//! converted into ATIF. Qoder/QoderWork/Claude Code share the Claude-style JSONL
+//! Scans known local AI agent session roots for JSONL and legacy Gemini JSON
+//! files to convert into ATIF. Qoder/QoderWork/Claude Code share the JSONL
 //! schema; Codex/Cursor/Gemini CLI roots are discovered here so converter
 //! support can be added without changing the API surface.
 
@@ -16,8 +16,8 @@ enum Layout {
     PerProject,
     /// `<root>/<session>.jsonl`.
     Flat,
-    /// `<root>/<project>/chats/<session>.jsonl` with sub-agent transcripts
-    /// under `chats/<parent-session>/<session>.jsonl` (Gemini CLI).
+    /// Gemini sessions under `<root>/<project>/chats/`, with sub-agent
+    /// transcripts under `chats/<parent-session>/`; files use `.jsonl` or `.json`.
     Chats,
 }
 
@@ -487,8 +487,8 @@ fn chats_project_name(project_dir: &Path) -> Option<String> {
 
 /// Discover session files inside one `<project>/chats/` directory.
 ///
-/// Main sessions are `session-*.jsonl` files (any non-empty stem is accepted
-/// — the converter rejects foreign content gracefully); subdirectories hold
+/// Main sessions use `.jsonl` record streams or legacy `.json` documents.
+/// Any non-empty stem is accepted; subdirectories hold
 /// sub-agent transcripts named by their full session id.
 fn discover_in_chats_project(chats: &Path, project: &str, source: &str) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
@@ -510,7 +510,10 @@ fn discover_in_chats_project(chats: &Path, project: &str, source: &str) -> Vec<D
             sessions.extend(discover_chats_subagents(&path, project, source));
             continue;
         }
-        let Some(stem) = name.strip_suffix(".jsonl") else {
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
             continue;
         };
         if stem.is_empty() {
@@ -549,7 +552,10 @@ fn discover_chats_subagents(
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(stem) = name.strip_suffix(".jsonl") else {
+        let Some(stem) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
             continue;
         };
         if stem.is_empty() {

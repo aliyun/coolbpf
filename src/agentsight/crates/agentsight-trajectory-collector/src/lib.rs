@@ -157,14 +157,9 @@ fn process_session(
     let content =
         std::fs::read(&session.path).with_context(|| format!("read {}", session.path.display()))?;
     let content = String::from_utf8_lossy(&content);
-    let mut events = qoder::load_jsonl_events(&content);
-    // Legacy Gemini (<= 0.38) conversations are one pretty-printed JSON
-    // document: no line parses, so the whole content is the only unit.
-    if events.is_empty() {
-        if let Some(doc) = gemini::legacy_document(&content) {
-            events.push(doc);
-        }
-    }
+    let events = gemini::legacy_document(&content)
+        .map(|document| vec![document])
+        .unwrap_or_else(|| qoder::load_jsonl_events(&content));
     if events.is_empty() {
         // Record file state so persistently corrupted files are not re-read
         // every scan round (they will be retried only when size/mtime change).

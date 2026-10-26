@@ -7,8 +7,8 @@
 //! type: user|gemini|info|error|warning, content, ...}`, with `toolCalls?`/
 //! `thoughts?`/`tokens?`/`model?` on `gemini` records) and the correction
 //! records `{$rewindTo}`, `{$patch}` and `{$set}`. Older CLIs (<= 0.38) wrote
-//! one pretty-printed JSON document with an embedded `messages` array — no
-//! line parses as JSONL, so [`legacy_document`] absorbs the whole file and
+//! one pretty-printed JSON document with an embedded `messages` array, not a
+//! record stream; [`legacy_document`] recognizes the whole file first and
 //! the replay ingests it through the partial-metadata path.
 
 use std::collections::{HashMap, HashSet};
@@ -41,9 +41,9 @@ pub fn is_gemini_chat(events: &[serde_json::Value]) -> bool {
 /// Parse a legacy (<= 0.38) conversation document from raw file content.
 ///
 /// Those CLIs wrote the conversation with `JSON.stringify(conversation,
-/// null, 2)`: multi-line pretty-printed JSON where no single line parses, so
-/// the JSONL pass comes back empty. Mirrors the CLI's own whole-file
-/// fallback: the content must parse as one partial-metadata record carrying
+/// null, 2)`. Individual lines can accidentally parse as JSON values, so
+/// callers must recognize a whole document before treating it as JSONL.
+/// The content must parse as one partial-metadata record carrying
 /// an embedded `messages` array.
 pub fn legacy_document(content: &str) -> Option<serde_json::Value> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content).trim();
