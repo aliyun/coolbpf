@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from campaign_evaluation import numeric_measurement
+from campaign_evaluation import bounded_measurement
 
 # Campaign evidence uses the same percentile calculation as a single run.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "single_run"))
@@ -137,9 +137,13 @@ def continuous_recovery(
     ended_at: float | None = None,
 ) -> float | None:
     """Return time to the first uninterrupted recovered window."""
+    reference = bounded_measurement(reference)
     if reference is None or not samples:
         return None
-    ordered = sorted(samples, key=lambda sample: sample[0])
+    ordered = sorted(
+        ((sample_time, bounded_measurement(value)) for sample_time, value in samples),
+        key=lambda sample: sample[0],
+    )
     origin = ordered[0][0] if started_at is None else started_at
     threshold = reference * (1 - tolerance if higher_is_better else 1 + tolerance)
     recovered_at: float | None = None
@@ -377,7 +381,7 @@ def recovery_outcome(
     ]
     quality_checks = {
         "trace_completeness": (
-            numeric_measurement(nested(recover, "trace_completeness")),
+            bounded_measurement(nested(recover, "trace_completeness"), maximum=1),
             thresholds["min_trace_completeness"],
         ),
     }
@@ -465,15 +469,15 @@ def fault_outcome(
     summary = run.get("summary", {})
     checks = {
         "http_success_rate": (
-            numeric_measurement(nested(summary, "http_success_rate")),
+            bounded_measurement(nested(summary, "http_success_rate"), maximum=1),
             thresholds["min_http_success_rate"],
         ),
         "trace_completeness": (
-            numeric_measurement(nested(summary, "trace_completeness")),
+            bounded_measurement(nested(summary, "trace_completeness"), maximum=1),
             thresholds["min_trace_completeness"],
         ),
         "token_accuracy": (
-            numeric_measurement(nested(summary, "token_accuracy")),
+            bounded_measurement(nested(summary, "token_accuracy"), maximum=1),
             thresholds["min_token_accuracy"],
         ),
         "process_survived": (nested(summary, "process_survived"), True),
