@@ -246,7 +246,10 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # Thinking is part of the turn even when the record carries no
             # text or tool call: Claude Code can stream it in its own record,
             # and dropping the step also dropped the reasoning_content.
-            if not text.strip() and not tool_calls and not thinking:
+            # A measured empty response must survive as well: its usage can
+            # advance independently of visible content.
+            metrics = usage_to_metrics(msg.get("usage"))
+            if not text.strip() and not tool_calls and not thinking and not metrics:
                 continue
 
             step_id += 1
@@ -272,8 +275,6 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # message into several assistant records that repeat (or
             # cumulatively advance) the same usage, so counting each record
             # doubles the cost input.
-            usage = msg.get("usage")
-            metrics = usage_to_metrics(usage)
             if metrics:
                 message_id = msg.get("id")
                 if not isinstance(message_id, str) or not message_id:
