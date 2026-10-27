@@ -171,6 +171,9 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
     session_id = filepath.stem
     agent_name = "unknown"
     model_name = None
+    # Only known Qoder sources use partial accounting. Unidentified exports
+    # retain the existing snapshot convention for backward compatibility.
+    partial_usage = ".qoder" in filepath.parts or ".qoderwork" in filepath.parts
 
     steps = []
     tool_call_steps = {}
@@ -184,6 +187,9 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
         # Detect agent name from runtime-config
         if entry_type == "runtime-config":
             model_name = entry.get("model")
+            entrypoint = entry.get("entrypoint")
+            if entrypoint in ("qoder", "qoderwork", "claude-code"):
+                partial_usage = entrypoint != "claude-code"
             continue
 
         # Detect mode/config entries (skip)
@@ -277,7 +283,7 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # doubles the cost input.
             if metrics:
                 message_id = msg.get("id")
-                if not isinstance(message_id, str) or not message_id:
+                if partial_usage or not isinstance(message_id, str) or not message_id:
                     message_id = None
                 usage_records.append((step, message_id, metrics))
 
