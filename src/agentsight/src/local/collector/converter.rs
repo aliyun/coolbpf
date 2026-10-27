@@ -80,6 +80,9 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
     let mut model_name: Option<String> = None;
     let mut agent_version = String::new();
     let mut agent_name = String::new();
+    let mut message_session_id = None;
+    let mut message_version = None;
+    let mut message_model = None;
     let mut steps: Vec<Step> = Vec::new();
     let mut step_id: usize = 0;
 
@@ -94,6 +97,30 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if matches!(event_type, "user" | "assistant") {
+            if message_session_id.is_none() {
+                message_session_id = event
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if message_version.is_none() {
+                message_version = event
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+            if event_type == "assistant" && message_model.is_none() {
+                message_model = event
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+            }
+        }
 
         match event_type {
             "runtime-config" => {
@@ -289,6 +316,17 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         }
     }
 
+    // Claude Code records identity on messages without a runtime-config.
+    // Explicit runtime metadata retains precedence even when it arrives later.
+    if session_id.is_empty() {
+        session_id = message_session_id.unwrap_or_default();
+    }
+    if agent_version.is_empty() {
+        agent_version = message_version.unwrap_or_default();
+    }
+    if model_name.is_none() {
+        model_name = message_model;
+    }
     let total_steps = steps.len();
 
     let agent = Agent {
@@ -361,19 +399,6 @@ fn flatten_tool_result_content(content: &Value) -> String {
 }
 
 fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
-    let last_agent_step = steps
-        .iter_mut()
-        .rev()
-        .find(|s| s.source == StepSource::Agent);
-    let step = match last_agent_step {
-        Some(s) => s,
-        None => return,
-    };
-
-    let observation = step.observation.get_or_insert(Observation {
-        results: Vec::new(),
-    });
-
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type != "tool_result" {
@@ -383,6 +408,40 @@ fn append_tool_results(steps: &mut [Step], blocks: &[Value]) {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let Some(id) = source_call_id.as_deref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        // Prefer the original ID across the whole history before considering
+        // a unique provider echo; intervening assistant steps do not own it.
+        let exact = steps.iter().rposition(|step| {
+            step.source == StepSource::Agent
+                && step
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.tool_call_id == id))
+        });
+        let owner = exact.or_else(|| {
+            let mut matched_id: Option<&str> = None;
+            let mut owner = None;
+            for (index, step) in steps.iter().enumerate() {
+                for call in step.tool_calls.iter().flatten() {
+                    if agentsight_atif::same_call_id(&call.tool_call_id, id) {
+                        if matched_id.is_some_and(|previous| previous != call.tool_call_id) {
+                            return None;
+                        }
+                        matched_id = Some(&call.tool_call_id);
+                        owner = Some(index);
+                    }
+                }
+            }
+            owner
+        });
+        let Some(step) = owner.map(|index| &mut steps[index]) else {
+            continue;
+        };
+        let observation = step.observation.get_or_insert_with(|| Observation {
+            results: Vec::new(),
+        });
         let content = Some(Value::String(
             block
                 .get("content")
