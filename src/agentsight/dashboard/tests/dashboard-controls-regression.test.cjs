@@ -407,6 +407,114 @@ test('risk enforcement: the violation offset is clamped when the list shrinks', 
     'the clamped page must not be empty: it must fall back to the remaining row');
 });
 
+async function renderRiskEnforcementCapabilities(capabilities) {
+  const { calls, stubs } = deferredFetchStubs([
+    'fetchEnforcementHealth',
+    'fetchEnforcementBindings',
+    'fetchEnforcementViolations',
+  ]);
+  const driver = createHooksDriver();
+  const pageModule = loadPageModule('src/pages/RiskEnforcementPage.tsx', {
+    'react-router-dom': { useSearchParams: () => [new URLSearchParams(), () => {}] },
+    '../i18n': {
+      useI18n: () => ({ t: (key, params) => params?.mode ? `${key} ${params.mode}` : key }),
+      useLocaleTag: () => 'en-US',
+    },
+    '../utils/apiClient': {
+      ...stubs,
+      createCredentialBinding: async () => {},
+      detachEnforcementBinding: async () => {},
+      enforcementSupportsMode: () => true,
+      enforcementViolationTotal: (violations) => violations.length,
+    },
+    '../utils/enforcementMode': {
+      effectiveBindingMode: (request) => request.policy_mode ?? 'observe',
+    },
+    '../components/Pagination': componentStub('Pagination'),
+  }, driver);
+
+  const rendered = driver.render(pageModule.RiskEnforcementPage);
+  rendered.effects[0]();
+  calls.fetchEnforcementHealth[0].resolve({
+    ready: true,
+    backend: 'actplane',
+    capabilities,
+    message: null,
+  });
+  calls.fetchEnforcementBindings[0].resolve({ bindings: [] });
+  calls.fetchEnforcementViolations[0].resolve({ violations: [] });
+  await settle();
+  await settle();
+  return driver.render(pageModule.RiskEnforcementPage).element;
+}
+
+function collectText(node, out = []) {
+  if (node == null || typeof node === 'boolean') return out;
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node));
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, out);
+    return out;
+  }
+  if (typeof node === 'object') collectText(node.children, out);
+  return out;
+}
+
+const productionCapabilities = {
+  max_active_bindings: 10,
+  credential_observe: true,
+  credential_audit: true,
+  credential_enforce: false,
+  policy_handoff: false,
+  alternate_pid_retarget: false,
+  test_development: false,
+};
+
+for (const { name, capabilities, expected, absent } of [
+  {
+    name: 'file delete guard reports its runtime mode',
+    capabilities: {
+      ...productionCapabilities,
+      file_delete_guard: true,
+      file_delete_guard_mode: 'inode',
+    },
+    expected: ['risk.capability.prod', 'risk.capability.fileDeleteGuardWithMode inode'],
+    absent: ['risk.capability.testDev'],
+  },
+  {
+    name: 'legacy health without guard fields keeps the existing display',
+    capabilities: productionCapabilities,
+    expected: ['risk.capability.prod'],
+    absent: ['risk.capability.fileDeleteGuard'],
+  },
+  {
+    name: 'test backend and a mode-less guard keep independent labels',
+    capabilities: {
+      ...productionCapabilities,
+      credential_enforce: true,
+      policy_handoff: true,
+      test_development: true,
+      file_delete_guard: true,
+      file_delete_guard_mode: null,
+    },
+    expected: ['risk.capability.testDev', 'risk.capability.fileDeleteGuard'],
+    absent: ['risk.capability.prod', 'risk.capability.fileDeleteGuardWithMode'],
+  },
+]) {
+  test(`risk enforcement: ${name}`, async () => {
+    const text = collectText(await renderRiskEnforcementCapabilities(capabilities));
+    for (const value of expected) {
+      assert.ok(text.includes(value), `missing ${value} in ${JSON.stringify(text)}`);
+    }
+    for (const prefix of absent) {
+      assert.ok(!text.some((value) => value.startsWith(prefix)),
+        `unexpected ${prefix} in ${JSON.stringify(text)}`);
+    }
+  });
+}
+
 // ─── Bug 5: the sessions stat card reports a page instead of the total ───────
 
 test('system-audit: the sessions card does not fall back to the loaded page length', () => {
