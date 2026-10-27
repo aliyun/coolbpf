@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use agentsight_atif::{
     ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall, same_call_id,
+    ObservationResult, Step, StepSource, ToolCall, resolve_call_id,
 };
 
 use crate::genai::semantic::{
@@ -869,10 +869,13 @@ fn collect_tool_responses(
     // separator differences some agents introduce when echoing a call id back.
     for (id, content_str, extra) in &pending {
         let Some(tc_id) = id else { continue };
-        let found = tc_ids
-            .iter()
-            .find(|(known, _)| same_call_id(known, tc_id))
-            .map(|(_, idx)| *idx);
+        let owner = resolve_call_id(tc_id, tc_ids.keys().copied());
+        let found = owner.and_then(|owner| {
+            tc_ids
+                .iter()
+                .find(|(known, _)| **known == owner)
+                .map(|(_, index)| *index)
+        });
         let Some(idx) = found else { continue };
         if matched[idx] {
             continue;

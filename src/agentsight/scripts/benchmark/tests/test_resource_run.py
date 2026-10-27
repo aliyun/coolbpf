@@ -232,7 +232,7 @@ def command(output: Path, binary: Path, script: Path = SINGLE_RUN / "resource_ru
         "--duration",
         "2",
         "--startup-delay",
-        "0",
+        "1",
         "--rate-tolerance",
         "0.15",
         "--validation-wait-seconds",
@@ -831,6 +831,27 @@ def fixture_repo(tmp_path: Path) -> Path:
     (repo / "untracked").write_text("untracked")
     executable(component / "observer", FAKE_TRACE.replace("MEMORY_MIB", "4"))
     return repo
+
+
+def test_short_load_tolerates_delayed_collector_startup(
+    tmp_path: Path, environment: dict[str, str]
+) -> None:
+    repo = fixture_repo(tmp_path)
+    harness = repo / "src/agentsight/scripts/benchmark/single_run"
+    collector = harness / "collect_metrics.py"
+    source = collector.read_text()
+    marker = "    identity = read_process_identity(args.pid)\n"
+    assert source.count(marker) == 1
+    collector.write_text(source.replace(marker, "    time.sleep(0.25)\n" + marker))
+    binary = repo / "src/agentsight/observer"
+    output = tmp_path / "result"
+    result = run(command(output, binary, harness / "resource_run.sh"), environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((output / "resource-summary.json").read_text())
+    measured = summary["runs"]["run"]
+    assert summary["valid"]
+    assert measured["cpu_measurement_seconds"] == pytest.approx(2, abs=0.1)
+    assert_reaped(output)
 
 
 def test_git_ab_freezes_dirty_tree_and_preserves_index(

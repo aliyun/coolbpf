@@ -60,14 +60,11 @@ pub fn convert_jsonl_content_to_atif(content: &str) -> anyhow::Result<AtifTrajec
         || content.contains("$patch")
         || content.contains("$set")
     {
-        let mut events = agentsight_trajectory_collector::qoder::load_jsonl_events(content);
-        // Legacy (<= 0.38) files are one pretty-printed document: the JSONL
-        // pass comes back empty and only the whole-file fallback absorbs it.
-        if events.is_empty() {
-            if let Some(doc) = agentsight_trajectory_collector::gemini::legacy_document(content) {
-                events.push(doc);
-            }
-        }
+        // A legacy document may contain individually parseable lines (for
+        // example a scalar in an array). Recognize the whole document first.
+        let events = agentsight_trajectory_collector::gemini::legacy_document(content)
+            .map(|document| vec![document])
+            .unwrap_or_else(|| agentsight_trajectory_collector::qoder::load_jsonl_events(content));
         if agentsight_trajectory_collector::gemini::is_gemini_chat(&events) {
             return agentsight_trajectory_collector::gemini::convert_gemini_events(
                 &events,

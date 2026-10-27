@@ -273,26 +273,26 @@ def _entries_to_atif(entries: Iterable[dict], filepath: Path) -> Optional[dict]:
             # cumulatively advance) the same usage, so counting each record
             # doubles the cost input.
             usage = msg.get("usage")
-            if isinstance(usage, dict):
+            metrics = usage_to_metrics(usage)
+            if metrics:
                 message_id = msg.get("id")
                 if not isinstance(message_id, str) or not message_id:
                     message_id = None
-                usage_records.append((step, message_id, usage))
+                usage_records.append((step, message_id, metrics))
 
             steps.append(step)
 
     # One message id may span several records; the last snapshot is the most
-    # complete. Records without an id keep their own usage, as before.
+    # complete usable measurement. Empty/invalid tails must not erase it.
+    # Records without an id keep their own usage, as before.
     last_usage_index = {}
     for index, (_, message_id, _) in enumerate(usage_records):
         if message_id is not None:
             last_usage_index[message_id] = index
-    for index, (step, message_id, usage) in enumerate(usage_records):
+    for index, (step, message_id, metrics) in enumerate(usage_records):
         if message_id is not None and last_usage_index[message_id] != index:
             continue
-        metrics = usage_to_metrics(usage)
-        if metrics:
-            step["metrics"] = metrics
+        step["metrics"] = metrics
 
     if not steps:
         return None

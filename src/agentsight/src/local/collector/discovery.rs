@@ -1,7 +1,8 @@
 //! Cross-platform local agent session file discovery
 //!
-//! Scans well-known directories on the local machine for JSONL session files
-//! produced by AI coding agents (Claude Code, Qoder, QoderWork, Codex, Cursor).
+//! Scans well-known directories on the local machine for agent session files
+//! (Claude Code, Qoder, QoderWork, Codex, Cursor and Gemini CLI), including
+//! Gemini's legacy JSON conversations.
 //! Uses `dirs::home_dir()` for cross-platform `$HOME` resolution.
 
 use serde::{Deserialize, Serialize};
@@ -164,7 +165,9 @@ fn scan_flat_dir(
         if is_dir {
             scan_flat_dir(&path, source, project, sessions);
         } else if path.is_file()
-            && path.extension().is_some_and(|ext| ext == "jsonl")
+            && path.extension().is_some_and(|ext| {
+                ext == "jsonl" || (source.agent_id == "gemini-cli" && ext == "json")
+            })
             && let Some(session) = parse_session_file(&path, source, project)
         {
             sessions.push(session);
@@ -178,12 +181,14 @@ fn scan_project_dir(
     project: &str,
     sessions: &mut Vec<LocalSession>,
 ) {
-    // Scan top-level .jsonl files
+    // Scan JSONL files and Gemini's legacy JSON conversations.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && path.extension().is_some_and(|ext| ext == "jsonl")
+                && path.extension().is_some_and(|ext| {
+                    ext == "jsonl" || (source.agent_id == "gemini-cli" && ext == "json")
+                })
                 && let Some(session) = parse_session_file(&path, source, project)
             {
                 sessions.push(session);
@@ -259,6 +264,38 @@ fn parse_session_file(path: &Path, source: &SessionSource, project: &str) -> Opt
     let content = fs::read(path)
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
+
+    if source.agent_id == "gemini-cli" {
+        // Corrections can remove or replace the first user input, or the
+        // entire conversation. Preview the same replayed state as details.
+        let trajectory = super::converter::convert_jsonl_content_to_atif(&content).ok()?;
+        let first_message = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == agentsight_atif::StepSource::User)
+            .map(|step| strip_system_context(&step.message))
+            .find(|text| !is_injected_user_text(text))?;
+        return Some(LocalSession {
+            session_id: trajectory
+                .session_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+            agent_id: source.agent_id.to_string(),
+            agent_name: source.agent_name.to_string(),
+            agent_icon: source.icon.to_string(),
+            project: project.to_string(),
+            message_count: trajectory.steps.len().try_into().unwrap_or(u32::MAX),
+            first_message: truncate(&first_message, 200),
+            file_path: path.to_string_lossy().to_string(),
+            file_size_kb,
+            modified_ts,
+        });
+    }
 
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
 
@@ -605,6 +642,16 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn discover_test_sessions(home: &std::path::Path) -> Vec<super::LocalSession> {
+        let mut sessions = Vec::new();
+        for source in super::SESSION_SOURCES {
+            for relative in source.dirs {
+                super::scan_source(&home.join(relative), source, &mut sessions);
+            }
+        }
+        sessions
+    }
+
     use super::*;
 
     #[test]
@@ -700,9 +747,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         assert!(sessions.iter().any(|s| s.session_id == "abc123"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -719,9 +764,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         assert!(sessions.iter().any(|s| s.agent_id == "codex"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -744,9 +787,7 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         let session = sessions
             .iter()
             .find(|s| s.agent_id == "gemini-cli")
@@ -776,15 +817,13 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", &home) };
-        let sessions = discover_local_sessions();
+        let sessions = discover_test_sessions(&home);
         let session = sessions
             .iter()
             .find(|s| s.agent_id == "gemini-cli")
             .expect("the real user turn must keep the session listed");
         assert_eq!(session.first_message, "real question");
-        assert_eq!(session.message_count, 2);
+        assert_eq!(session.message_count, 1);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -976,9 +1015,8 @@ mod tests {
 
     #[test]
     fn test_discover_local_sessions_no_home() {
-        // SAFETY: single-threaded test, no other thread reads HOME.
-        unsafe { std::env::set_var("HOME", "/nonexistent/path/that/does/not/exist") };
-        let sessions = discover_local_sessions();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = discover_test_sessions(&dir.path().join("missing"));
         assert!(sessions.is_empty());
     }
 
@@ -1170,5 +1208,98 @@ mod tests {
         assert!(parse_session_file(&file, codex_source(), "(default)").is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+// R12 regression tests
+#[cfg(test)]
+mod r12_gemini_preview {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn preview(events: &[Value]) -> Option<LocalSession> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let content = events
+            .iter()
+            .map(|event| format!("{event}\n"))
+            .collect::<String>();
+        fs::write(&path, content).unwrap();
+        let source = SESSION_SOURCES
+            .iter()
+            .find(|source| source.agent_id == "gemini-cli")
+            .unwrap();
+        parse_session_file(&path, source, "project")
+    }
+    fn metadata() -> Value {
+        json!({"sessionId":"session","projectHash":"project"})
+    }
+    fn user(id: &str, text: &str) -> Value {
+        json!({"id":id,"type":"user","content":text})
+    }
+
+    #[test]
+    fn rewound_user_is_not_the_preview_or_count() {
+        let session = preview(&[
+            metadata(),
+            user("old", "discarded request"),
+            json!({"id":"a","type":"gemini","content":"discarded answer"}),
+            json!({"$rewindTo":"old"}),
+            user("new", "replacement request"),
+        ])
+        .unwrap();
+        assert_eq!(session.first_message, "replacement request");
+        assert_eq!(session.message_count, 1);
+        assert_eq!(session.session_id, "session");
+    }
+
+    #[test]
+    fn patches_sets_and_upserts_match_visible_conversation() {
+        for correction in [
+            json!({"$patch":{"id":"u","content":"updated"}}),
+            json!({"$set":{"messages":[user("u","updated")]}}),
+            user("u", "updated"),
+        ] {
+            let session = preview(&[metadata(), user("u", "stale"), correction]).unwrap();
+            assert_eq!(session.first_message, "updated");
+            assert_eq!(session.message_count, 1);
+        }
+    }
+
+    #[test]
+    fn empty_or_context_only_replay_disappears() {
+        for correction in [
+            json!({"$rewindTo":"u"}),
+            json!({"$set":{"messages":[]}}),
+            json!({"$patch":{"removeIds":["u"]}}),
+            json!({"$patch":{"id":"u","content":"<session_context>private</session_context>"}}),
+        ] {
+            assert!(preview(&[metadata(), user("u", "stale"), correction]).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_json_is_discovered_and_previews_whole_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let document = json!({"sessionId":"legacy","projectHash":"p","messages":[user("u","legacy request")],"custom":["scalar"]});
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+        let source = SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "gemini-cli")
+            .unwrap();
+        let mut sessions = Vec::new();
+        scan_project_dir(dir.path(), source, "project", &mut sessions);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].first_message, "legacy request");
+        assert_eq!(sessions[0].session_id, "legacy");
+        assert_eq!(sessions[0].message_count, 1);
+        let other = SESSION_SOURCES
+            .iter()
+            .find(|s| s.agent_id == "claude-code")
+            .unwrap();
+        let mut foreign = Vec::new();
+        scan_project_dir(dir.path(), other, "project", &mut foreign);
+        assert!(foreign.is_empty(), "JSON support is scoped to Gemini");
     }
 }
