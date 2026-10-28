@@ -552,7 +552,7 @@ test('conversation-list: session disclosure and time presets expose accessible s
   for (const effect of rendered.effects) effect();
   calls.fetchAgentNames[0].resolve([]);
   calls.fetchSessions[0].resolve([{
-    session_id: '00000000-0000-0000-0000-000000000001',
+    session_id: 'customer session 1',
     conversation_count: 1,
     first_seen_ns: 1,
     last_seen_ns: 2,
@@ -581,7 +581,8 @@ test('conversation-list: session disclosure and time presets expose accessible s
     .filter((node) => /^common\.last(?:1h|6h|24h|7d)$/.test(nodeText(node)));
   let buttons = presets(rendered.element);
   assert.equal(buttons.length, 4);
-  for (const button of buttons) assert.equal(button.props['aria-pressed'], false);
+  assert.deepEqual(buttons.map((button) => button.props['aria-pressed']), [false, false, true, false],
+    'the default last-24-hours range must expose its selected preset');
 
   buttons[0].props.onClick();
   rendered = driver.render(page.ConversationList);
@@ -600,8 +601,9 @@ test('conversation-list: session disclosure and time presets expose accessible s
   assert.ok(disclosure, 'the session ID must be a native disclosure button');
   assert.equal(disclosure.props.type, 'button');
   assert.equal(disclosure.props['aria-expanded'], false);
-  assert.ok(disclosure.props['aria-label'].includes('00000000-0000-0000-0000-000000000001'));
-  assert.ok(disclosure.props['aria-controls']);
+  assert.ok(disclosure.props['aria-label'].includes('customer session 1'));
+  assert.match(disclosure.props['aria-controls'], /^session-details-\d+$/,
+    'the controlled ID must remain a single DOM-safe IDREF for arbitrary session IDs');
   assert.equal(collectElements(disclosure, (node) => node.props?.['aria-hidden'] === 'true').length, 1,
     'the decorative expansion arrow must be hidden from assistive technology');
 

@@ -694,14 +694,20 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
   // Restore state from URL params (set when navigating to detail page)
   const now = Date.now();
-  const initStart = Number(searchParams.get('start')) || (now - 24 * 3600 * 1000);
-  const initEnd   = Number(searchParams.get('end'))   || now;
+  const defaultPresetMs = 24 * 3600 * 1000;
+  const restoredStart = Number(searchParams.get('start'));
+  const restoredEnd = Number(searchParams.get('end'));
+  const hasCustomTimeRange = Boolean(restoredStart || restoredEnd);
+  const initStart = restoredStart || (now - defaultPresetMs);
+  const initEnd   = restoredEnd || now;
   const initAgent = searchParams.get('agent') ?? '';
 
   // Time range state
   const [startMs, setStartMs] = useState(initStart);
   const [endMs, setEndMs] = useState(initEnd);
-  const [activePresetMs, setActivePresetMs] = useState<number | null>(null);
+  const [activePresetMs, setActivePresetMs] = useState<number | null>(
+    hasCustomTimeRange ? null : defaultPresetMs,
+  );
 
   // Agent name filter
   const [agentNames, setAgentNames] = useState<string[]>([]);
@@ -1204,9 +1210,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                   {(() => {
                     const sessionTotalPages = Math.max(1, Math.ceil(sessions.length / SESSION_PAGE_SIZE));
                     const pageSessions = sessions.slice(sessionPage * SESSION_PAGE_SIZE, (sessionPage + 1) * SESSION_PAGE_SIZE);
-                    return pageSessions.map((sess) => {
+                    return pageSessions.map((sess, rowIndex) => {
                     const isExpanded = expandedSession === sess.session_id;
-                    const detailsId = `session-details-${sess.session_id}`;
+                    const detailsId = `session-details-${sessionPage * SESSION_PAGE_SIZE + rowIndex}`;
                     return (
                       <React.Fragment key={sess.session_id}>
                         {/* Session row */}
