@@ -5,10 +5,10 @@
 # arrives or a worker fails, and both cases are handled explicitly below.
 
 start_workers() {
-    agentsight trace &
+    @AGENTSIGHT_COMMAND@ trace@CONFIG_ARGUMENT@ &
     TRACE_PID=$!
 
-    agentsight serve --host 0.0.0.0 &
+    @AGENTSIGHT_COMMAND@ serve --host 0.0.0.0@CONFIG_ARGUMENT@ &
     SERVE_PID=$!
 }
 

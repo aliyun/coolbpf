@@ -6,7 +6,7 @@
 # for RPM package building.
 #
 # Usage:
-#   ./scripts/rpm-build.sh [options]
+#   ./packaging/rpm/rpm-build.sh [options]
 #
 # Options:
 #   -v, --version VERSION    Specify version (default: from Cargo.toml)
@@ -18,8 +18,8 @@
 #   2. Build the AgentSight binary and attested ActPlane enforcer
 #   3. Create a tarball: agentsight-<version>.tar.gz
 #   4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
-#      both systemd units, component.toml, agentsight.json, README.md,
-#      README_zh.md, LICENSE
+#      both systemd units, agentsight.json, README.md,
+#      README_zh.md, LICENSE, dsh-plugin/
 # =============================================================================
 
 set -e
@@ -29,7 +29,7 @@ set -e
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="${PROJECT_ROOT}/rpm-sources"
 
 # Default version from Cargo.toml
@@ -55,8 +55,8 @@ The script will:
     2. Build the AgentSight binary and attested ActPlane enforcer
     3. Create a tarball: agentsight-<version>.tar.gz
     4. The tarball contains: agentsight, agentsight-enforcer, agentsight-start,
-       both systemd units, component.toml, agentsight.json, README.md,
-       README_zh.md, LICENSE
+       both systemd units, agentsight.json, README.md,
+       README_zh.md, LICENSE, dsh-plugin/
 
 Example:
     $(basename "$0")                    # Build with default version
@@ -150,12 +150,15 @@ fi
 
 log_info "Binary built successfully"
 
+# The optional plugin has its own RPM, assembled from prebuilt runtime files.
+make build-dsh-plugin
+
 # Step 2: Prepare tarball contents
 TARBALL_NAME="agentsight-${VERSION}"
 TARBALL_DIR="${OUTPUT_DIR}/${TARBALL_NAME}"
 
 log_info "Preparing tarball contents..."
-ENFORCER_BIN="$ENFORCER_BIN" ./scripts/stage-rpm-payload.sh "$TARBALL_DIR"
+ENFORCER_BIN="$ENFORCER_BIN" ./packaging/rpm/stage-rpm-payload.sh "$TARBALL_DIR"
 
 log_info "Files prepared in: $TARBALL_DIR"
 
