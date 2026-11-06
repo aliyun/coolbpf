@@ -292,6 +292,12 @@ impl Probes {
             return Ok(());
         }
         if !self.sslsniff.has_process_attachments(pid as u32) {
+            // A queued scan has no attachment yet. Retain the pid so the
+            // completion path can claim a filter slot once the uprobes are
+            // actually installed.
+            if self.sslsniff.pid_has_pending_scan(pid as u32) {
+                self.sslsniff.defer_pid_admission(pid as u32);
+            }
             return Ok(());
         }
         self.add_traced_pid(pid as u32)
@@ -303,6 +309,23 @@ impl Probes {
             .attach_process(pid)
             .context("failed to attach sslsniff to process")?;
         Ok(())
+    }
+
+    /// Complete deferred SSL scans without blocking event consumption.
+    pub(crate) fn poll_pending_ssl(&mut self) {
+        for pid in self.sslsniff.poll_pending_scans() {
+            // The completion path only returns pids it observed alive while
+            // holding the pending admission. Registration can still race with
+            // exit; the filter reaper handles that residual case.
+            if let Err(error) = self.add_traced_pid(pid) {
+                log::error!("failed to register pid {pid} after deferred SSL attach: {error:#}");
+            }
+        }
+    }
+
+    /// Share CPU admission with the bounded executable scan worker.
+    pub(crate) fn set_cpu_budget(&self, budget: Option<Arc<crate::utils::cpu_budget::CpuBudget>>) {
+        self.sslsniff.set_cpu_budget(budget);
     }
 
     /// Start polling for events from the shared ring buffer
