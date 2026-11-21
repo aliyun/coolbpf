@@ -687,12 +687,20 @@ impl GenAIBuilder {
         // shared part merger below.
         for event in sse_events {
             if let Some(json) = event.json_body() {
-                // Extract model from first chunk that has it
+                // Extract model from first chunk that has it (Gemini spells it
+                // `modelVersion`).
                 if model.is_none() {
-                    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
-                        if !m.is_empty() {
-                            model = Some(m.to_string());
-                        }
+                    let m = json
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .filter(|m| !m.is_empty())
+                        .or_else(|| {
+                            json.get("modelVersion")
+                                .and_then(|v| v.as_str())
+                                .filter(|m| !m.is_empty())
+                        });
+                    if let Some(m) = m {
+                        model = Some(m.to_string());
                     }
                 }
                 // Anthropic nests the model inside message_start's message
@@ -728,8 +736,17 @@ impl GenAIBuilder {
                     let id = json
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .or_else(|| json.pointer("/message/id").and_then(|v| v.as_str()))
-                        .filter(|id| !id.is_empty());
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| {
+                            json.get("responseId")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        })
+                        .or_else(|| {
+                            json.pointer("/message/id")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| !id.is_empty())
+                        });
                     if let Some(id) = id {
                         trace_id = Some(id.to_string());
                     }
@@ -1470,6 +1487,25 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].parts.is_empty());
         assert_eq!(messages[0].finish_reason.as_deref(), Some("SAFETY"));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_extracts_gemini_model_version_and_response_id() {
+        let events = vec![make_sse_event(
+            r#"{"candidates":[{"content":{"parts":[{"text":"partial answer"}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_gemini_123"}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment");
+        assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_123"));
+
+        // Empty primary `model` / `id` strings must still fall back to `modelVersion` / `responseId`.
+        let empty_primary = vec![make_sse_event(
+            r#"{"model":"","id":"","candidates":[{"content":{"parts":[{"text":"partial answer"}]}}],"modelVersion":"gemini-2.5-pro","responseId":"resp_gemini_456"}"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&empty_primary)
+            .expect("enrichment with empty primary fields");
+        assert_eq!(enrichment.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(enrichment.trace_id.as_deref(), Some("resp_gemini_456"));
     }
 
     #[test]
