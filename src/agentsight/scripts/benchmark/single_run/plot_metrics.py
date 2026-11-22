@@ -14,10 +14,13 @@ import html
 import json
 import math
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from benchmark_stats import counter_increase
 from check_resource_limits import LIMITS
 
 MIB = 1024.0 * 1024.0
@@ -351,22 +354,31 @@ def downsample(
     series: Sequence[Sequence[float | None]],
     max_points: int,
 ) -> list[int]:
-    """Keep first/last and per-bucket extrema so spikes survive the reduction."""
+    """Keep a shared set of display points within the requested budget."""
     count = len(times)
+    if max_points < 1:
+        raise ValueError("max_points must be positive")
     if count <= max_points:
         return list(range(count))
-    step = max(1.0, count / max_points)
+    if max_points == 1:
+        return [count - 1]
+
+    # Reserve both endpoints and up to two extrema per series and bucket.
+    bucket_count = (max_points - 2) // (2 * max(1, len(series)))
+    if bucket_count == 0:
+        return [index * (count - 1) // (max_points - 1) for index in range(max_points)]
+
     keep: set[int] = {0, count - 1}
-    start = 0
-    while start < count:
-        end = min(count, max(start + 1, int(round(start + step))))
+    interior_count = count - 2
+    for bucket in range(bucket_count):
+        start = 1 + bucket * interior_count // bucket_count
+        end = 1 + (bucket + 1) * interior_count // bucket_count
         for values in series:
             window = [index for index in range(start, end) if values[index] is not None]
             if not window:
                 continue
             keep.add(min(window, key=lambda index: values[index]))
             keep.add(max(window, key=lambda index: values[index]))
-        start = end
     return sorted(keep)
 
 
@@ -467,7 +479,7 @@ def build_chart(
         y_max = ticks[-1]
         y_min = -y_max
 
-    valid_times = [time for time in chart_times if time is not None]
+    valid_times = [time for time in times if time is not None]
     x_min = min(valid_times) if valid_times else 0.0
     x_max = max(valid_times) if valid_times else 1.0
     if x_max <= x_min:
@@ -576,31 +588,27 @@ def build_chart(
             f"{html.escape(text)}</text>"
         )
 
-    if trend and len(reduced) == 1:
-        source_times = chart_times
-        source_values = reduced[0].values
-        if trend_from is not None:
-            subset = [
-                (time, value)
-                for time, value in zip(chart_times, reduced[0].values)
-                if time is not None and value is not None and time >= trend_from
-            ]
-            if len(subset) >= 2:
-                source_times = [time for time, _ in subset]
-                source_values = [value for _, value in subset]
-        fit = slope_per_hour(source_times, source_values)
-        first = first_value(source_values)
-        first_time = next((time for time in source_times if time is not None), None)
-        last_time = next((time for time in reversed(source_times) if time is not None), None)
-        if fit is not None and first is not None and first_time is not None and last_time is not None:
-            start_x = x_of(first_time)
-            end_x = x_of(last_time)
-            start_y = y_of(first)
-            end_y = y_of(first + fit * (last_time - first_time) / 3600.0)
-            parts.append(
-                f'<line class="trend" x1="{start_x:.1f}" y1="{start_y:.1f}" '
-                f'x2="{end_x:.1f}" y2="{end_y:.1f}"/>'
-            )
+    if trend and len(plots) == 1:
+        points = [
+            (time, value)
+            for time, value in zip(times, plots[0].values)
+            if time is not None
+            and value is not None
+            and (trend_from is None or time >= trend_from)
+        ]
+        if len(points) >= 2:
+            source_times, source_values = zip(*points)
+            fit = slope_per_hour(source_times, source_values)
+            if fit is not None:
+                first_time, start_value = points[0]
+                last_time = points[-1][0]
+                start_x, end_x = x_of(first_time), x_of(last_time)
+                start_y = y_of(start_value)
+                end_y = y_of(start_value + fit * (last_time - first_time) / 3600.0)
+                parts.append(
+                    f'<line class="trend" x1="{start_x:.1f}" y1="{start_y:.1f}" '
+                    f'x2="{end_x:.1f}" y2="{end_y:.1f}"/>'
+                )
 
     for index, plot in enumerate(reduced):
         parts.append(
@@ -670,13 +678,10 @@ def kpi(
 
 
 def counter_delta(values: Sequence[float | None] | None) -> float | None:
-    if not values:
+    if values is None:
         return None
-    first = first_value(values)
-    last = last_value(values)
-    if first is None or last is None:
-        return None
-    return max(0.0, last - first)
+    observed = [value for value in values if value is not None]
+    return counter_increase(observed) if observed else None
 
 
 def read_text_file(path: Path) -> str:
@@ -953,16 +958,24 @@ def warmup_slope(
     ]
     if len(pairs) < 2:
         return None, [], []
-    post_slope = slope_per_hour([time for time, _ in pairs], [value for _, value in pairs])
+    sample_times, sample_values = zip(*pairs)
+    post_slope = slope_per_hour(sample_times, sample_values)
+    chronological = all(left <= right for left, right in pairwise(sample_times))
     rolling_times: list[float] = []
     rolling_values: list[float] = []
-    for time, _ in pairs:
+    for time in sample_times:
         if time < warmup + window:
             continue
-        subset = [(a, b) for a, b in pairs if time - window <= a <= time]
+        if chronological:
+            first = bisect_left(sample_times, time - window)
+            stop = bisect_right(sample_times, time)
+            subset = pairs[first:stop]
+        else:
+            subset = [(a, b) for a, b in pairs if time - window <= a <= time]
         if len(subset) < 3:
             continue
-        value = slope_per_hour([a for a, _ in subset], [b for _, b in subset])
+        window_times, window_values = zip(*subset)
+        value = slope_per_hour(window_times, window_values)
         if value is not None:
             rolling_times.append(time)
             rolling_values.append(value)

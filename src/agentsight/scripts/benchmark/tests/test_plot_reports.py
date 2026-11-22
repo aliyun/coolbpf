@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,38 @@ def test_warmup_slope_excludes_future_samples() -> None:
     _, rolling_times, rolling_values = warmup_slope(times, values, 0.0, 2.0)
     at_two = dict(zip(rolling_times, rolling_values))[2.0]
     assert at_two == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(("warmup", "has_trend"), [(3, True), (19, False)])
+def test_rss_trend_uses_full_post_warmup_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warmup: int, has_trend: bool
+) -> None:
+    import plot_metrics
+
+    rss = [
+        40, 20, 26, 26, 26, 26, 26, 23, 28, 26,
+        26, 26, 26, 26, 27, 26, 26, 50, 26, 26,
+    ]
+    metrics = tmp_path / "metrics.csv"
+    metrics.write_text(
+        "monotonic_timestamp,rss_mb\n"
+        + "".join(f"{time},{value}\n" for time, value in enumerate(rss)),
+        encoding="utf-8",
+    )
+    output = tmp_path / "metrics-report.html"
+    trends = []
+    for max_points in (2, len(rss)):
+        argv = [
+            "plot_metrics.py", str(metrics), "--output", str(output),
+            "--max-points", str(max_points), "--warmup-seconds", str(warmup),
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        plot_metrics.render(plot_metrics.parse_args())
+        html = output.read_text(encoding="utf-8")
+        trends.append(re.findall(r'<line class="trend"[^>]*>', html))
+
+    assert trends[0] == trends[1]
+    assert len(trends[0]) == int(has_trend)
 
 
 def test_align_series_handles_unequal_and_irregular_timelines() -> None:
@@ -66,6 +99,42 @@ def test_make_chart_handles_unequal_timelines() -> None:
     }
     svg = make_chart("ab-rss", "RSS", baseline, optimized, "rss_mb", "MiB", 350.0, 0.0, 700)
     assert "<svg" in svg
+
+
+def test_chart_honors_the_point_budget_for_all_series() -> None:
+    from plot_metrics import PlotSeries, build_chart
+
+    times = [float(index) for index in range(2800)]
+    baseline = times.copy()
+    optimized = times.copy()
+    baseline[1000], baseline[1520] = 50_000.0, -50_000.0
+    optimized[500], optimized[2200] = -40_000.0, 40_000.0
+    plots = [
+        PlotSeries("Baseline", "MiB", "blue", "--series-1", baseline),
+        PlotSeries("Optimized", "MiB", "green", "--series-2", optimized),
+    ]
+
+    _, chart = build_chart("rss", "RSS", times, plots, None, False, 700)
+
+    assert len(chart["t"]) <= 700
+    assert chart["t"][0] == times[0]
+    assert chart["t"][-1] == times[-1]
+    for reduced, original in zip(chart["series"], (baseline, optimized)):
+        assert len(reduced["v"]) == len(chart["t"])
+        assert min(reduced["v"]) == min(original)
+        assert max(reduced["v"]) == max(original)
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected"), [(1, [5]), (2, [0, 5]), (3, [0, 2, 5])]
+)
+def test_downsample_preserves_timeline_coverage_for_small_budgets(
+    budget: int, expected: list[int]
+) -> None:
+    from plot_metrics import downsample
+
+    times = [float(index) for index in range(6)]
+    assert downsample(times, [times, times[::-1]], budget) == expected
 
 
 @pytest.mark.parametrize(
@@ -259,3 +328,22 @@ def test_run_sh_passes_metrics_args_to_validator() -> None:
     assert "--metrics-file" in block
     assert "--metrics-baseline" in block
     assert "internal-metrics-baseline.prom" in block
+
+
+@pytest.mark.parametrize(
+    ("times", "expected_times"),
+    [
+        ([0.0, 1.0, 1.0, 2.0, 3.0], [1.0, 1.0, 2.0]),
+        ([2.0, 3.0, 0.0, 1.0, 1.0], [2.0, 1.0, 1.0]),
+    ],
+)
+def test_rolling_rss_slope_keeps_both_window_boundaries(
+    times: list[float], expected_times: list[float]
+) -> None:
+    from plot_metrics import warmup_slope
+
+    values = [100.0 + 3.0 * time for time in times]
+    _, rolling_times, slopes = warmup_slope(times, values, 0.0, 1.0)
+
+    assert rolling_times == expected_times
+    assert slopes == pytest.approx([10800.0, 10800.0, 10800.0])
