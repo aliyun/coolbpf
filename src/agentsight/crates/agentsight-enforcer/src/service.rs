@@ -1,5 +1,6 @@
 //! Unix-domain socket service for the enforcement protocol.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::BufReader;
 use std::os::fd::AsRawFd;
@@ -7,7 +8,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -46,10 +47,15 @@ pub struct EnforcerService<B: EnforcementBackend> {
 #[derive(Default)]
 struct RequiredSubscriptions {
     current: Mutex<Option<RequiredSubscription>>,
+    /// Tracks the latest active registration generation per `subscription_id`
+    /// so cleanup from a superseded connection never unsubscribes a replacement.
+    generations: Mutex<HashMap<Uuid, u64>>,
+    next_generation: AtomicU64,
 }
 
 struct RequiredSubscription {
     id: Uuid,
+    generation: u64,
     stream: UnixStream,
 }
 
@@ -163,26 +169,98 @@ fn prepare_socket_path(socket_path: &Path) -> Result<(), std::io::Error> {
 }
 
 impl RequiredSubscriptions {
+    fn begin<B: EnforcementBackend>(
+        &self,
+        backend: &B,
+        id: Uuid,
+        class: SubscriberClass,
+        stream: &UnixStream,
+    ) -> Result<
+        (
+            u64,
+            Receiver<agentsight_enforcement_protocol::ViolationEvent>,
+        ),
+        std::io::Error,
+    > {
+        let cloned_stream = if class == SubscriberClass::Required {
+            Some(stream.try_clone()?)
+        } else {
+            None
+        };
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut generations = self.generations();
+        generations.insert(id, generation);
+        let receiver = backend.subscribe(id, class);
+        if let Some(cloned_stream) = cloned_stream {
+            let previous = self.current().replace(RequiredSubscription {
+                id,
+                generation,
+                stream: cloned_stream,
+            });
+            if let Some(previous) = previous
+                && previous.id != id
+                && generations.get(&previous.id).copied() == Some(previous.generation)
+            {
+                generations.remove(&previous.id);
+                backend.unsubscribe(previous.id);
+            }
+        }
+        Ok((generation, receiver))
+    }
+
+    fn finish<B: EnforcementBackend>(
+        &self,
+        backend: &B,
+        id: Uuid,
+        generation: u64,
+        class: SubscriberClass,
+    ) {
+        {
+            let mut generations = self.generations();
+            if generations.get(&id).copied() == Some(generation) {
+                generations.remove(&id);
+                backend.unsubscribe(id);
+            }
+        }
+        if class == SubscriberClass::Required {
+            self.remove_if_current(id, generation);
+        }
+    }
+
+    fn remove_if_current(&self, id: Uuid, generation: u64) {
+        let mut current = self.current();
+        if current
+            .as_ref()
+            .is_some_and(|entry| entry.id == id && entry.generation == generation)
+        {
+            *current = None;
+        }
+    }
+
+    fn is_current(&self, id: Uuid, generation: u64) -> bool {
+        self.current()
+            .as_ref()
+            .is_some_and(|entry| entry.id == id && entry.generation == generation)
+    }
+
+    fn generations(&self) -> MutexGuard<'_, HashMap<Uuid, u64>> {
+        self.generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
     fn install(&self, id: Uuid, stream: &UnixStream) -> Result<Option<Uuid>, std::io::Error> {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let replacement = RequiredSubscription {
             id,
+            generation,
             stream: stream.try_clone()?,
         };
         Ok(self
             .current()
             .replace(replacement)
             .map(|previous| previous.id))
-    }
-
-    fn remove_if_current(&self, id: Uuid) {
-        let mut current = self.current();
-        if current.as_ref().is_some_and(|entry| entry.id == id) {
-            *current = None;
-        }
-    }
-
-    fn is_current(&self, id: Uuid) -> bool {
-        self.current().as_ref().is_some_and(|entry| entry.id == id)
     }
 
     fn with_current<T>(
@@ -457,21 +535,8 @@ fn serve_subscription<B: EnforcementBackend>(
     subscription_id: Uuid,
     class: SubscriberClass,
 ) -> Result<(), ProtocolError> {
-    let receiver = backend.subscribe(subscription_id, class);
-    if class == SubscriberClass::Required {
-        let previous = match required_subscriptions.install(subscription_id, &stream) {
-            Ok(previous) => previous,
-            Err(error) => {
-                backend.unsubscribe(subscription_id);
-                return Err(error.into());
-            }
-        };
-        if let Some(previous) = previous
-            && previous != subscription_id
-        {
-            backend.unsubscribe(previous);
-        }
-    }
+    let (generation, receiver) =
+        required_subscriptions.begin(&*backend, subscription_id, class, &stream)?;
 
     let result = stream_subscription(
         &mut stream,
@@ -479,17 +544,17 @@ fn serve_subscription<B: EnforcementBackend>(
         &required_subscriptions,
         request_id,
         subscription_id,
+        generation,
         class,
     );
-    backend.unsubscribe(subscription_id);
     if class == SubscriberClass::Required {
         let queued_events = receiver
             .try_iter()
             .fold(0_u64, |count, _| count.saturating_add(1));
         let failed_write = result.as_ref().copied().unwrap_or(0);
         backend.record_required_delivery_loss(queued_events.saturating_add(failed_write));
-        required_subscriptions.remove_if_current(subscription_id);
     }
+    required_subscriptions.finish(&*backend, subscription_id, generation, class);
     result.map(|_| ())
 }
 
@@ -499,6 +564,7 @@ fn stream_subscription(
     required_subscriptions: &RequiredSubscriptions,
     request_id: Uuid,
     subscription_id: Uuid,
+    generation: u64,
     class: SubscriberClass,
 ) -> Result<u64, ProtocolError> {
     write_frame(
@@ -506,7 +572,8 @@ fn stream_subscription(
         &success_response(request_id, ResponseBody::Subscribed),
     )?;
     loop {
-        if class == SubscriberClass::Required && !required_subscriptions.is_current(subscription_id)
+        if class == SubscriberClass::Required
+            && !required_subscriptions.is_current(subscription_id, generation)
         {
             return Ok(0);
         }
@@ -514,7 +581,7 @@ fn stream_subscription(
             Ok(event) => {
                 if !peer_is_connected(stream)?
                     || (class == SubscriberClass::Required
-                        && !required_subscriptions.is_current(subscription_id))
+                        && !required_subscriptions.is_current(subscription_id, generation))
                 {
                     return Ok(u64::from(class == SubscriberClass::Required));
                 }
@@ -1233,5 +1300,74 @@ mod tests {
         ));
         assert_eq!(remote.code, "unsupported_environment");
         assert!(remote.message.contains("pid-ns container"));
+    }
+
+    #[test]
+    fn mixed_class_subscription_reuse_preserves_observer_when_next_required_replaces_stale_previous()
+     {
+        let backend = MockBackend::new();
+        let apply = replacement_policy().expected.request;
+        backend
+            .apply(apply.clone())
+            .expect("fixture policy should apply");
+        let subscriptions = RequiredSubscriptions::default();
+        let (stream_a, _peer_a) = UnixStream::pair().expect("fixture socket pair should open");
+        let (stream_b, _peer_b) = UnixStream::pair().expect("fixture socket pair should open");
+        let (stream_c, _peer_c) = UnixStream::pair().expect("fixture socket pair should open");
+
+        let shared_id = Uuid::new_v4();
+        let next_required_id = Uuid::new_v4();
+
+        // Required A registers `shared_id`, then BestEffort B reuses `shared_id`
+        // (advancing `generations[shared_id]` while `current` still holds A's
+        // stale entry until A's thread finishes), and Required C registers
+        // `next_required_id` before A runs `finish`.
+        let (gen_a, _rx_a) = subscriptions
+            .begin(&backend, shared_id, SubscriberClass::Required, &stream_a)
+            .expect("required A should begin");
+        let (_gen_b, rx_b) = subscriptions
+            .begin(&backend, shared_id, SubscriberClass::BestEffort, &stream_b)
+            .expect("best-effort B should begin");
+        let (gen_c, rx_c) = subscriptions
+            .begin(
+                &backend,
+                next_required_id,
+                SubscriberClass::Required,
+                &stream_c,
+            )
+            .expect("required C should begin");
+        subscriptions.finish(&backend, shared_id, gen_a, SubscriberClass::Required);
+
+        assert!(subscriptions.is_current(next_required_id, gen_c));
+        let violation = ViolationEvent {
+            event_id: Uuid::new_v4(),
+            binding_id: apply.binding_id,
+            agent_id: apply.agent_id,
+            session_id: apply.session_id,
+            policy_id: apply.policy_id,
+            policy_revision: apply.policy_revision,
+            pid: apply.root_pid,
+            ppid: Some(1),
+            process_start_time: apply.process_start_time,
+            operation: "open".into(),
+            target: "/tmp/secret".into(),
+            effect: agentsight_enforcement_protocol::Effect::Block,
+            blocked: true,
+            killed: false,
+            rule_id: Some("block-secret".into()),
+            reason: Some("fixture mixed-class subscription reuse".into()),
+            occurred_at_ns: 100,
+            observed_at_ns: 101,
+            actplane_revision: "mock".into(),
+        };
+        backend
+            .publish_violation(violation.clone())
+            .expect("violation should publish");
+        assert_eq!(rx_c.try_recv(), Ok(violation.clone()));
+        assert_eq!(
+            rx_b.try_recv(),
+            Ok(violation),
+            "evicting stale required A must not unsubscribe active best-effort B on the same id"
+        );
     }
 }
