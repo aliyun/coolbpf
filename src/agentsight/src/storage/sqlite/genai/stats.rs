@@ -387,9 +387,9 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call' AND status = 'complete'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE"
+               AND COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE = ?3 COLLATE NOCASE"
         } else {
-            "SELECT COALESCE(agent_name, process_name) AS agent_name,
+            "SELECT COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) AS agent_name,
                     start_timestamp_ns, end_timestamp_ns,
                     first_output_timestamp_ns, output_tokens, is_sse
              FROM genai_events
@@ -490,7 +490,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
+               AND COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx
              ORDER BY bucket_idx ASC"
             )
@@ -596,7 +596,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?4 COLLATE NOCASE
+               AND COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), '')) COLLATE NOCASE = ?4 COLLATE NOCASE
              GROUP BY bucket_idx, COALESCE(model, 'unknown') COLLATE NOCASE
              ORDER BY bucket_idx ASC"
             )
@@ -684,17 +684,17 @@ impl GenAISqliteStore {
 
     /// Return per-agent token usage aggregated over all recorded history.
     ///
-    /// Groups by `COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE`
-    /// so that every LLM call is attributed to some label even when agent_name
-    /// is NULL, and case variants of one agent stay a single series — the same
-    /// rule `list_agent_activity_summaries` and the latency metrics use. The
+    /// Groups by `COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''), 'unknown') COLLATE NOCASE`
+    /// so that every LLM call is attributed to some label even when `agent_name`
+    /// is NULL or blank, and case variants of one agent stay a single series —
+    /// the same rule `list_agent_activity_summaries` and the latency metrics use. The
     /// reported label is the group's `MIN` for a stable spelling.
     pub fn get_agent_token_summary(
         &self,
     ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(concat!(
-            "SELECT MIN(COALESCE(agent_name, process_name, 'unknown')) AS agent,
+            "SELECT MIN(COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''), 'unknown')) AS agent,
                     COALESCE(SUM(",
             billed_input_col!(),
             "), 0)      AS input_tokens,
@@ -705,7 +705,7 @@ impl GenAISqliteStore {
                     COUNT(*)                        AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
-             GROUP BY COALESCE(agent_name, process_name, 'unknown') COLLATE NOCASE
+             GROUP BY COALESCE(NULLIF(TRIM(agent_name), ''), NULLIF(TRIM(process_name), ''), 'unknown') COLLATE NOCASE
              ORDER BY total_tokens DESC"
         ))?;
         let rows = stmt.query_map([], |row| {
