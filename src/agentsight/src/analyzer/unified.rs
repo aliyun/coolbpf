@@ -33,7 +33,7 @@ use crate::tokenizer::LlmTokenizer;
 use crate::tokenizer::get_global_tokenizer;
 
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
-use super::token::merge_usage_from_event;
+use super::token::{UsageFoldState, merge_usage_from_event};
 use super::{
     AnalysisResult, AuditAnalyzer, HttpContext, HttpRecord, MessageParser, ParsedApiMessage,
     TokenParser, TokenRecord, TokenUsage,
@@ -811,15 +811,16 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let mut usage = sse_events.iter().fold(None, |usage, event| {
+        let mut state = UsageFoldState::default();
+        for event in sse_events {
             let Some(parsed) = self.token.parse_event(event) else {
-                return usage;
+                continue;
             };
             match event.json_body() {
-                Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
-                None => crate::analyzer::token::merge_usage(usage, parsed),
+                Some(event_json) => state.merge_from_event(parsed, &event_json),
+                None => state.merge_unframed(parsed),
             }
-        });
+        }
 
         // The continuation buffer holds the bytes of events a TLS record split,
         // and a split event produces no `ParsedSseEvent` of its own. Its usage
@@ -829,63 +830,10 @@ impl Analyzer {
         // counters and a placeholder `output_tokens` of 1, the terminal
         // `message_delta` carries the final usage), so a split that lands on
         // the terminal event left preliminary counts in place while the bytes
-        // that would correct them sat unread in the same call. The event merge
-        // preserves cumulative counters and honors explicit final Anthropic
-        // input/cache values.
-        if let Some(extra) = continuation_bytes {
-            // Re-parse with the legacy SSEParser, which concatenates
-            // multi-line `data:` fields — what the OpenAI Responses API's
-            // final `response.completed` event needs when its payload exceeds
-            // a single record.
-            let text = String::from_utf8_lossy(extra);
-            let reassembled = SSEParser::parse_stream(&text);
-            // Any bytes after the last blank line — whether an incomplete line
-            // in `reassembled.remaining` or complete lines of an un-terminated
-            // frame ending at `\n` — were never emitted into `reassembled.events`.
-            // Frame that un-emitted tail first as `data:` events, and otherwise
-            // scan only that unframed tail so already-parsed events are never
-            // re-scanned while line-boundary and mid-line split tails merge.
-            let unframed_tail = unframed_sse_tail(&text);
-            let tail = (!unframed_tail.trim().is_empty())
-                .then(|| SSEParser::parse_stream(&format!("{unframed_tail}\n\n")));
-            let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
-
-            usage =
-                reassembled
-                    .events
-                    .iter()
-                    .chain(tail_events.iter())
-                    .fold(usage, |usage, event| {
-                        let parsed = self.token.parse_data(&event.data);
-                        let event_json =
-                            serde_json::from_str::<serde_json::Value>(&event.data).ok();
-                        match parsed {
-                            Some(parsed) => match event_json {
-                                Some(event_json) => {
-                                    merge_usage_from_event(usage, parsed, &event_json)
-                                }
-                                None => crate::analyzer::token::merge_usage(usage, parsed),
-                            },
-                            None => usage,
-                        }
-                    });
-
-            if !unframed_tail.trim().is_empty() && tail_events.is_empty() {
-                if let Some(parsed) = self.token.parse_data(unframed_tail) {
-                    usage = crate::analyzer::token::merge_usage(usage, parsed);
-                }
-            }
-
-            if usage.is_none() {
-                log::debug!(
-                    "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                    extra.len(),
-                    reassembled.events.len(),
-                );
-            }
-        }
-
-        let usage = usage?;
+        // that would correct them sat unread in the same call. The fold state
+        // preserves cumulative counters while locking explicit authoritative
+        // `message_delta` input/cache fields against stale continuation prefixes.
+        let usage = self.merge_continuation_usage_with_state(state, continuation_bytes)?;
 
         let record = TokenRecord::new(
             pid,
@@ -908,6 +856,64 @@ impl Analyzer {
         }
 
         Some(record)
+    }
+
+    /// Merge usage recovered from SSE TLS-split continuation bytes into `state`.
+    pub(super) fn merge_continuation_usage_with_state(
+        &self,
+        mut state: UsageFoldState,
+        continuation_bytes: Option<&[u8]>,
+    ) -> Option<TokenUsage> {
+        let Some(extra) = continuation_bytes else {
+            return state.usage;
+        };
+        let parsed_message_delta_count = state.message_delta_count;
+        let mut cont_message_delta_seen = 0usize;
+        // Re-parse with the legacy SSEParser, which concatenates
+        // multi-line `data:` fields — what the OpenAI Responses API's
+        // final `response.completed` event needs when its payload exceeds
+        // a single record.
+        let text = String::from_utf8_lossy(extra);
+        let reassembled = SSEParser::parse_stream(&text);
+        // Any bytes after the last blank line — whether an incomplete line
+        // in `reassembled.remaining` or complete lines of an un-terminated
+        // frame ending at `\n` — were never emitted into `reassembled.events`.
+        // Frame that un-emitted tail first as `data:` events, and otherwise
+        // scan only that unframed tail so already-parsed events are never
+        // re-scanned while line-boundary and mid-line split tails merge.
+        let unframed_tail = unframed_sse_tail(&text);
+        let tail = (!unframed_tail.trim().is_empty())
+            .then(|| SSEParser::parse_stream(&format!("{unframed_tail}\n\n")));
+        let tail_events = tail.as_ref().map(|t| t.events.as_slice()).unwrap_or(&[]);
+
+        for event in reassembled.events.iter().chain(tail_events.iter()) {
+            let Some(parsed) = self.token.parse_data(&event.data) else {
+                continue;
+            };
+            let event_json = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+            state.merge_continuation_event(
+                parsed,
+                event_json.as_ref(),
+                parsed_message_delta_count,
+                &mut cont_message_delta_seen,
+            );
+        }
+
+        if !unframed_tail.trim().is_empty() && tail_events.is_empty() {
+            if let Some(parsed) = self.token.parse_data(unframed_tail) {
+                state.merge_unframed(parsed);
+            }
+        }
+
+        if state.usage.is_none() {
+            log::debug!(
+                "[merge_continuation_usage] continuation buffer scan miss: len={} reassembled_events={}",
+                extra.len(),
+                reassembled.events.len(),
+            );
+        }
+
+        state.usage
     }
 
     fn extract_token_from_json_body(
