@@ -4,7 +4,9 @@
 //! Consumes shared assertions (no own LLM call). Grep runs in a blocking task.
 //! - grep miss → L2 (objective, has checker)
 //! - API claims → L4 (needs external doc knowledge, capped)
-//! - grep execution failure → assertion skipped (not reported as missing)
+//! - blank symbol or grep execution failure → assertion skipped (`CheckFailed`, not reported as missing)
+//! - `file` / `path` assertions must canonicalize strictly inside `repo_root`; `..` traversals,
+//!   external absolute paths, and symlinks resolving outside canonical `repo_root` return `NotFound`
 //! - `repo_root=None` → strategy skips gracefully.
 
 use std::path::{Path, PathBuf};
@@ -32,8 +34,11 @@ impl FactCheckStrategy {
     }
 
     fn grep_symbol(repo_root: &Path, symbol: &str, kind: &str) -> GrepOutcome {
+        if symbol.trim().is_empty() {
+            return GrepOutcome::CheckFailed;
+        }
         if matches!(kind, "file" | "path") {
-            return if repo_root.join(symbol).exists() {
+            return if Self::repo_contains_path(repo_root, symbol) {
                 GrepOutcome::Found
             } else {
                 GrepOutcome::NotFound
@@ -96,7 +101,9 @@ impl FactCheckStrategy {
                 "--include=*.xml",
                 "--include=*.md",
                 "-F",
+                "-e",
                 symbol,
+                "--",
             ])
             .arg(repo_root)
             .output();
@@ -107,6 +114,20 @@ impl FactCheckStrategy {
             Ok(out) if out.status.code() == Some(1) => GrepOutcome::NotFound,
             Ok(_) | Err(_) => GrepOutcome::CheckFailed,
         }
+    }
+
+    /// Check that `symbol` resolves strictly within canonical `repo_root`.
+    ///
+    /// Note: symlinks inside the repository that resolve outside `repo_root`
+    /// return `false` (`NotFound`) intentionally to prevent probing external files.
+    fn repo_contains_path(repo_root: &Path, symbol: &str) -> bool {
+        let Ok(root) = repo_root.canonicalize() else {
+            return false;
+        };
+        let Ok(resolved) = root.join(symbol).canonicalize() else {
+            return false;
+        };
+        resolved != root && resolved.starts_with(&root)
     }
 }
 
@@ -259,5 +280,115 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn grep_treats_leading_dash_symbols_as_literal_patterns() {
+        let test_dir = TestDir::new("agentsight-opt-factcheck-flags");
+        let dir = &test_dir.0;
+        std::fs::write(dir.join("notes.md"), "plain_text_only\n").unwrap();
+
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(dir, "--help", "api"),
+                GrepOutcome::NotFound
+            ),
+            "absent `--help` must not be reported Found via grep --help output"
+        );
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(dir, "-V", "api"),
+                GrepOutcome::NotFound
+            ),
+            "absent `-V` must not be reported Found via grep -V output"
+        );
+
+        std::fs::write(
+            dir.join("flags.rs"),
+            "const FLAG_A: &str = \"--help\";\nconst FLAG_B: &str = \"--exclude=*\";\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(dir, "--exclude=*", "api"),
+            GrepOutcome::Found
+        ));
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(dir, "--help", "api"),
+            GrepOutcome::Found
+        ));
+    }
+
+    #[test]
+    fn file_check_rejects_paths_outside_repo_root() {
+        let test_root = TestDir::new("agentsight-opt-factcheck-escape");
+        let repo = test_root.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside = test_root.0.join("outside.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::fs::write(repo.join("inside.txt"), "ok\n").unwrap();
+
+        let inside_abs = repo.join("inside.txt");
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "inside.txt", "file"),
+            GrepOutcome::Found
+        ));
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, inside_abs.to_str().unwrap(), "file"),
+                GrepOutcome::Found
+            ),
+            "absolute path inside repo_root must still report Found"
+        );
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, "../outside.txt", "file"),
+                GrepOutcome::NotFound
+            ),
+            "parent-dir escape must not report Found"
+        );
+        assert!(
+            matches!(
+                FactCheckStrategy::grep_symbol(&repo, outside.to_str().unwrap(), "path"),
+                GrepOutcome::NotFound
+            ),
+            "absolute path outside repo_root must not report Found"
+        );
+        #[cfg(unix)]
+        {
+            let symlink_escape = repo.join("escape_link.txt");
+            std::os::unix::fs::symlink(&outside, &symlink_escape).unwrap();
+            assert!(
+                matches!(
+                    FactCheckStrategy::grep_symbol(&repo, "escape_link.txt", "file"),
+                    GrepOutcome::NotFound
+                ),
+                "symlink inside repo resolving outside repo_root must not report Found"
+            );
+        }
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "   ", "api"),
+            GrepOutcome::CheckFailed
+        ));
+        assert!(matches!(
+            FactCheckStrategy::grep_symbol(&repo, "", "file"),
+            GrepOutcome::CheckFailed
+        ));
     }
 }
