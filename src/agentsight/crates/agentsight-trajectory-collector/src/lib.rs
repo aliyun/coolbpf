@@ -132,6 +132,8 @@ fn process_session(
         cline::scan_fingerprint(&session.path, &session.project, file_size, file_mtime_ns)?
     } else if session.source == "gemini-cli" {
         gemini::scan_fingerprint(&session.project, file_size, file_mtime_ns)
+    } else if session.source == "codex" {
+        codex::scan_fingerprint_v1(file_size)
     } else {
         file_size
     };
@@ -167,10 +169,11 @@ fn process_session(
     let content = String::from_utf8_lossy(&content);
     // Recognize whole-file formats before JSONL: individual pretty-printed
     // lines can be valid JSON without representing session events.
-    let mut events = gemini::legacy_document(&content)
+    let (mut events, complete) = gemini::legacy_document(&content)
         .map(|document| vec![document])
         .or_else(|| cline::record_array(&content))
-        .unwrap_or_else(|| qoder::load_jsonl_events(&content));
+        .map(|events| (events, true))
+        .unwrap_or_else(|| qoder::parse_jsonl_events(&content));
     // A compact Cline writer puts the whole array on one JSONL line.
     cline::normalize_events(&mut events);
     if events.is_empty() {
@@ -211,7 +214,11 @@ fn process_session(
         .and_then(serde_json::Value::as_array)
         .is_some_and(|results| !results.is_empty());
     if trajectory.steps.is_empty() && !has_unmatched_results {
-        if is_gemini && gemini::explicitly_cleared(&events) {
+        if is_gemini
+            && complete
+            && matches!(content, std::borrow::Cow::Borrowed(_))
+            && gemini::explicitly_cleared(&events)
+        {
             // A successful rewind can remove every turn. The previous
             // snapshot must not survive under the new file fingerprint.
             store.clear_replayed_file(&file_path, file_size, file_mtime_ns)?;
@@ -274,7 +281,8 @@ fn process_session(
         atif_json,
         project,
         source: session.source.clone(),
-        is_subagent: session.is_subagent,
+        is_subagent: session.is_subagent
+            || (session.source == "codex" && codex::is_subagent(&events)),
         file_path,
         file_size,
         file_mtime_ns,
